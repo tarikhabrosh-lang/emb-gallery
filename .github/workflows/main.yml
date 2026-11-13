@@ -13,29 +13,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
-
-      - name: Setup Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.19.0'
           channel: 'stable'
+          cache: true
 
-      - name: Get dependencies
+      - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Release APK
+      - name: Build APK
         run: flutter build apk --release
 
-      - name: Rename APK to Tarik_emb.apk
-        run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Tarik_emb.apk
-
-      - name: Upload Tarik_emb APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Tarik_emb_APK
-          path: build/app/outputs/flutter-apk/Tarik_emb.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
