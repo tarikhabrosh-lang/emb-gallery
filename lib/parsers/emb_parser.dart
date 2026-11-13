@@ -68,7 +68,7 @@ class EmbParser {
       final ole = _Ole2Reader(bytes);
       if (!ole.isValid) return null;
 
-      // 1. Extract highest-resolution TrueView & 2D Stitch preview images
+      // Extract highest resolution TrueView & 2D Stitch preview images
       _ExtractedImage? bestTrueView =
           _decodeStreamImage(ole.getStream('TRUEVIEW_ICON'));
       final _ExtractedImage? stitchView =
@@ -97,7 +97,6 @@ class EmbParser {
       final Uint8List? secondaryStitch =
           (bestTrueView != null && stitchView != null) ? stitchView.bytes : null;
 
-      // 2. Read property set (\x05WilcomDesignInformationDDD)
       int stitches = 0;
       int colors = 0;
       int jumps = 0;
@@ -185,10 +184,8 @@ class EmbParser {
 
   static _ExtractedImage? _decodeStreamImage(Uint8List? stream) {
     if (stream == null || stream.length < 16) return null;
-
     Uint8List? imgBytes;
 
-    // Case A: 4-byte uncompressed length header + Zlib stream (0x78)
     if (stream.length > 6 && stream[4] == 0x78) {
       try {
         final decoded = ZLibDecoder().convert(stream.sublist(4));
@@ -196,7 +193,6 @@ class EmbParser {
       } catch (_) {}
     }
 
-    // Case B: Direct Zlib stream starting at byte 0
     if (imgBytes == null && stream[0] == 0x78) {
       try {
         final decoded = ZLibDecoder().convert(stream);
@@ -204,9 +200,7 @@ class EmbParser {
       } catch (_) {}
     }
 
-    // Case C: Uncompressed raw JPEG/PNG/BMP inside stream
     imgBytes ??= stream;
-
     final dims = _readImageDimensions(imgBytes);
     if (dims == null) return null;
     return _ExtractedImage(imgBytes, dims.$1, dims.$2);
@@ -215,7 +209,6 @@ class EmbParser {
   static (int, int)? _readImageDimensions(Uint8List bytes) {
     if (bytes.length < 24) return null;
 
-    // PNG
     if (bytes[0] == 0x89 &&
         bytes[1] == 0x50 &&
         bytes[2] == 0x4E &&
@@ -226,7 +219,6 @@ class EmbParser {
       if (w > 0 && h > 0) return (w, h);
     }
 
-    // BMP
     if (bytes[0] == 0x42 && bytes[1] == 0x4D && bytes.length >= 26) {
       final bd = ByteData.sublistView(bytes);
       final w = bd.getInt32(18, Endian.little).abs();
@@ -234,7 +226,6 @@ class EmbParser {
       if (w > 0 && h > 0) return (w, h);
     }
 
-    // JPEG
     if (bytes[0] == 0xFF && bytes[1] == 0xD8) {
       int offset = 2;
       final bd = ByteData.sublistView(bytes);
@@ -329,54 +320,22 @@ class EmbParser {
     if (lower.contains('dark green') || lower.contains('forest')) {
       return 0xFF1B5E20;
     }
-    if (lower.contains('olive')) return 0xFF556B2F;
-    if (lower.contains('lime') || lower.contains('light green')) {
-      return 0xFF8BC34A;
-    }
-    if (lower.contains('green')) return 0xFF2E7D32;
     if (lower.contains('gold')) return 0xFFD4AF37;
     if (lower.contains('yellow') || lower.contains('lemon')) {
       return 0xFFFBC02D;
     }
-    if (lower.contains('orange') || lower.contains('peach')) {
-      return 0xFFF57C00;
-    }
-    if (lower.contains('maroon') || lower.contains('burgundy') || lower.contains('wine')) {
-      return 0xFF7A1C24;
-    }
-    if (lower.contains('dark red') || lower.contains('crimson')) {
-      return 0xFFB71C1C;
-    }
     if (lower.contains('red')) return 0xFFE53935;
-    if (lower.contains('hot pink') || lower.contains('magenta') || lower.contains('fuchsia')) {
-      return 0xFFD81B60;
-    }
     if (lower.contains('pink') || lower.contains('rose')) {
       return 0xFFF06292;
     }
-    if (lower.contains('purple') || lower.contains('violet') || lower.contains('lilac')) {
+    if (lower.contains('purple') || lower.contains('violet')) {
       return 0xFF8E24AA;
     }
-    if (lower.contains('navy') || lower.contains('dark blue')) {
-      return 0xFF1A237E;
-    }
-    if (lower.contains('sky') || lower.contains('light blue')) {
-      return 0xFF29B6F6;
-    }
     if (lower.contains('blue')) return 0xFF1E88E5;
-    if (lower.contains('brown') || lower.contains('chocolate') || lower.contains('coffee')) {
+    if (lower.contains('brown') || lower.contains('coffee')) {
       return 0xFF6D4C41;
     }
-    if (lower.contains('beige') || lower.contains('cream') || lower.contains('ivory')) {
-      return 0xFFD7CCC8;
-    }
     if (lower.contains('white')) return 0xFFF5F5F5;
-    if (lower.contains('silver') || lower.contains('light gray') || lower.contains('light grey')) {
-      return 0xFFBDBDBD;
-    }
-    if (lower.contains('gray') || lower.contains('grey')) {
-      return 0xFF757575;
-    }
     if (lower.contains('black')) return 0xFF212121;
 
     const palette = [
