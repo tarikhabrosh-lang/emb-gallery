@@ -1,0 +1,18 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "com.tarikhabrosh.emb_gallery"
+    compileSdkVersion flutter.compileSdkVersion
+
+    defaultConfig {
+        applicationId "com.tarikhabrosh.emb_gallery"
+        minSdkVersion 21
+        targetSdkVersion flutter.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+    }
+}
