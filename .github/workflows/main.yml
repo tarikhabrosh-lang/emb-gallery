@@ -1,52 +1,24 @@
-name: Build Wilcom EMB Gallery APK
-
-on:
-  push:
-    branches: [ main, master ]
-  workflow_dispatch:
-
+name: Build APK
+on: [push, workflow_dispatch]
 jobs:
-  build-android:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Java 17
-        uses: setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
-          channel: 'stable'
-          cache: true
-
-      - name: Initialize Android project files
-        run: |
-          if [ -d "emb_gallery_project" ] && [ ! -f "pubspec.yaml" ]; then
-            cp -r emb_gallery_project/* .
-          fi
-          if [ ! -d "android" ]; then
-            flutter create . --org com.tarik.embgallery --project-name emb_gallery --platforms=android
-          fi
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q "READ_EXTERNAL_STORAGE" "$MANIFEST"; then
-            sed -i 's/<application/<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/>\n    <application/' "$MANIFEST"
-          fi
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build Release APK
-        run: flutter build apk --release
-
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
+          channel: stable
+      - run: |
+          flutter create . --org com.tarik.embgallery --project-name emb_gallery --platforms=android
+          sed -i 's/<application/<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/>\n    <application/' android/app/src/main/AndroidManifest.xml
+          flutter pub get
+          flutter build apk --release
+      - uses: actions/upload-artifact@v4
         with:
           name: Wilcom-EMB-Gallery-APK
           path: build/app/outputs/flutter-apk/app-release.apk
