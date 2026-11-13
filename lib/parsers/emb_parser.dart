@@ -7,12 +7,14 @@ class ThreadColorStep {
   final int colorIndex;
   final int stitches;
   final String colorName;
+  final int colorValue;
 
   ThreadColorStep({
     required this.stopNumber,
     required this.colorIndex,
     required this.stitches,
     required this.colorName,
+    required this.colorValue,
   });
 }
 
@@ -20,9 +22,10 @@ class EmbDesignInfo {
   final String filePath;
   final String fileName;
   final Uint8List? previewJpeg;
+  final Uint8List? stitchPreviewBytes;
   final int stitches;
   final int colorCount;
-  final int stopsCount;
+  final int jumpsCount;
   final String machineType;
   final List<ThreadColorStep> colorSequence;
   final double? widthMm;
@@ -32,41 +35,79 @@ class EmbDesignInfo {
     required this.filePath,
     required this.fileName,
     this.previewJpeg,
+    this.stitchPreviewBytes,
     required this.stitches,
     required this.colorCount,
-    required this.stopsCount,
+    required this.jumpsCount,
     required this.machineType,
     required this.colorSequence,
     this.widthMm,
     this.heightMm,
   });
+
+  int get actualStopsCount =>
+      colorSequence.isNotEmpty ? colorSequence.length : colorCount;
+}
+
+class _ExtractedImage {
+  final Uint8List bytes;
+  final int width;
+  final int height;
+
+  _ExtractedImage(this.bytes, this.width, this.height);
+
+  int get pixels => width * height;
 }
 
 class EmbParser {
   static Future<EmbDesignInfo?> parseFile(String filePath) async {
     try {
       final file = File(filePath);
+      if (!await file.exists()) return null;
       final bytes = await file.readAsBytes();
       final ole = _Ole2Reader(bytes);
       if (!ole.isValid) return null;
 
-      // 1. Extract TrueView preview (TRUEVIEW_ICON -> Zlib -> JPEG)
-      Uint8List? jpegBytes;
-      final trueViewStream = ole.getStream('TRUEVIEW_ICON');
-      if (trueViewStream != null && trueViewStream.length > 4) {
-        final compressed = trueViewStream.sublist(4);
-        final decoded = ZLibDecoder().convert(compressed);
-        jpegBytes = Uint8List.fromList(decoded);
+      // 1. Extract highest-resolution TrueView & 2D Stitch preview images
+      _ExtractedImage? bestTrueView =
+          _decodeStreamImage(ole.getStream('TRUEVIEW_ICON'));
+      final _ExtractedImage? stitchView =
+          _decodeStreamImage(ole.getStream('DESIGN_ICON'));
+
+      for (final name in ole.streamNames) {
+        if (name == 'TRUEVIEW_ICON' || name == 'DESIGN_ICON') continue;
+        final upper = name.toUpperCase();
+        if (upper.contains('ICON') ||
+            upper.contains('VIEW') ||
+            upper.contains('PREVIEW') ||
+            upper.contains('THUMB') ||
+            upper.contains('BMP') ||
+            upper.contains('IMG')) {
+          final candidate = _decodeStreamImage(ole.getStream(name));
+          if (candidate != null) {
+            if (bestTrueView == null || candidate.pixels > bestTrueView.pixels) {
+              bestTrueView = candidate;
+            }
+          }
+        }
       }
+
+      final Uint8List? primaryPreview =
+          bestTrueView?.bytes ?? stitchView?.bytes;
+      final Uint8List? secondaryStitch =
+          (bestTrueView != null && stitchView != null) ? stitchView.bytes : null;
 
       // 2. Read property set (\x05WilcomDesignInformationDDD)
       int stitches = 0;
       int colors = 0;
-      int stops = 0;
+      int jumps = 0;
       String machine = 'Unknown';
       List<ThreadColorStep> sequence = [];
+      double? widthMm;
+      double? heightMm;
 
-      final infoStreamName = '${String.fromCharCode(5)}WilcomDesignInformationDDD';
+      final infoStreamName =
+          '${String.fromCharCode(5)}WilcomDesignInformationDDD';
       final infoStream = ole.getStream(infoStreamName);
       if (infoStream != null && infoStream.length > 56) {
         final bd = ByteData.sublistView(infoStream);
@@ -89,10 +130,22 @@ class EmbParser {
               final val = bd.getInt32(propPos + 4, Endian.little);
               if (pid == 6) stitches = val;
               if (pid == 3) colors = val;
-              if (pid == 7) stops = val;
+              if (pid == 7) jumps = val;
+            } else if ((propType == 4 || propType == 5) &&
+                propPos + 8 <= infoStream.length) {
+              final dVal = propType == 4
+                  ? bd.getFloat32(propPos + 4, Endian.little)
+                  : (propPos + 12 <= infoStream.length
+                      ? bd.getFloat64(propPos + 4, Endian.little)
+                      : 0.0);
+              if (dVal > 0.5 && dVal < 5000) {
+                if (pid == 8) widthMm = dVal;
+                if (pid == 9) heightMm = dVal;
+              }
             } else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
-              final endStr = (propPos + 8 + strLen).clamp(0, infoStream.length);
+              final endStr =
+                  (propPos + 8 + strLen).clamp(0, infoStream.length);
               final rawStr = latin1
                   .decode(
                     infoStream.sublist(propPos + 8, endStr),
@@ -115,16 +168,105 @@ class EmbParser {
       return EmbDesignInfo(
         filePath: filePath,
         fileName: fileName,
-        previewJpeg: jpegBytes,
+        previewJpeg: primaryPreview,
+        stitchPreviewBytes: secondaryStitch,
         stitches: stitches,
         colorCount: colors,
-        stopsCount: stops,
+        jumpsCount: jumps,
         machineType: machine,
         colorSequence: sequence,
+        widthMm: widthMm,
+        heightMm: heightMm,
       );
     } catch (_) {
       return null;
     }
+  }
+
+  static _ExtractedImage? _decodeStreamImage(Uint8List? stream) {
+    if (stream == null || stream.length < 16) return null;
+
+    Uint8List? imgBytes;
+
+    // Case A: 4-byte uncompressed length header + Zlib stream (0x78)
+    if (stream.length > 6 && stream[4] == 0x78) {
+      try {
+        final decoded = ZLibDecoder().convert(stream.sublist(4));
+        imgBytes = Uint8List.fromList(decoded);
+      } catch (_) {}
+    }
+
+    // Case B: Direct Zlib stream starting at byte 0
+    if (imgBytes == null && stream[0] == 0x78) {
+      try {
+        final decoded = ZLibDecoder().convert(stream);
+        imgBytes = Uint8List.fromList(decoded);
+      } catch (_) {}
+    }
+
+    // Case C: Uncompressed raw JPEG/PNG/BMP inside stream
+    imgBytes ??= stream;
+
+    final dims = _readImageDimensions(imgBytes);
+    if (dims == null) return null;
+    return _ExtractedImage(imgBytes, dims.$1, dims.$2);
+  }
+
+  static (int, int)? _readImageDimensions(Uint8List bytes) {
+    if (bytes.length < 24) return null;
+
+    // PNG
+    if (bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
+      final bd = ByteData.sublistView(bytes);
+      final w = bd.getUint32(16, Endian.big);
+      final h = bd.getUint32(20, Endian.big);
+      if (w > 0 && h > 0) return (w, h);
+    }
+
+    // BMP
+    if (bytes[0] == 0x42 && bytes[1] == 0x4D && bytes.length >= 26) {
+      final bd = ByteData.sublistView(bytes);
+      final w = bd.getInt32(18, Endian.little).abs();
+      final h = bd.getInt32(22, Endian.little).abs();
+      if (w > 0 && h > 0) return (w, h);
+    }
+
+    // JPEG
+    if (bytes[0] == 0xFF && bytes[1] == 0xD8) {
+      int offset = 2;
+      final bd = ByteData.sublistView(bytes);
+      while (offset + 9 < bytes.length) {
+        if (bytes[offset] != 0xFF) {
+          offset++;
+          continue;
+        }
+        final marker = bytes[offset + 1];
+        if (marker == 0xD8 ||
+            marker == 0xD9 ||
+            marker == 0x01 ||
+            (marker >= 0xD0 && marker <= 0xD7)) {
+          offset += 2;
+          continue;
+        }
+        if (offset + 4 >= bytes.length) break;
+        final segLen = bd.getUint16(offset + 2, Endian.big);
+        if (segLen < 2) break;
+
+        if ((marker == 0xC0 || marker == 0xC1 || marker == 0xC2) &&
+            offset + 9 <= bytes.length) {
+          final h = bd.getUint16(offset + 5, Endian.big);
+          final w = bd.getUint16(offset + 7, Endian.big);
+          if (w > 0 && h > 0) return (w, h);
+        }
+        offset += 2 + segLen;
+      }
+      return (256, 256);
+    }
+
+    return null;
   }
 
   static List<ThreadColorStep> _parseColorwayTable(String rawTable) {
@@ -138,17 +280,118 @@ class EmbParser {
         final colorIdx = int.tryParse(cols[1].trim()) ?? 0;
         final stepStitches = int.tryParse(cols[3].trim()) ?? 0;
         final colorName = cols[6].trim();
+        int? parsedRgb;
+        if (cols.length >= 8) {
+          parsedRgb = _tryParseColorColumn(cols[7].trim());
+        }
         if (stopNum > 0) {
+          final resolvedName =
+              colorName.isEmpty ? 'Color $colorIdx' : colorName;
           steps.add(ThreadColorStep(
             stopNumber: stopNum,
             colorIndex: colorIdx,
             stitches: stepStitches,
-            colorName: colorName.isEmpty ? 'Color $colorIdx' : colorName,
+            colorName: resolvedName,
+            colorValue: parsedRgb ?? _resolveColorFromName(resolvedName, colorIdx),
           ));
         }
       }
     }
     return steps;
+  }
+
+  static int? _tryParseColorColumn(String col) {
+    if (col.isEmpty) return null;
+    if (col.startsWith('#') && col.length == 7) {
+      final hex = int.tryParse(col.substring(1), radix: 16);
+      if (hex != null) return 0xFF000000 | hex;
+    }
+    final parts = col.split(RegExp(r'[,;\s]+'));
+    if (parts.length >= 3) {
+      final r = int.tryParse(parts[0]);
+      final g = int.tryParse(parts[1]);
+      final b = int.tryParse(parts[2]);
+      if (r != null && g != null && b != null) {
+        return 0xFF000000 |
+            ((r.clamp(0, 255)) << 16) |
+            ((g.clamp(0, 255)) << 8) |
+            (b.clamp(0, 255));
+      }
+    }
+    return null;
+  }
+
+  static int _resolveColorFromName(String name, int fallbackIdx) {
+    final lower = name.toLowerCase();
+    if (lower.contains('aqua') || lower.contains('cyan') || lower.contains('turquoise')) {
+      return 0xFF00BCD4;
+    }
+    if (lower.contains('dark green') || lower.contains('forest')) {
+      return 0xFF1B5E20;
+    }
+    if (lower.contains('olive')) return 0xFF556B2F;
+    if (lower.contains('lime') || lower.contains('light green')) {
+      return 0xFF8BC34A;
+    }
+    if (lower.contains('green')) return 0xFF2E7D32;
+    if (lower.contains('gold')) return 0xFFD4AF37;
+    if (lower.contains('yellow') || lower.contains('lemon')) {
+      return 0xFFFBC02D;
+    }
+    if (lower.contains('orange') || lower.contains('peach')) {
+      return 0xFFF57C00;
+    }
+    if (lower.contains('maroon') || lower.contains('burgundy') || lower.contains('wine')) {
+      return 0xFF7A1C24;
+    }
+    if (lower.contains('dark red') || lower.contains('crimson')) {
+      return 0xFFB71C1C;
+    }
+    if (lower.contains('red')) return 0xFFE53935;
+    if (lower.contains('hot pink') || lower.contains('magenta') || lower.contains('fuchsia')) {
+      return 0xFFD81B60;
+    }
+    if (lower.contains('pink') || lower.contains('rose')) {
+      return 0xFFF06292;
+    }
+    if (lower.contains('purple') || lower.contains('violet') || lower.contains('lilac')) {
+      return 0xFF8E24AA;
+    }
+    if (lower.contains('navy') || lower.contains('dark blue')) {
+      return 0xFF1A237E;
+    }
+    if (lower.contains('sky') || lower.contains('light blue')) {
+      return 0xFF29B6F6;
+    }
+    if (lower.contains('blue')) return 0xFF1E88E5;
+    if (lower.contains('brown') || lower.contains('chocolate') || lower.contains('coffee')) {
+      return 0xFF6D4C41;
+    }
+    if (lower.contains('beige') || lower.contains('cream') || lower.contains('ivory')) {
+      return 0xFFD7CCC8;
+    }
+    if (lower.contains('white')) return 0xFFF5F5F5;
+    if (lower.contains('silver') || lower.contains('light gray') || lower.contains('light grey')) {
+      return 0xFFBDBDBD;
+    }
+    if (lower.contains('gray') || lower.contains('grey')) {
+      return 0xFF757575;
+    }
+    if (lower.contains('black')) return 0xFF212121;
+
+    const palette = [
+      0xFF00BCD4,
+      0xFFFBC02D,
+      0xFF6D4C41,
+      0xFFF06292,
+      0xFF2E7D32,
+      0xFFE53935,
+      0xFF1E88E5,
+      0xFF8E24AA,
+      0xFFF57C00,
+      0xFFD4AF37,
+    ];
+    return palette[fallbackIdx.abs() % palette.length];
   }
 }
 
@@ -166,6 +409,8 @@ class _Ole2Reader {
   final List<int> _miniFat = [];
   Uint8List? _miniStream;
   final Map<String, _DirEntry> _entries = {};
+
+  Iterable<String> get streamNames => _entries.keys;
 
   _Ole2Reader(this._data) {
     if (_data.length < 512) return;
