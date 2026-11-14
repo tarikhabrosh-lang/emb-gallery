@@ -104,17 +104,118 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
   bool _isLoading = false;
   String _searchQuery = '';
   SortOption _sortOption = SortOption.nameAsc;
-  String _statusText = 'اختر مجلداً أو ملفات EMB لعرضها كمعرض صور';
+  String _statusText = 'جاري البحث التلقائي عن ملفات التطريز (.emb)...';
 
-  Future<void> _requestStoragePermission() async {
-    if (Platform.isAndroid) {
-      await Permission.storage.request();
-      await Permission.manageExternalStorage.request();
+  @override
+  void initState() {
+    super.initState();
+    _initPermissionsAndAutoScan();
+  }
+
+  Future<File> _getSavedFolderConfigFile() async {
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}/saved_emb_dir.txt');
+  }
+
+  Future<void> _saveLastFolder(String path) async {
+    try {
+      final f = await _getSavedFolderConfigFile();
+      await f.writeAsString(path);
+    } catch (_) {}
+  }
+
+  Future<String?> _readLastFolder() async {
+    try {
+      final f = await _getSavedFolderConfigFile();
+      if (await f.exists()) {
+        final p = (await f.readAsString()).trim();
+        if (p.isNotEmpty && await Directory(p).exists()) return p;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<bool> _ensureStoragePermission() async {
+    if (!Platform.isAndroid) return true;
+
+    // إذا كان الإذن ممنوحاً مسبقاً، لا تطلبه مرة أخرى أبداً
+    if (await Permission.manageExternalStorage.isGranted ||
+        await Permission.storage.isGranted) {
+      return true;
     }
+
+    final manageStatus = await Permission.manageExternalStorage.request();
+    if (manageStatus.isGranted) return true;
+
+    final storageStatus = await Permission.storage.request();
+    return storageStatus.isGranted;
+  }
+
+  Future<void> _initPermissionsAndAutoScan() async {
+    final hasPerm = await _ensureStoragePermission();
+    if (!hasPerm) {
+      setState(() {
+        _statusText =
+            'يرجى منح إذن الوصول للملفات لمرة واحدة فقط ليتم عرض ملفات الـ EMB تلقائياً';
+      });
+      return;
+    }
+
+    // 1. إذا كان هناك مجلد محفوظ سابقاً، افتحه تلقائياً فوراً بدون سؤال
+    final savedDir = await _readLastFolder();
+    if (savedDir != null) {
+      await _scanDirectoryPath(savedDir, isAuto: true);
+      if (_allDesigns.isNotEmpty) return;
+    }
+
+    // 2. فحص تلقائي لمجلدات التنزيلات وواتساب والذاكرة الرئيسية
+    await _autoScanCommonFolders();
+  }
+
+  Future<void> _autoScanCommonFolders() async {
+    setState(() {
+      _isLoading = true;
+      _statusText = 'جاري البحث التلقائي عن ملفات EMB في الجهاز والواتساب...';
+    });
+
+    final candidateDirs = <String>[
+      '/storage/emulated/0/Download',
+      '/storage/emulated/0/Documents',
+      '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents',
+      '/storage/emulated/0/WhatsApp/Media/WhatsApp Documents',
+      '/storage/emulated/0/Telegram/Telegram Documents',
+    ];
+
+    final foundPaths = <String>{};
+    for (final path in candidateDirs) {
+      final dir = Directory(path);
+      if (await dir.exists()) {
+        try {
+          await for (final entity
+              in dir.list(recursive: true, followLinks: false)) {
+            if (entity is File && entity.path.toLowerCase().endsWith('.emb')) {
+              foundPaths.add(entity.path);
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (foundPaths.isEmpty) {
+      setState(() {
+        _isLoading = false;
+        _statusText =
+            'اختر مجلد التصاميم لمرة واحدة وسيحفظه التطبيق ليفتحه تلقائياً كل مرة';
+      });
+      return;
+    }
+
+    await _loadDesignsFromPaths(foundPaths.toList());
   }
 
   Future<void> _pickMultipleFiles() async {
     try {
+      await _ensureStoragePermission();
       final result = await FilePicker.platform.pickFiles(
         allowMultiple: true,
         type: FileType.any,
@@ -131,6 +232,10 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
         return;
       }
 
+      // حفظ المجلد الأب تلقائياً
+      final firstParent = File(embPaths.first).parent.path;
+      await _saveLastFolder(firstParent);
+
       await _loadDesignsFromPaths(embPaths);
     } catch (e) {
       _showSnack('تعذر فتح الملفات: $e');
@@ -139,37 +244,48 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
 
   Future<void> _pickFolder() async {
     try {
-      await _requestStoragePermission();
+      await _ensureStoragePermission();
       final dirPath = await FilePicker.platform.getDirectoryPath();
       if (dirPath == null) return;
 
-      setState(() {
-        _isLoading = true;
-        _statusText = 'جاري فحص المجلد والبحث عن ملفات EMB...';
-      });
+      await _saveLastFolder(dirPath);
+      await _scanDirectoryPath(dirPath, isAuto: false);
+    } catch (e) {
+      setState(() => _isLoading = false);
+      _showSnack('تعذر فحص المجلد: $e');
+    }
+  }
 
-      final dir = Directory(dirPath);
-      final embPaths = <String>[];
+  Future<void> _scanDirectoryPath(String dirPath, {required bool isAuto}) async {
+    setState(() {
+      _isLoading = true;
+      _statusText = 'جاري فحص المجلد واستخراج ملفات الـ EMB...';
+    });
 
+    final dir = Directory(dirPath);
+    final embPaths = <String>[];
+
+    try {
       await for (final entity in dir.list(recursive: true, followLinks: false)) {
         if (entity is File && entity.path.toLowerCase().endsWith('.emb')) {
           embPaths.add(entity.path);
         }
       }
+    } catch (_) {}
 
-      if (embPaths.isEmpty) {
+    if (embPaths.isEmpty) {
+      if (!isAuto) {
         setState(() {
           _isLoading = false;
           _statusText = 'لا توجد ملفات .emb داخل هذا المجلد';
         });
-        return;
+      } else {
+        setState(() => _isLoading = false);
       }
-
-      await _loadDesignsFromPaths(embPaths);
-    } catch (e) {
-      setState(() => _isLoading = false);
-      _showSnack('استخدم زر "اختيار ملفات" إذا كان المجلد محمياً من النظام');
+      return;
     }
+
+    await _loadDesignsFromPaths(embPaths);
   }
 
   Future<void> _loadDesignsFromPaths(List<String> paths) async {
@@ -258,6 +374,11 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
+            tooltip: 'فحص تلقائي سريع',
+            onPressed: _isLoading ? null : _initPermissionsAndAutoScan,
+          ),
           PopupMenuButton<SortOption>(
             icon: const Icon(Icons.sort),
             tooltip: 'ترتيب التصاميم',
@@ -266,10 +387,14 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
               _applyFilterAndSort();
             },
             itemBuilder: (_) => const [
-              PopupMenuItem(value: SortOption.nameAsc, child: Text('الاسم (أ - ي)')),
-              PopupMenuItem(value: SortOption.stitchesDesc, child: Text('الأكثر غرزاً')),
-              PopupMenuItem(value: SortOption.stitchesAsc, child: Text('الأقل غرزاً')),
-              PopupMenuItem(value: SortOption.colorsDesc, child: Text('الأكثر ألواناً')),
+              PopupMenuItem(
+                  value: SortOption.nameAsc, child: Text('الاسم (أ - ي)')),
+              PopupMenuItem(
+                  value: SortOption.stitchesDesc, child: Text('الأكثر غرزاً')),
+              PopupMenuItem(
+                  value: SortOption.stitchesAsc, child: Text('الأقل غرزاً')),
+              PopupMenuItem(
+                  value: SortOption.colorsDesc, child: Text('الأكثر ألواناً')),
             ],
           ),
         ],
@@ -296,9 +421,10 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: _isLoading ? null : _pickFolder,
-                    icon: const Icon(Icons.folder_open, color: Color(0xFFD4AF37)),
+                    icon: const Icon(Icons.folder_open,
+                        color: Color(0xFFD4AF37)),
                     label: const Text(
-                      'فحص مجلد كامل',
+                      'تحديد مجلد دائم',
                       style: TextStyle(color: Color(0xFFD4AF37)),
                     ),
                     style: OutlinedButton.styleFrom(
