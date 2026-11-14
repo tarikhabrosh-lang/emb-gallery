@@ -13,21 +13,50 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Flutter
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.0'
+          flutter-version: '3.24.0'
           channel: 'stable'
-          cache: true
 
-      - name: Install dependencies
+      - name: Backup custom files
+        run: |
+          mkdir -p /tmp/backup
+          cp -r lib /tmp/backup/
+          cp pubspec.yaml /tmp/backup/
+          if [ -d scripts ]; then cp -r scripts /tmp/backup/; fi
+          if [ -d assets ]; then cp -r assets /tmp/backup/; fi
+
+      - name: Clean old Android folder and recreate fresh project
+        run: |
+          rm -rf android ios web linux macos windows test build pubspec.lock
+          flutter create --org com.tarikhabrosh --project-name emb_gallery --platforms=android .
+          rm -rf lib
+          cp -r /tmp/backup/lib .
+          cp /tmp/backup/pubspec.yaml .
+          if [ -d /tmp/backup/scripts ]; then cp -r /tmp/backup/scripts .; fi
+          if [ -d /tmp/backup/assets ]; then cp -r /tmp/backup/assets .; fi
+
+      - name: Configure Tarik emb name, icon, and WhatsApp EMB association
+        run: python3 scripts/configure_android.py
+
+      - name: Get dependencies
         run: flutter pub get
 
-      - name: Build APK
-        run: flutter build apk --release
+      - name: Build Release APK
+        run: flutter build apk --release --no-tree-shake-icons
 
-      - name: Upload APK
+      - name: Rename APK to Tarik_emb.apk
+        run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Tarik_emb.apk
+
+      - name: Upload Tarik_emb APK
         uses: actions/upload-artifact@v4
         with:
           name: Tarik_emb_APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/Tarik_emb.apk
