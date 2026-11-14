@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:image/image.dart' as img;
 
 class ThreadColorStep {
   final int stopNumber;
@@ -23,9 +24,13 @@ class EmbDesignInfo {
   final String fileName;
   final Uint8List? previewJpeg;
   final Uint8List? stitchPreviewBytes;
+  final int previewWidth;
+  final int previewHeight;
   final int stitches;
   final int colorCount;
   final int jumpsCount;
+  final int sequinsCount;
+  final int trimsCount;
   final String machineType;
   final List<ThreadColorStep> colorSequence;
   final double? widthMm;
@@ -36,9 +41,13 @@ class EmbDesignInfo {
     required this.fileName,
     this.previewJpeg,
     this.stitchPreviewBytes,
+    this.previewWidth = 0,
+    this.previewHeight = 0,
     required this.stitches,
     required this.colorCount,
     required this.jumpsCount,
+    required this.sequinsCount,
+    this.trimsCount = 0,
     required this.machineType,
     required this.colorSequence,
     this.widthMm,
@@ -68,7 +77,7 @@ class EmbParser {
       final ole = _Ole2Reader(bytes);
       if (!ole.isValid) return null;
 
-      // Extract highest resolution TrueView & 2D Stitch preview images
+      // 1. استخراج صور المعاينة (TrueView 3D & 2D Stitch)
       _ExtractedImage? bestTrueView =
           _decodeStreamImage(ole.getStream('TRUEVIEW_ICON'));
       final _ExtractedImage? stitchView =
@@ -76,34 +85,36 @@ class EmbParser {
 
       for (final name in ole.streamNames) {
         if (name == 'TRUEVIEW_ICON' || name == 'DESIGN_ICON') continue;
-        final upper = name.toUpperCase();
-        if (upper.contains('ICON') ||
-            upper.contains('VIEW') ||
-            upper.contains('PREVIEW') ||
-            upper.contains('THUMB') ||
-            upper.contains('BMP') ||
-            upper.contains('IMG')) {
-          final candidate = _decodeStreamImage(ole.getStream(name));
-          if (candidate != null) {
-            if (bestTrueView == null || candidate.pixels > bestTrueView.pixels) {
-              bestTrueView = candidate;
-            }
+        final candidate = _decodeStreamImage(ole.getStream(name));
+        if (candidate != null) {
+          if (bestTrueView == null || candidate.pixels > bestTrueView.pixels) {
+            bestTrueView = candidate;
           }
         }
       }
 
-      final Uint8List? primaryPreview =
-          bestTrueView?.bytes ?? stitchView?.bytes;
-      final Uint8List? secondaryStitch =
-          (bestTrueView != null && stitchView != null) ? stitchView.bytes : null;
+      _ExtractedImage? primaryImg = bestTrueView ?? stitchView;
+      if (primaryImg != null) {
+        primaryImg = _enhanceCrystalHD(primaryImg);
+      }
 
+      final Uint8List? secondaryStitch =
+          (bestTrueView != null && stitchView != null)
+              ? _enhanceCrystalHD(stitchView).bytes
+              : null;
+
+      // 2. قراءة خصائص الملف + قاموس الأسماء لحساب الترتر بدقة 100%
       int stitches = 0;
       int colors = 0;
       int jumps = 0;
+      int sequins = 0;
+      int blings = 0;
+      int trims = 0;
       String machine = 'Unknown';
       List<ThreadColorStep> sequence = [];
       double? widthMm;
       double? heightMm;
+      double? left, right, up, down;
 
       final infoStreamName =
           '${String.fromCharCode(5)}WilcomDesignInformationDDD';
@@ -114,22 +125,64 @@ class EmbParser {
         if (sectionOffset + 8 <= infoStream.length) {
           final propCount = bd.getUint32(sectionOffset + 4, Endian.little);
 
+          final Map<int, int> propPositions = {};
           for (int i = 0; i < propCount; i++) {
             final entryPos = sectionOffset + 8 + (i * 8);
             if (entryPos + 8 > infoStream.length) break;
-
             final pid = bd.getUint32(entryPos, Endian.little);
             final propRelOffset = bd.getUint32(entryPos + 4, Endian.little);
-            final propPos = sectionOffset + propRelOffset;
-            if (propPos + 8 > infoStream.length) continue;
+            propPositions[pid] = sectionOffset + propRelOffset;
+          }
+
+          // قراءة القاموس (PID 0) لربط اسم 'sequins' بالمعرف الصحيح
+          final Map<int, String> pidNames = {};
+          if (propPositions.containsKey(0)) {
+            final dictPos = propPositions[0]!;
+            if (dictPos + 4 <= infoStream.length) {
+              final dictEntries = bd.getUint32(dictPos, Endian.little);
+              int curr = dictPos + 4;
+              for (int d = 0; d < dictEntries; d++) {
+                if (curr + 8 > infoStream.length) break;
+                final dPid = bd.getUint32(curr, Endian.little);
+                final nameLen = bd.getUint32(curr + 4, Endian.little);
+                curr += 8;
+                if (curr + nameLen > infoStream.length) break;
+                final nameStr = latin1
+                    .decode(infoStream.sublist(curr, curr + nameLen),
+                        allowInvalid: true)
+                    .replaceAll('\x00', '')
+                    .trim()
+                    .toLowerCase();
+                curr += nameLen;
+                pidNames[dPid] = nameStr;
+              }
+            }
+          }
+
+          for (final entry in propPositions.entries) {
+            final pid = entry.key;
+            final propPos = entry.value;
+            if (pid == 0 || propPos + 8 > infoStream.length) continue;
 
             final propType = bd.getUint32(propPos, Endian.little);
+            final propName = pidNames[pid] ?? '';
 
-            if (propType == 3 && propPos + 8 <= infoStream.length) {
+            if ((propType == 3 || propType == 19 || propType == 22) &&
+                propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
-              if (pid == 6) stitches = val;
-              if (pid == 3) colors = val;
-              if (pid == 7) jumps = val;
+              if (propName == 'number of stitches' || (propName.isEmpty && pid == 6)) {
+                stitches = val;
+              } else if (propName == 'number of colours' || (propName.isEmpty && pid == 3)) {
+                colors = val;
+              } else if (propName == 'number of jumps' || (propName.isEmpty && pid == 7)) {
+                jumps = val;
+              } else if (propName == 'sequins') {
+                sequins = val;
+              } else if (propName == 'blings') {
+                blings = val;
+              } else if (propName == 'number of trims') {
+                trims = val;
+              }
             } else if ((propType == 4 || propType == 5) &&
                 propPos + 8 <= infoStream.length) {
               final dVal = propType == 4
@@ -137,9 +190,19 @@ class EmbParser {
                   : (propPos + 12 <= infoStream.length
                       ? bd.getFloat64(propPos + 4, Endian.little)
                       : 0.0);
-              if (dVal > 0.5 && dVal < 5000) {
-                if (pid == 8) widthMm = dVal;
-                if (pid == 9) heightMm = dVal;
+
+              if (propName == 'design width') {
+                widthMm = _normalizeMm(dVal);
+              } else if (propName == 'design height') {
+                heightMm = _normalizeMm(dVal);
+              } else if (propName == 'design left') {
+                left = dVal;
+              } else if (propName == 'design right') {
+                right = dVal;
+              } else if (propName == 'design up') {
+                up = dVal;
+              } else if (propName == 'design down') {
+                down = dVal;
               }
             } else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
@@ -153,25 +216,40 @@ class EmbParser {
                   .replaceAll('\x00', '')
                   .trim();
 
-              if (pid == 19 && rawStr.isNotEmpty) {
+              if ((propName == 'embroidery machine name' || pid == 19) &&
+                  rawStr.isNotEmpty) {
                 machine = rawStr;
-              } else if (pid == 34 && rawStr.isNotEmpty) {
+              } else if ((propName == 'colorways' || pid == 34) &&
+                  rawStr.isNotEmpty) {
                 sequence = _parseColorwayTable(rawStr);
               }
             }
           }
+
+          if (widthMm == null && left != null && right != null) {
+            widthMm = _normalizeMm((right - left).abs());
+          }
+          if (heightMm == null && up != null && down != null) {
+            heightMm = _normalizeMm((up - down).abs());
+          }
         }
       }
 
+      final totalSequins = sequins > 0 ? sequins : blings;
       final fileName = filePath.split(Platform.pathSeparator).last;
+
       return EmbDesignInfo(
         filePath: filePath,
         fileName: fileName,
-        previewJpeg: primaryPreview,
+        previewJpeg: primaryImg?.bytes,
         stitchPreviewBytes: secondaryStitch,
+        previewWidth: primaryImg?.width ?? 0,
+        previewHeight: primaryImg?.height ?? 0,
         stitches: stitches,
         colorCount: colors,
         jumpsCount: jumps,
+        sequinsCount: totalSequins,
+        trimsCount: trims,
         machineType: machine,
         colorSequence: sequence,
         widthMm: widthMm,
@@ -182,8 +260,52 @@ class EmbParser {
     }
   }
 
+  static double? _normalizeMm(double val) {
+    final v = val.abs();
+    if (v <= 0.1) return null;
+    if (v > 5000) return v / 100.0;
+    return v;
+  }
+
+  // خوارزمية رفع الدقة وتصفية الغباش (Crystal Upscaling)
+  static _ExtractedImage _enhanceCrystalHD(_ExtractedImage src) {
+    try {
+      final decoded = img.decodeImage(src.bytes);
+      if (decoded == null) return src;
+
+      // مضاعفة الأبعاد بنظام Cubic مع فلتر إبراز حواف الغرز والترتر
+      final int scale = (decoded.width < 900 && decoded.height < 900) ? 2 : 1;
+      img.Image work = scale > 1
+          ? img.copyResize(
+              decoded,
+              width: decoded.width * scale,
+              height: decoded.height * scale,
+              interpolation: img.Interpolation.cubic,
+            )
+          : decoded;
+
+      // تطبيق مصفوفة حدة دقيقة (Unsharp Convolution) لإزالة غباش التكبير
+      work = img.convolution(
+        work,
+        filter: [
+          0, -0.45, 0,
+          -0.45, 2.8, -0.45,
+          0, -0.45, 0,
+        ],
+        div: 1.0,
+        offset: 0,
+      );
+
+      final pngBytes = Uint8List.fromList(img.encodePng(work, level: 4));
+      return _ExtractedImage(pngBytes, work.width, work.height);
+    } catch (_) {
+      return src;
+    }
+  }
+
   static _ExtractedImage? _decodeStreamImage(Uint8List? stream) {
     if (stream == null || stream.length < 16) return null;
+
     Uint8List? imgBytes;
 
     if (stream.length > 6 && stream[4] == 0x78) {
@@ -201,6 +323,7 @@ class EmbParser {
     }
 
     imgBytes ??= stream;
+
     final dims = _readImageDimensions(imgBytes);
     if (dims == null) return null;
     return _ExtractedImage(imgBytes, dims.$1, dims.$2);
@@ -283,7 +406,8 @@ class EmbParser {
             colorIndex: colorIdx,
             stitches: stepStitches,
             colorName: resolvedName,
-            colorValue: parsedRgb ?? _resolveColorFromName(resolvedName, colorIdx),
+            colorValue:
+                parsedRgb ?? _resolveColorFromName(resolvedName, colorIdx),
           ));
         }
       }
@@ -314,28 +438,74 @@ class EmbParser {
 
   static int _resolveColorFromName(String name, int fallbackIdx) {
     final lower = name.toLowerCase();
-    if (lower.contains('aqua') || lower.contains('cyan') || lower.contains('turquoise')) {
+    if (lower.contains('aqua') ||
+        lower.contains('cyan') ||
+        lower.contains('turquoise')) {
       return 0xFF00BCD4;
     }
     if (lower.contains('dark green') || lower.contains('forest')) {
       return 0xFF1B5E20;
     }
+    if (lower.contains('olive')) return 0xFF556B2F;
+    if (lower.contains('lime') || lower.contains('light green')) {
+      return 0xFF8BC34A;
+    }
+    if (lower.contains('green')) return 0xFF2E7D32;
     if (lower.contains('gold')) return 0xFFD4AF37;
     if (lower.contains('yellow') || lower.contains('lemon')) {
       return 0xFFFBC02D;
     }
+    if (lower.contains('orange') || lower.contains('peach')) {
+      return 0xFFF57C00;
+    }
+    if (lower.contains('maroon') ||
+        lower.contains('burgundy') ||
+        lower.contains('wine')) {
+      return 0xFF7A1C24;
+    }
+    if (lower.contains('dark red') || lower.contains('crimson')) {
+      return 0xFFB71C1C;
+    }
     if (lower.contains('red')) return 0xFFE53935;
+    if (lower.contains('hot pink') ||
+        lower.contains('magenta') ||
+        lower.contains('fuchsia')) {
+      return 0xFFD81B60;
+    }
     if (lower.contains('pink') || lower.contains('rose')) {
       return 0xFFF06292;
     }
-    if (lower.contains('purple') || lower.contains('violet')) {
+    if (lower.contains('purple') ||
+        lower.contains('violet') ||
+        lower.contains('lilac')) {
       return 0xFF8E24AA;
     }
+    if (lower.contains('navy') || lower.contains('dark blue')) {
+      return 0xFF1A237E;
+    }
+    if (lower.contains('sky') || lower.contains('light blue')) {
+      return 0xFF29B6F6;
+    }
     if (lower.contains('blue')) return 0xFF1E88E5;
-    if (lower.contains('brown') || lower.contains('coffee')) {
+    if (lower.contains('brown') ||
+        lower.contains('chocolate') ||
+        lower.contains('coffee')) {
       return 0xFF6D4C41;
     }
+    if (lower.contains('beige') ||
+        lower.contains('cream') ||
+        lower.contains('ivory')) {
+      return 0xFFD7CCC8;
+    }
     if (lower.contains('white')) return 0xFFF5F5F5;
+    if (lower.contains('silver') ||
+        lower.contains('light gray') ||
+        lower.contains('light grey')) {
+      return 0xFFBDBDBD;
+    }
+    if (lower.contains('gray') || lower.contains('grey')) {
+      return 0xFF757575;
+    }
     if (lower.contains('black')) return 0xFF212121;
 
     const palette = [
