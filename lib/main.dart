@@ -110,6 +110,66 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
   void initState() {
     super.initState();
     _initPermissionsAndAutoScan();
+    // إظهار رسالة الترحيب أول ما يفتح التطبيق
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showWelcomeDialog();
+    });
+  }
+
+  void _showWelcomeDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF18202E),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.auto_awesome, color: Color(0xFFD4AF37)),
+            SizedBox(width: 8),
+            Text(
+              'أهلاً بك يا أبو وسيم',
+              style: TextStyle(color: Colors.white, fontSize: 18),
+            ),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'مرحباً بك في تطبيق Tarik emb لعرض وتحليل ملفات التطريز.',
+              style: TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+            SizedBox(height: 16),
+            Center(
+              child: Text(
+                'By Tarik Habrosh',
+                style: TextStyle(
+                  color: Color(0xFFD4AF37),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF3E522B),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('موافق'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<File> _getSavedFolderConfigFile() async {
@@ -137,16 +197,12 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
 
   Future<bool> _ensureStoragePermission() async {
     if (!Platform.isAndroid) return true;
-
-    // إذا كان الإذن ممنوحاً مسبقاً، لا تطلبه مرة أخرى أبداً
     if (await Permission.manageExternalStorage.isGranted ||
         await Permission.storage.isGranted) {
       return true;
     }
-
     final manageStatus = await Permission.manageExternalStorage.request();
     if (manageStatus.isGranted) return true;
-
     final storageStatus = await Permission.storage.request();
     return storageStatus.isGranted;
   }
@@ -155,27 +211,24 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
     final hasPerm = await _ensureStoragePermission();
     if (!hasPerm) {
       setState(() {
-        _statusText =
-            'يرجى منح إذن الوصول للملفات لمرة واحدة فقط ليتم عرض ملفات الـ EMB تلقائياً';
+        _statusText = 'يرجى منح إذن الوصول للملفات لعرض ملفات الـ EMB تلقائياً';
       });
       return;
     }
 
-    // 1. إذا كان هناك مجلد محفوظ سابقاً، افتحه تلقائياً فوراً بدون سؤال
     final savedDir = await _readLastFolder();
     if (savedDir != null) {
       await _scanDirectoryPath(savedDir, isAuto: true);
       if (_allDesigns.isNotEmpty) return;
     }
 
-    // 2. فحص تلقائي لمجلدات التنزيلات وواتساب والذاكرة الرئيسية
     await _autoScanCommonFolders();
   }
 
   Future<void> _autoScanCommonFolders() async {
     setState(() {
       _isLoading = true;
-      _statusText = 'جاري البحث التلقائي عن ملفات EMB في الجهاز والواتساب...';
+      _statusText = 'جاري البحث التلقائي عن ملفات EMB في الجهاز...';
     });
 
     final candidateDirs = <String>[
@@ -183,7 +236,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
       '/storage/emulated/0/Documents',
       '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents',
       '/storage/emulated/0/WhatsApp/Media/WhatsApp Documents',
-      '/storage/emulated/0/Telegram/Telegram Documents',
     ];
 
     final foundPaths = <String>{};
@@ -204,8 +256,7 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
     if (foundPaths.isEmpty) {
       setState(() {
         _isLoading = false;
-        _statusText =
-            'اختر مجلد التصاميم لمرة واحدة وسيحفظه التطبيق ليفتحه تلقائياً كل مرة';
+        _statusText = 'اختر مجلد التصاميم أو اضغط تحديث للبحث';
       });
       return;
     }
@@ -232,7 +283,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
         return;
       }
 
-      // حفظ المجلد الأب تلقائياً
       final firstParent = File(embPaths.first).parent.path;
       await _saveLastFolder(firstParent);
 
@@ -259,7 +309,7 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
   Future<void> _scanDirectoryPath(String dirPath, {required bool isAuto}) async {
     setState(() {
       _isLoading = true;
-      _statusText = 'جاري فحص المجلد واستخراج ملفات الـ EMB...';
+      _statusText = 'جاري فحص المجلد...';
     });
 
     final dir = Directory(dirPath);
@@ -376,12 +426,12 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
-            tooltip: 'فحص تلقائي سريع',
+            tooltip: 'إعادة فحص',
             onPressed: _isLoading ? null : _initPermissionsAndAutoScan,
           ),
           PopupMenuButton<SortOption>(
             icon: const Icon(Icons.sort),
-            tooltip: 'ترتيب التصاميم',
+            tooltip: 'ترتيب',
             onSelected: (opt) {
               _sortOption = opt;
               _applyFilterAndSort();
@@ -424,7 +474,7 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
                     icon: const Icon(Icons.folder_open,
                         color: Color(0xFFD4AF37)),
                     label: const Text(
-                      'تحديد مجلد دائم',
+                      'مجلد دائم',
                       style: TextStyle(color: Color(0xFFD4AF37)),
                     ),
                     style: OutlinedButton.styleFrom(
