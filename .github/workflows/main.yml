@@ -25,11 +25,15 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
+      - name: Create Fresh Flutter Android Project
+        run: |
+          flutter create --org com.tarikhabrosh --project-name emb_gallery --platforms=android .
+
+      - name: Configure Tarik emb name, icon, and WhatsApp EMB association
+        run: python3 scripts/configure_android.py
+
       - name: Get dependencies
         run: flutter pub get
-
-      - name: Run Android configuration script
-        run: python3 scripts/configure_android.py
 
       - name: Build Release APK
         run: flutter build apk --release --no-tree-shake-icons
