@@ -2,6 +2,51 @@ import os
 import re
 import shutil
 
+# Fix Android build tool versions in the fresh Flutter project.
+# Build log: Kotlin metadata is 2.0.0, while the project expects 1.6.0;
+# one Android dependency also requires compileSdk 35.
+settings_path = "android/settings.gradle"
+if not os.path.exists(settings_path):
+    raise FileNotFoundError("android/settings.gradle was not created by flutter create")
+
+with open(settings_path, "r", encoding="utf-8") as f:
+    settings = f.read()
+
+settings, kotlin_matches = re.subn(
+    r"""(id\s+["']org\.jetbrains\.kotlin\.android["']\s+version\s+["'])[^"']+(["'])""",
+    r"""\g<1>2.0.0\2""",
+    settings,
+    count=1,
+)
+if kotlin_matches == 0:
+    raise RuntimeError("Could not find Kotlin Gradle plugin version in android/settings.gradle")
+
+with open(settings_path, "w", encoding="utf-8") as f:
+    f.write(settings)
+
+app_gradle_path = "android/app/build.gradle"
+with open(app_gradle_path, "r", encoding="utf-8") as f:
+    app_gradle = f.read()
+
+app_gradle, sdk_matches = re.subn(
+    r"compileSdkVersion\s+flutter\.compileSdkVersion",
+    "compileSdkVersion 35",
+    app_gradle,
+    count=1,
+)
+if sdk_matches == 0:
+    app_gradle, sdk_matches = re.subn(
+        r"compileSdk\s+flutter\.compileSdkVersion",
+        "compileSdk 35",
+        app_gradle,
+        count=1,
+    )
+if sdk_matches == 0:
+    raise RuntimeError("Could not find Flutter compileSdk setting in android/app/build.gradle")
+
+with open(app_gradle_path, "w", encoding="utf-8") as f:
+    f.write(app_gradle)
+
 manifest_path = "android/app/src/main/AndroidManifest.xml"
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = f.read()
@@ -11,7 +56,7 @@ permissions_xml = """
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.READ_media_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 """
 
 if "MANAGE_EXTERNAL_STORAGE" not in manifest:
@@ -183,3 +228,4 @@ if os.path.exists("assets/logo.png"):
         dest_dir = f"android/app/src/main/res/{folder}"
         if os.path.exists(dest_dir):
             shutil.copy("assets/logo.png", os.path.join(dest_dir, "ic_launcher.png"))
+
