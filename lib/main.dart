@@ -898,9 +898,7 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                     ),
                     itemCount: _filteredDesigns.length,
                     itemBuilder: (context, index) {
-                      final item = _filteredDesigns.index(index) == null
-                          ? _filteredDesigns[index]
-                          : _filteredDesigns[index];
+                      final item = _filteredDesigns[index];
                       return _DesignGridCard(
                         design: item,
                         formattedStitches: numFmt.format(item.stitches),
@@ -929,7 +927,7 @@ class _DesignGridCard extends StatelessWidget {
 
   const _DesignGridCard({
     required this.design,
-    required this.formattedStstitches,
+    required this.formattedStitches,
     required this.onTap,
   });
 
@@ -1638,8 +1636,8 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                               : Colors.white10,
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 4),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
                         icon: Icon(
                           Icons.auto_fix_high,
