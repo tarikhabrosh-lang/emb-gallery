@@ -1,4 +1,3 @@
-
 import os
 import re
 import glob
@@ -39,7 +38,7 @@ for p in glob.glob("android/app/build.gradle*"):
     with open(p, "w", encoding="utf-8") as f:
         f.write(s)
 
-# 2. تحديث AndroidManifest.xml بصيغة متوافقة 100% مع SDK 35 وواتساب
+# 2. تحديث AndroidManifest.xml بصيغة نظيفة 100% تظهر في واتساب وتنجح في SDK 35
 manifest_path = "android/app/src/main/AndroidManifest.xml"
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = f.read()
@@ -66,7 +65,7 @@ emb_intent_filters = """
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
-                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="*/*" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -74,6 +73,7 @@ emb_intent_filters = """
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
+                <data android:mimeType="application/octet-stream" />
                 <data android:mimeType="application/*" />
             </intent-filter>
             <intent-filter>
