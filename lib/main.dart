@@ -84,32 +84,39 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
           child: child!,
         );
       },
-      home: const GalleryHomePage(),
+      home: const FoldersGalleryPage(),
     );
   }
 }
 
-enum SortOption { nameAsc, stitchesDesc, stitchesAsc, colorsDesc }
+class EmbFolderGroup {
+  final String folderPath;
+  final String folderName;
+  final List<String> filePaths;
 
-class GalleryHomePage extends StatefulWidget {
-  const GalleryHomePage({super.key});
-
-  @override
-  State<GalleryHomePage> createState() => _GalleryHomePageState();
+  EmbFolderGroup({
+    required this.folderPath,
+    required this.folderName,
+    required this.filePaths,
+  });
 }
 
-class _GalleryHomePageState extends State<GalleryHomePage> {
-  final List<EmbDesignInfo> _allDesigns = [];
-  List<EmbDesignInfo> _filteredDesigns = [];
+class FoldersGalleryPage extends StatefulWidget {
+  const FoldersGalleryPage({super.key});
+
+  @override
+  State<FoldersGalleryPage> createState() => _FoldersGalleryPageState();
+}
+
+class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   bool _isLoading = false;
-  String _searchQuery = '';
-  SortOption _sortOption = SortOption.nameAsc;
-  String _statusText = 'اضغط على "مجلد دائم" أو "اختيار ملفات" للبدء';
+  String _statusText = 'جاري البحث عن مجلدات التطريز في الجهاز...';
+  final List<EmbFolderGroup> _folders = [];
 
   @override
   void initState() {
     super.initState();
-    _ensureStoragePermission();
+    _scanDeviceForFolders();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showWelcomeDialog();
     });
@@ -140,7 +147,7 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'تطبيق Tarik emb لعرض وتحليل ملفات التطريز بوضوح كريستالي.',
+              'نظام استوديو المجلدات الذكي لملفات التطريز.',
               style: TextStyle(color: Colors.white70, fontSize: 14),
             ),
             SizedBox(height: 16),
@@ -171,18 +178,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
     );
   }
 
-  Future<File> _getSavedFolderConfigFile() async {
-    final dir = await getApplicationSupportDirectory();
-    return File('${dir.path}/saved_emb_dir.txt');
-  }
-
-  Future<void> _saveLastFolder(String path) async {
-    try {
-      final f = await _getSavedFolderConfigFile();
-      await f.writeAsString(path);
-    } catch (_) {}
-  }
-
   Future<bool> _ensureStoragePermission() async {
     if (!Platform.isAndroid) return true;
     if (await Permission.manageExternalStorage.isGranted ||
@@ -195,132 +190,92 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
     return storageStatus.isGranted;
   }
 
-  Future<void> _pickMultipleFiles() async {
-    try {
-      await _ensureStoragePermission();
-      final result = await FilePicker.platform.pickFiles(
-        allowMultiple: true,
-        type: FileType.any,
-      );
-      if (result == null || result.paths.isEmpty) return;
+  Future<void> _scanDeviceForFolders() async {
+    await _ensureStoragePermission();
+    setState(() {
+      _isLoading = true;
+      _folders.clear();
+      _statusText = 'جاري تصنيف الملفات في مجلدات تشبه الاستوديو...';
+    });
 
-      final embPaths = result.paths
-          .whereType<String>()
-          .where((p) => p.toLowerCase().endsWith('.emb'))
-          .toList();
+    final Map<String, List<String>> folderMap = {};
 
-      if (embPaths.isEmpty) {
-        _showSnack('لم يتم تحديد أي ملفات بصيغة .emb');
-        return;
+    final candidateDirs = <String>[
+      '/storage/emulated/0/Download',
+      '/storage/emulated/0/Documents',
+      '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents',
+      '/storage/emulated/0/WhatsApp/Media/WhatsApp Documents',
+      '/storage/emulated/0/Telegram/Telegram Documents',
+      '/storage/emulated/0/Bluetooth',
+    ];
+
+    for (final rootPath in candidateDirs) {
+      final rootDir = Directory(rootPath);
+      if (await rootDir.exists()) {
+        try {
+          await for (final entity
+              in rootDir.list(recursive: true, followLinks: false)) {
+            if (entity is File && entity.path.toLowerCase().endsWith('.emb')) {
+              final parentDir = entity.parent.path;
+              folderMap.putIfAbsent(parentDir, () => []).add(entity.path);
+            }
+          }
+        } catch (_) {}
       }
-
-      await _loadDesignsFromPaths(embPaths);
-    } catch (e) {
-      _showSnack('تعذر فتح الملفات: $e');
     }
+
+    final tempFolders = <EmbFolderGroup>[];
+    folderMap.forEach((path, files) {
+      final folderName = path.split(Platform.pathSeparator).last;
+      tempFolders.add(EmbFolderGroup(
+        folderPath: path,
+        folderName: folderName.isEmpty ? path : folderName,
+        filePaths: files,
+      ));
+    });
+
+    setState(() {
+      _isLoading = false;
+      _folders.addAll(tempFolders);
+      _statusText = _folders.isEmpty
+          ? 'لا توجد مجلدات تحوي ملفات EMB. اختر مجلداً يدوياً من الأعلى.'
+          : 'تم العثور على ${_folders.length} مجلدات';
+    });
   }
 
-  Future<void> _pickFolder() async {
+  Future<void> _pickCustomFolder() async {
     try {
       await _ensureStoragePermission();
       final dirPath = await FilePicker.platform.getDirectoryPath();
       if (dirPath == null) return;
 
-      await _saveLastFolder(dirPath);
-      await _scanDirectoryPath(dirPath);
-    } catch (e) {
-      _showSnack('تعذر تحديد المجلد: $e');
-    }
-  }
-
-  Future<void> _scanDirectoryPath(String dirPath) async {
-    setState(() {
-      _isLoading = true;
-      _statusText = 'جاري البحث عن ملفات EMB في المجلد...';
-      _allDesigns.clear();
-      _filteredDesigns.clear();
-    });
-
-    final embPaths = <String>[];
-    await Future.delayed(const Duration(milliseconds: 100));
-
-    try {
+      final embPaths = <String>[];
       final dir = Directory(dirPath);
       await for (final entity in dir.list(recursive: true, followLinks: false)) {
         if (entity is File && entity.path.toLowerCase().endsWith('.emb')) {
           embPaths.add(entity.path);
         }
       }
-    } catch (_) {}
 
-    if (embPaths.isEmpty) {
-      setState(() {
-        _isLoading = false;
-        _statusText = 'لا توجد ملفات .emb داخل هذا المجلد';
-      });
-      return;
-    }
-
-    await _loadDesignsFromPaths(embPaths);
-  }
-
-  Future<void> _loadDesignsFromPaths(List<String> paths) async {
-    setState(() {
-      _isLoading = true;
-      _statusText = 'جاري قراءة ${paths.length} تصميم...';
-    });
-
-    final loadedList = <EmbDesignInfo>[];
-    for (final path in paths) {
-      final info = await EmbParser.parseFile(path);
-      if (info != null) {
-        loadedList.add(info);
-        if (loadedList.length % 3 == 0) {
-          setState(() {
-            _allDesigns.clear();
-            _allDesigns.addAll(loadedList);
-            _applyFilterAndSort();
-          });
-        }
+      if (embPaths.isEmpty) {
+        _showSnack('لا توجد ملفات .emb في هذا المجلد');
+        return;
       }
+
+      final folderName = dirPath.split(Platform.pathSeparator).last;
+      setState(() {
+        _folders.insert(
+          0,
+          EmbFolderGroup(
+            folderPath: dirPath,
+            folderName: folderName.isEmpty ? dirPath : folderName,
+            filePaths: embPaths,
+          ),
+        );
+      });
+    } catch (e) {
+      _showSnack('تعذر فتح المجلد: $e');
     }
-
-    setState(() {
-      _isLoading = false;
-      _allDesigns.clear();
-      _allDesigns.addAll(loadedList);
-      _statusText = _allDesigns.isEmpty
-          ? 'تعذر قراءة الملفات المحددة'
-          : 'تم تحميل ${_allDesigns.length} تصميم بنجاح';
-    });
-    _applyFilterAndSort();
-  }
-
-  void _applyFilterAndSort() {
-    final query = _searchQuery.trim().toLowerCase();
-    final list = _allDesigns.where((d) {
-      if (query.isEmpty) return true;
-      return d.fileName.toLowerCase().contains(query);
-    }).toList();
-
-    switch (_sortOption) {
-      case SortOption.nameAsc:
-        list.sort((a, b) => a.fileName.compareTo(b.fileName));
-        break;
-      case SortOption.stitchesDesc:
-        list.sort((a, b) => b.stitches.compareTo(a.stitches));
-        break;
-      case SortOption.stitchesAsc:
-        list.sort((a, b) => a.stitches.compareTo(b.stitches));
-        break;
-      case SortOption.colorsDesc:
-        list.sort((a, b) => b.colorCount.compareTo(a.colorCount));
-        break;
-    }
-
-    setState(() {
-      _filteredDesigns = list;
-    });
   }
 
   void _showSnack(String msg) {
@@ -330,8 +285,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final numFmt = intl.NumberFormat('#,###');
-
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
@@ -347,114 +300,206 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
             ),
             SizedBox(width: 8),
             Text(
-              '| معرض التطريز',
+              '| استوديو المجلدات',
               style: TextStyle(fontSize: 15, color: Colors.white70),
             ),
           ],
         ),
         actions: [
-          PopupMenuButton<SortOption>(
-            icon: const Icon(Icons.sort),
-            tooltip: 'ترتيب',
-            onSelected: (opt) {
-              _sortOption = opt;
-              _applyFilterAndSort();
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
-                  value: SortOption.nameAsc, child: Text('الاسم (أ - ي)')),
-              PopupMenuItem(
-                  value: SortOption.stitchesDesc, child: Text('الأكثر غرزاً')),
-              PopupMenuItem(
-                  value: SortOption.stitchesAsc, child: Text('الأقل غرزاً')),
-              PopupMenuItem(
-                  value: SortOption.colorsDesc, child: Text('الأكثر ألواناً')),
-            ],
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
+            tooltip: 'إعادة مسح المجلدات',
+            onPressed: _isLoading ? null : _scanDeviceForFolders,
           ),
         ],
       ),
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _isLoading ? null : _pickMultipleFiles,
-                    icon: const Icon(Icons.file_open),
-                    label: const Text('اختيار ملفات EMB'),
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      backgroundColor: const Color(0xFF3E522B),
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _isLoading ? null : _pickFolder,
-                    icon: const Icon(Icons.folder_open,
-                        color: Color(0xFFD4AF37)),
-                    label: const Text(
-                      'مجلد دائم',
-                      style: TextStyle(color: Color(0xFFD4AF37)),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      side: const BorderSide(color: Color(0xFFD4AF37)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (_allDesigns.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: TextField(
-                decoration: InputDecoration(
-                  hintText: 'بحث باسم الموديل...',
-                  prefixIcon: const Icon(Icons.search),
-                  filled: true,
-                  fillColor: const Color(0xFF18202E),
-                  contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-                onChanged: (val) {
-                  _searchQuery = val;
-                  _applyFilterAndSort();
-                },
+            padding: const EdgeInsets.all(12),
+            child: ElevatedButton.icon(
+              onPressed: _isLoading ? null : _pickCustomFolder,
+              icon: const Icon(Icons.folder_open),
+              label: const Text('إضافة وتصفح مجلد جديد'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+                backgroundColor: const Color(0xFF3E522B),
+                foregroundColor: Colors.white,
               ),
             ),
+          ),
+          if (_isLoading)
+            const LinearProgressIndicator(color: Color(0xFFD4AF37)),
+          Expanded(
+            child: _folders.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        _statusText,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 16, color: Colors.white70),
+                      ),
+                    ),
+                  )
+                : GridView.builder(
+                    padding: const EdgeInsets.all(12),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 12,
+                      mainAxisSpacing: 12,
+                      childAspectRatio: 1.1,
+                    ),
+                    itemCount: _folders.length,
+                    itemBuilder: (context, index) {
+                      final folder = _folders[index];
+                      return GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => FolderDetailsScreen(
+                                folderGroup: folder,
+                              ),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF18202E),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          padding: const EdgeInsets.all(14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.folder_rounded,
+                                  size: 44, color: Color(0xFFD4AF37)),
+                              const SizedBox(height: 12),
+                              Text(
+                                folder.folderName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 15,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '${folder.filePaths.length} ملف تصميم',
+                                style: const TextStyle(
+                                  color: Color(0xFF56CCF2),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class FolderDetailsScreen extends StatefulWidget {
+  final EmbFolderGroup folderGroup;
+
+  const FolderDetailsScreen({super.key, required this.folderGroup});
+
+  @override
+  State<FolderDetailsScreen> createState() => _FolderDetailsScreenState();
+}
+
+class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
+  final List<EmbDesignInfo> _designs = [];
+  bool _isLoading = true;
+  String _searchQuery = '';
+  List<EmbDesignInfo> _filteredDesigns = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFolderDesigns();
+  }
+
+  Future<void> _loadFolderDesigns() async {
+    for (final path in widget.folderGroup.filePaths) {
+      final info = await EmbParser.parseFile(path);
+      if (info != null) {
+        _designs.add(info);
+        if (mounted) {
+          setState(() {
+            _filterList();
+          });
+        }
+      }
+    }
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _filterList() {
+    final q = _searchQuery.trim().toLowerCase();
+    _filteredDesigns = _designs.where((d) {
+      if (q.isEmpty) return true;
+      return d.fileName.toLowerCase().contains(q);
+    }).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final numFmt = intl.NumberFormat('#,###');
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E131D),
+        title: Text(widget.folderGroup.folderName,
+            style: const TextStyle(fontSize: 16)),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: 'بحث داخل المجلد...',
+                prefixIcon: const Icon(Icons.search),
+                filled: true,
+                fillColor: const Color(0xFF18202E),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+              onChanged: (val) {
+                setState(() {
+                  _searchQuery = val;
+                  _filterList();
+                });
+              },
+            ),
+          ),
           if (_isLoading)
             const LinearProgressIndicator(color: Color(0xFFD4AF37)),
           Expanded(
             child: _filteredDesigns.isEmpty
                 ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.grid_view_rounded,
-                            size: 64,
-                            color: Colors.white.withOpacity(0.25),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            _statusText,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                                fontSize: 16, color: Colors.white70),
-                          ),
-                        ],
-                      ),
+                    child: Text(
+                      _isLoading ? 'جاري تحميل تصاميم المجلد...' : 'لا توجد نتائج',
+                      style: const TextStyle(color: Colors.white70),
                     ),
                   )
                 : GridView.builder(
@@ -1116,65 +1161,4 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                       _BgColorDot(
                         color: const Color(0xFF0E131D),
                         isSelected: _canvasBg == const Color(0xFF0E131D),
-                        onTap: () =>
-                            setState(() => _canvasBg = const Color(0xFF0E131D)),
-                      ),
-                      _BgColorDot(
-                        color: Colors.black,
-                        isSelected: _canvasBg == Colors.black,
-                        onTap: () => setState(() => _canvasBg = Colors.black),
-                      ),
-                      _BgColorDot(
-                        color: const Color(0xFFD1D5DB),
-                        isSelected: _canvasBg == const Color(0xFFD1D5DB),
-                        onTap: () =>
-                            setState(() => _canvasBg = const Color(0xFFD1D5DB)),
-                      ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      if (d.stitchPreviewBytes != null)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 6),
-                          child: TextButton(
-                            onPressed: () => setState(
-                                () => _showStitchView = !_showStitchView),
-                            style: TextButton.styleFrom(
-                              backgroundColor: _showStitchView
-                                  ? const Color(0xFF3E522B)
-                                  : Colors.white10,
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 4),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            ),
-                            child: Text(
-                              _showStitchView ? 'غرز 2D' : 'مجسم 3D',
-                              style: const TextStyle(
-                                  color: Colors.white, fontSize: 12),
-                            ),
-                          ),
-                        ),
-                      TextButton.icon(
-                        onPressed: () =>
-                            setState(() => _enhanceClarity = !_enhanceClarity),
-                        style: TextButton.styleFrom(
-                          backgroundColor: _enhanceClarity
-                              ? const Color(0xFFD4AF37).withOpacity(0.22)
-                              : Colors.white10,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        icon: Icon(
-                          Icons.auto_fix_high,
-                          size: 15,
-                          color: _enhanceClarity
-                              ? const Color(0xFFD4AF37)
-                              : Colors.white60,
-                        ),
-                        label: Text(
-                          'وضوح عالٍ',
-                          style: TextStyle(
+                        
