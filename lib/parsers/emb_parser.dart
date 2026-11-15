@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:image/image.dart' as img;
 
 class ThreadColorStep {
   final int stopNumber;
@@ -77,7 +76,6 @@ class EmbParser {
       final ole = _Ole2Reader(bytes);
       if (!ole.isValid) return null;
 
-      // 1. استخراج صور المعاينة (TrueView 3D & 2D Stitch)
       _ExtractedImage? bestTrueView =
           _decodeStreamImage(ole.getStream('TRUEVIEW_ICON'));
       final _ExtractedImage? stitchView =
@@ -93,17 +91,10 @@ class EmbParser {
         }
       }
 
-      _ExtractedImage? primaryImg = bestTrueView ?? stitchView;
-      if (primaryImg != null) {
-        primaryImg = _enhanceCrystalHD(primaryImg);
-      }
-
+      final _ExtractedImage? primaryImg = bestTrueView ?? stitchView;
       final Uint8List? secondaryStitch =
-          (bestTrueView != null && stitchView != null)
-              ? _enhanceCrystalHD(stitchView).bytes
-              : null;
+          (bestTrueView != null && stitchView != null) ? stitchView.bytes : null;
 
-      // 2. قراءة خصائص الملف + قاموس الأسماء لحساب الترتر بدقة 100%
       int stitches = 0;
       int colors = 0;
       int jumps = 0;
@@ -134,7 +125,6 @@ class EmbParser {
             propPositions[pid] = sectionOffset + propRelOffset;
           }
 
-          // قراءة القاموس (PID 0) لربط اسم 'sequins' بالمعرف الصحيح
           final Map<int, String> pidNames = {};
           if (propPositions.containsKey(0)) {
             final dictPos = propPositions[0]!;
@@ -170,11 +160,14 @@ class EmbParser {
             if ((propType == 3 || propType == 19 || propType == 22) &&
                 propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
-              if (propName == 'number of stitches' || (propName.isEmpty && pid == 6)) {
+              if (propName == 'number of stitches' ||
+                  (propName.isEmpty && pid == 6)) {
                 stitches = val;
-              } else if (propName == 'number of colours' || (propName.isEmpty && pid == 3)) {
+              } else if (propName == 'number of colours' ||
+                  (propName.isEmpty && pid == 3)) {
                 colors = val;
-              } else if (propName == 'number of jumps' || (propName.isEmpty && pid == 7)) {
+              } else if (propName == 'number of jumps' ||
+                  (propName.isEmpty && pid == 7)) {
                 jumps = val;
               } else if (propName == 'sequins') {
                 sequins = val;
@@ -265,42 +258,6 @@ class EmbParser {
     if (v <= 0.1) return null;
     if (v > 5000) return v / 100.0;
     return v;
-  }
-
-  // خوارزمية رفع الدقة وتصفية الغباش (Crystal Upscaling)
-  static _ExtractedImage _enhanceCrystalHD(_ExtractedImage src) {
-    try {
-      final decoded = img.decodeImage(src.bytes);
-      if (decoded == null) return src;
-
-      // مضاعفة الأبعاد بنظام Cubic مع فلتر إبراز حواف الغرز والترتر
-      final int scale = (decoded.width < 900 && decoded.height < 900) ? 2 : 1;
-      img.Image work = scale > 1
-          ? img.copyResize(
-              decoded,
-              width: decoded.width * scale,
-              height: decoded.height * scale,
-              interpolation: img.Interpolation.cubic,
-            )
-          : decoded;
-
-      // تطبيق مصفوفة حدة دقيقة (Unsharp Convolution) لإزالة غباش التكبير
-      work = img.convolution(
-        work,
-        filter: [
-          0, -0.45, 0,
-          -0.45, 2.8, -0.45,
-          0, -0.45, 0,
-        ],
-        div: 1.0,
-        offset: 0,
-      );
-
-      final pngBytes = Uint8List.fromList(img.encodePng(work, level: 4));
-      return _ExtractedImage(pngBytes, work.width, work.height);
-    } catch (_) {
-      return src;
-    }
   }
 
   static _ExtractedImage? _decodeStreamImage(Uint8List? stream) {
