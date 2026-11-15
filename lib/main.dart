@@ -241,7 +241,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
       _filteredDesigns.clear();
     });
 
-    // تنفيذ البحث في الخلفية لتجنب تجميد الواجهة
     final embPaths = <String>[];
     await Future.delayed(const Duration(milliseconds: 100));
 
@@ -273,7 +272,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
 
     final loadedList = <EmbDesignInfo>[];
     for (final path in paths) {
-      // قراءة كل ملف على حده بشكل غير متزامن
       final info = await EmbParser.parseFile(path);
       if (info != null) {
         loadedList.add(info);
@@ -798,7 +796,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                         if (d.widthMm != null && d.heightMm != null) ...[
                           const SizedBox(height: 4),
                           Text(
-                            'الأبعاد: ${d.widthMm!.toStringAsFixed(1)} × ${d.heightMm!.toStringAsFixed(1)} مم',
+                            'الأبعاد: ${d.widthMm!.toStringAsFixed(1)} ×${d.heightMm!.toStringAsFixed(1)} مم',
                             style: const TextStyle(
                                 color: Colors.white70, fontSize: 12),
                           ),
@@ -1163,7 +1161,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                             setState(() => _enhanceClarity = !_enhanceClarity),
                         style: TextButton.styleFrom(
                           backgroundColor: _enhanceClarity
-                              ? const Color(0xFFD4AF37).globalOpacity22 // تم تعديلها لتكون آمنة
+                              ? const Color(0xFFD4AF37).withOpacity(0.22)
                               : Colors.white10,
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 4),
@@ -1180,88 +1178,3 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                         label: Text(
                           'وضوح عالٍ',
                           style: TextStyle(
-                            color: _enhanceClarity
-                                ? const Color(0xFFD4AF37)
-                                : Colors.white60,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BgColorDot extends StatelessWidget {
-  final Color color;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _BgColorDot({
-    required this.color,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    const double globalOpacity22 = 0.22; // تعريف محلي آمن
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 3),
-        width: 22,
-        height: 22,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: isSelected ? const Color(0xFFD4AF37) : Colors.white38,
-            width: isSelected ? 2.5 : 1,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StatBadge extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color color;
-
-  const _StatBadge({
-    required this.label,
-    required this.value,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    const double globalOpacity22 = 0.22;
-    return Column(
-      children: [
-        Text(
-          value,
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 15,
-            color: color,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          label,
-          style: const TextStyle(fontSize: 12, color: Colors.white60),
-        ),
-      ],
-    );
-  }
-}
