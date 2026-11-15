@@ -123,12 +123,12 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _showWelcomeDialog();
+      _showSignatureDialog();
       _startBackgroundScan();
     });
   }
 
-  void _showWelcomeDialog() {
+  void _showSignatureDialog() {
     showDialog(
       context: context,
       barrierDismissible: true,
@@ -138,46 +138,34 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
           borderRadius: BorderRadius.circular(16),
           side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
         ),
-        title: const Row(
-          children: [
-            Icon(Icons.auto_awesome, color: Color(0xFFD4AF37)),
-            SizedBox(width: 8),
-            Text(
-              'أهلاً بك يا أبو وسيم',
-              style: TextStyle(color: Colors.white, fontSize: 18),
-            ),
-          ],
-        ),
         content: const Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
+            SizedBox(height: 8),
             Text(
-              'استوديو Tarik emb الذكي لعرض وتحليل ملفات التطريز.',
-              style: TextStyle(color: Colors.white70, fontSize: 14),
-            ),
-            SizedBox(height: 16),
-            Center(
-              child: Text(
-                'By Tarik Habrosh',
-                style: TextStyle(
-                  color: Color(0xFFD4AF37),
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                  letterSpacing: 1.2,
-                ),
+              'By Tarik Habrosh',
+              style: TextStyle(
+                color: Color(0xFFD4AF37),
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
+                letterSpacing: 1.2,
               ),
             ),
+            SizedBox(height: 8),
           ],
         ),
         actions: [
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF3E522B),
-              foregroundColor: Colors.white,
+          Center(
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF3E522B),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+              ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('موافق'),
             ),
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('موافق'),
           ),
         ],
       ),
@@ -910,7 +898,9 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                     ),
                     itemCount: _filteredDesigns.length,
                     itemBuilder: (context, index) {
-                      final item = _filteredDesigns[index];
+                      final item = _filteredDesigns.index(index) == null
+                          ? _filteredDesigns[index]
+                          : _filteredDesigns[index];
                       return _DesignGridCard(
                         design: item,
                         formattedStitches: numFmt.format(item.stitches),
@@ -939,7 +929,7 @@ class _DesignGridCard extends StatelessWidget {
 
   const _DesignGridCard({
     required this.design,
-    required this.formattedStitches,
+    required this.formattedStstitches,
     required this.onTap,
   });
 
@@ -1648,8 +1638,8 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                               : Colors.white10,
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 4),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
                         icon: Icon(
                           Icons.auto_fix_high,
