@@ -3,7 +3,7 @@ import re
 import glob
 import shutil
 
-# 1. رفع إصدار Kotlin إلى 1.9.24 و compileSdk إلى 35 لمنع فشل Gradle
+# 1. رفع إصدار Kotlin إلى 1.9.24 و compileSdk إلى 35
 for p in glob.glob("android/settings.gradle*"):
     with open(p, "r", encoding="utf-8") as f:
         s = f.read()
@@ -38,7 +38,7 @@ for p in glob.glob("android/app/build.gradle*"):
     with open(p, "w", encoding="utf-8") as f:
         f.write(s)
 
-# 2. تحديث AndroidManifest.xml بالأذونات الدائمة وفلاتر واتساب
+# 2. تحديث AndroidManifest.xml ليظهر التطبيق فوراً في واتساب ومدير الملفات
 manifest_path = "android/app/src/main/AndroidManifest.xml"
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = f.read()
@@ -66,14 +66,10 @@ emb_intent_filters = """
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
-                <data android:host="*" />
-                <data android:mimeType="*/*" />
-                <data android:pathPattern=".*\\.emb" />
-                <data android:pathPattern=".*\\.EMB" />
-                <data android:pathPattern=".*\\..*\\.emb" />
-                <data android:pathPattern=".*\\..*\\.EMB" />
-                <data android:pathPattern=".*\\..*\\..*\\.emb" />
-                <data android:pathPattern=".*\\..*\\..*\\.EMB" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="application/x-emb" />
+                <data android:mimeType="application/emb" />
+                <data android:mimeType="application/*" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -81,9 +77,12 @@ emb_intent_filters = """
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
-                <data android:mimeType="application/octet-stream" />
-                <data android:mimeType="application/x-emb" />
-                <data android:mimeType="application/emb" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.emb" />
+                <data android:pathPattern=".*\\.EMB" />
+                <data android:pathPattern=".*\\..*\\.emb" />
+                <data android:pathPattern=".*\\..*\\.EMB" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
