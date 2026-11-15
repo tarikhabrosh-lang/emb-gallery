@@ -104,13 +104,12 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
   bool _isLoading = false;
   String _searchQuery = '';
   SortOption _sortOption = SortOption.nameAsc;
-  String _statusText = 'جاري البحث التلقائي عن ملفات التطريز (.emb)...';
+  String _statusText = 'اضغط على "مجلد دائم" أو "اختيار ملفات" للبدء';
 
   @override
   void initState() {
     super.initState();
-    _initPermissionsAndAutoScan();
-    // إظهار رسالة الترحيب أول ما يفتح التطبيق
+    _ensureStoragePermission();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showWelcomeDialog();
     });
@@ -141,7 +140,7 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'مرحباً بك في تطبيق Tarik emb لعرض وتحليل ملفات التطريز.',
+              'تطبيق Tarik emb لعرض وتحليل ملفات التطريز بوضوح كريستالي.',
               style: TextStyle(color: Colors.white70, fontSize: 14),
             ),
             SizedBox(height: 16),
@@ -184,17 +183,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
     } catch (_) {}
   }
 
-  Future<String?> _readLastFolder() async {
-    try {
-      final f = await _getSavedFolderConfigFile();
-      if (await f.exists()) {
-        final p = (await f.readAsString()).trim();
-        if (p.isNotEmpty && await Directory(p).exists()) return p;
-      }
-    } catch (_) {}
-    return null;
-  }
-
   Future<bool> _ensureStoragePermission() async {
     if (!Platform.isAndroid) return true;
     if (await Permission.manageExternalStorage.isGranted ||
@@ -205,63 +193,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
     if (manageStatus.isGranted) return true;
     final storageStatus = await Permission.storage.request();
     return storageStatus.isGranted;
-  }
-
-  Future<void> _initPermissionsAndAutoScan() async {
-    final hasPerm = await _ensureStoragePermission();
-    if (!hasPerm) {
-      setState(() {
-        _statusText = 'يرجى منح إذن الوصول للملفات لعرض ملفات الـ EMB تلقائياً';
-      });
-      return;
-    }
-
-    final savedDir = await _readLastFolder();
-    if (savedDir != null) {
-      await _scanDirectoryPath(savedDir, isAuto: true);
-      if (_allDesigns.isNotEmpty) return;
-    }
-
-    await _autoScanCommonFolders();
-  }
-
-  Future<void> _autoScanCommonFolders() async {
-    setState(() {
-      _isLoading = true;
-      _statusText = 'جاري البحث التلقائي عن ملفات EMB في الجهاز...';
-    });
-
-    final candidateDirs = <String>[
-      '/storage/emulated/0/Download',
-      '/storage/emulated/0/Documents',
-      '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents',
-      '/storage/emulated/0/WhatsApp/Media/WhatsApp Documents',
-    ];
-
-    final foundPaths = <String>{};
-    for (final path in candidateDirs) {
-      final dir = Directory(path);
-      if (await dir.exists()) {
-        try {
-          await for (final entity
-              in dir.list(recursive: true, followLinks: false)) {
-            if (entity is File && entity.path.toLowerCase().endsWith('.emb')) {
-              foundPaths.add(entity.path);
-            }
-          }
-        } catch (_) {}
-      }
-    }
-
-    if (foundPaths.isEmpty) {
-      setState(() {
-        _isLoading = false;
-        _statusText = 'اختر مجلد التصاميم أو اضغط تحديث للبحث';
-      });
-      return;
-    }
-
-    await _loadDesignsFromPaths(foundPaths.toList());
   }
 
   Future<void> _pickMultipleFiles() async {
@@ -283,9 +214,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
         return;
       }
 
-      final firstParent = File(embPaths.first).parent.path;
-      await _saveLastFolder(firstParent);
-
       await _loadDesignsFromPaths(embPaths);
     } catch (e) {
       _showSnack('تعذر فتح الملفات: $e');
@@ -299,23 +227,26 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
       if (dirPath == null) return;
 
       await _saveLastFolder(dirPath);
-      await _scanDirectoryPath(dirPath, isAuto: false);
+      await _scanDirectoryPath(dirPath);
     } catch (e) {
-      setState(() => _isLoading = false);
-      _showSnack('تعذر فحص المجلد: $e');
+      _showSnack('تعذر تحديد المجلد: $e');
     }
   }
 
-  Future<void> _scanDirectoryPath(String dirPath, {required bool isAuto}) async {
+  Future<void> _scanDirectoryPath(String dirPath) async {
     setState(() {
       _isLoading = true;
-      _statusText = 'جاري فحص المجلد...';
+      _statusText = 'جاري البحث عن ملفات EMB في المجلد...';
+      _allDesigns.clear();
+      _filteredDesigns.clear();
     });
 
-    final dir = Directory(dirPath);
+    // تنفيذ البحث في الخلفية لتجنب تجميد الواجهة
     final embPaths = <String>[];
+    await Future.delayed(const Duration(milliseconds: 100));
 
     try {
+      final dir = Directory(dirPath);
       await for (final entity in dir.list(recursive: true, followLinks: false)) {
         if (entity is File && entity.path.toLowerCase().endsWith('.emb')) {
           embPaths.add(entity.path);
@@ -324,14 +255,10 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
     } catch (_) {}
 
     if (embPaths.isEmpty) {
-      if (!isAuto) {
-        setState(() {
-          _isLoading = false;
-          _statusText = 'لا توجد ملفات .emb داخل هذا المجلد';
-        });
-      } else {
-        setState(() => _isLoading = false);
-      }
+      setState(() {
+        _isLoading = false;
+        _statusText = 'لا توجد ملفات .emb داخل هذا المجلد';
+      });
       return;
     }
 
@@ -341,25 +268,29 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
   Future<void> _loadDesignsFromPaths(List<String> paths) async {
     setState(() {
       _isLoading = true;
-      _allDesigns.clear();
-      _filteredDesigns.clear();
       _statusText = 'جاري قراءة ${paths.length} تصميم...';
     });
 
-    int loaded = 0;
+    final loadedList = <EmbDesignInfo>[];
     for (final path in paths) {
+      // قراءة كل ملف على حده بشكل غير متزامن
       final info = await EmbParser.parseFile(path);
       if (info != null) {
-        _allDesigns.add(info);
-        loaded++;
-        if (loaded % 5 == 0 || loaded == paths.length) {
-          _applyFilterAndSort();
+        loadedList.add(info);
+        if (loadedList.length % 3 == 0) {
+          setState(() {
+            _allDesigns.clear();
+            _allDesigns.addAll(loadedList);
+            _applyFilterAndSort();
+          });
         }
       }
     }
 
     setState(() {
       _isLoading = false;
+      _allDesigns.clear();
+      _allDesigns.addAll(loadedList);
       _statusText = _allDesigns.isEmpty
           ? 'تعذر قراءة الملفات المحددة'
           : 'تم تحميل ${_allDesigns.length} تصميم بنجاح';
@@ -424,11 +355,6 @@ class _GalleryHomePageState extends State<GalleryHomePage> {
           ],
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
-            tooltip: 'إعادة فحص',
-            onPressed: _isLoading ? null : _initPermissionsAndAutoScan,
-          ),
           PopupMenuButton<SortOption>(
             icon: const Icon(Icons.sort),
             tooltip: 'ترتيب',
@@ -1237,7 +1163,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                             setState(() => _enhanceClarity = !_enhanceClarity),
                         style: TextButton.styleFrom(
                           backgroundColor: _enhanceClarity
-                              ? const Color(0xFFD4AF37).withOpacity(0.22)
+                              ? const Color(0xFFD4AF37).globalOpacity22 // تم تعديلها لتكون آمنة
                               : Colors.white10,
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 4),
@@ -1286,6 +1212,7 @@ class _BgColorDot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const double globalOpacity22 = 0.22; // تعريف محلي آمن
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -1318,6 +1245,7 @@ class _StatBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const double globalOpacity22 = 0.22;
     return Column(
       children: [
         Text(
