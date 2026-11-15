@@ -18,16 +18,90 @@ void main() {
   runApp(const EmbGalleryApp());
 }
 
+// نظام إدارة اللغات
+class AppLocalizations {
+  final Locale locale;
+  AppLocalizations(this.locale);
+
+  static AppLocalizations of(BuildContext context) {
+    return Localizations.of<AppLocalizations>(context, AppLocalizations)!;
+  }
+
+  static const _localizedValues = {
+    'ar': {
+      'app_title': 'Tarik emb',
+      'studio': '| استوديو المجلدات',
+      'open_files': 'فتح ملفات EMB',
+      'add_folder': 'إضافة مجلد دائم',
+      'folders': 'المجلدات',
+      'total_files': 'إجمالي الملفات',
+      'file_unit': 'ملف EMB',
+      'search_folder': 'بحث داخل المجلد...',
+      'search_model': 'بحث باسم الموديل...',
+      'stitches': 'غرزة',
+      'colors': 'لون',
+      'threads': 'بكرات الخيوط المطلوبة للماكينة',
+      'sequence': 'تسلسل الخيوط ومراحل التشغيل',
+      'needle': 'إبرة رقم',
+      'dimensions': 'الأبعاد',
+      'share_image': 'مشاركة صورة المعاينة للواتس',
+      'share_both': 'مشاركة الصورة + ملف EMB معاً',
+      'full_screen': 'تكبير ملء الشاشة بوضوح',
+      'background': 'الخلفية:',
+      'high_clarity': 'وضوح عالٍ',
+    },
+    'en': {
+      'app_title': 'Tarik emb',
+      'studio': '| Folders Studio',
+      'open_files': 'Open EMB Files',
+      'add_folder': 'Add Persistent Folder',
+      'folders': 'Folders',
+      'total_files': 'Total Files',
+      'file_unit': 'EMB files',
+      'search_folder': 'Search in folder...',
+      'search_model': 'Search model name...',
+      'stitches': 'stitches',
+      'colors': 'colors',
+      'threads': 'Required Machine Thread Spools',
+      'sequence': 'Thread Sequence & Operation Stops',
+      'needle': 'Needle #',
+      'dimensions': 'Dimensions',
+      'share_image': 'Share Preview Image to WhatsApp',
+      'share_both': 'Share Image + EMB File Together',
+      'full_screen': 'High-Res Fullscreen Zoom',
+      'background': 'Background:',
+      'high_clarity': 'High Clarity',
+    },
+  };
+
+  String translate(String key) {
+    return _localizedValues[locale.languageCode]?[key] ?? key;
+  }
+}
+
 class EmbGalleryApp extends StatefulWidget {
   const EmbGalleryApp({super.key});
+
+  static void setLocale(BuildContext context, Locale newLocale) {
+    _EmbGalleryAppState? state =
+        context.findAncestorStateOfType<_EmbGalleryAppState>();
+    state?.setLocale(newLocale);
+  }
 
   @override
   State<EmbGalleryApp> createState() => _EmbGalleryAppState();
 }
 
 class _EmbGalleryAppState extends State<EmbGalleryApp> {
+  Locale _locale = const Locale('ar'); // اللغة الافتراضية العربية
   static const MethodChannel _intentChannel =
       MethodChannel('tarik_emb/file_intent');
+
+  void setLocale(Locale locale) {
+    setState(() {
+      _locale = locale;
+    });
+  }
 
   @override
   void initState() {
@@ -69,6 +143,7 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
       navigatorKey: rootNavigatorKey,
       title: 'Tarik emb',
       debugShowCheckedModeBanner: false,
+      locale: _locale,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
@@ -80,7 +155,8 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
       ),
       builder: (context, child) {
         return Directionality(
-          textDirection: TextDirection.rtl,
+          textDirection:
+              _locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr,
           child: child!,
         );
       },
@@ -441,9 +517,9 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
-        title: const Row(
+        title: Row(
           children: [
-            Text(
+            const Text(
               'Tarik emb',
               style: TextStyle(
                 fontWeight: FontWeight.bold,
@@ -451,14 +527,26 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                 letterSpacing: 0.6,
               ),
             ),
-            SizedBox(width: 8),
+            const SizedBox(width: 8),
             Text(
               '| استوديو المجلدات',
-              style: TextStyle(fontSize: 15, color: Colors.white70),
+              style: const TextStyle(fontSize: 15, color: Colors.white70),
             ),
           ],
         ),
         actions: [
+          // زر تبديل اللغة (عربي / إنجليزي)
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.language, color: Color(0xFFD4AF37)),
+            tooltip: 'Change Language / تغيير اللغة',
+            onSelected: (langCode) {
+              EmbGalleryApp.setLocale(context, Locale(langCode));
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'ar', child: Text('العربية (Arabic)')),
+              PopupMenuItem(value: 'en', child: Text('English (الإنجليزية)')),
+            ],
+          ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
             tooltip: 'تحديث المجلدات',
@@ -961,774 +1049,4 @@ class _DesignGridCard extends StatelessWidget {
                       ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Directionality(
-                    textDirection: TextDirection.ltr,
-                    child: Text(
-                      design.fileName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 13),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        '$formattedStitches غرزة',
-                        style: const TextStyle(
-                            color: Color(0xFF56CCF2), fontSize: 12),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFD4AF37).withOpacity(0.18),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          '${design.colorCount} لون',
-                          style: const TextStyle(
-                              color: Color(0xFFD4AF37), fontSize: 11),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class DesignDetailScreen extends StatefulWidget {
-  final EmbDesignInfo design;
-
-  const DesignDetailScreen({super.key, required this.design});
-
-  @override
-  State<DesignDetailScreen> createState() => _DesignDetailScreenState();
-}
-
-class _DesignDetailScreenState extends State<DesignDetailScreen> {
-  final GlobalKey _shareCardKey = GlobalKey();
-  bool _isSharing = false;
-
-  void _openFullScreenViewer() {
-    if (widget.design.previewJpeg == null) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => FullScreenDesignViewer(design: widget.design),
-      ),
-    );
-  }
-
-  Future<void> _shareDesignCard({bool includeEmbFile = false}) async {
-    if (_isSharing) return;
-    setState(() => _isSharing = true);
-    try {
-      final boundary = _shareCardKey.currentContext?.findRenderObject()
-          as RenderRepaintBoundary?;
-      if (boundary == null) return;
-
-      final image = await boundary.toImage(pixelRatio: 3.0);
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-      if (byteData == null) return;
-
-      final tempDir = await getTemporaryDirectory();
-      final outFile = File(
-          '${tempDir.path}/tarik_emb_${DateTime.now().millisecondsSinceEpoch}.png');
-      await outFile.writeAsBytes(byteData.buffer.asUint8List());
-
-      final filesToShare = <XFile>[XFile(outFile.path)];
-      if (includeEmbFile && await File(widget.design.filePath).exists()) {
-        filesToShare.add(XFile(widget.design.filePath));
-      }
-
-      final numFmt = intl.NumberFormat('#,###');
-      final seqText = widget.design.sequinsCount > 0
-          ? '\nعدد الترتر: ${numFmt.format(widget.design.sequinsCount)}'
-          : '';
-      await Share.shareXFiles(
-        filesToShare,
-        text:
-            'موديل: ${widget.design.fileName}\nعدد الغرز: ${numFmt.format(widget.design.stitches)}\nعدد الألوان: ${widget.design.colorCount}\nعدد المراحل: ${widget.design.actualStopsCount}$seqText',
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('تعذرت المشاركة: $e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSharing = false);
-    }
-  }
-
-  List<ThreadColorStep> _getUniqueThreadPalette(List<ThreadColorStep> seq) {
-    final seen = <String>{};
-    final unique = <ThreadColorStep>[];
-    for (final s in seq) {
-      final key = '${s.colorIndex}_${s.colorName}';
-      if (seen.add(key)) {
-        unique.add(s);
-      }
-    }
-    return unique;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final numFmt = intl.NumberFormat('#,###');
-    final d = widget.design;
-    final uniqueThreads = _getUniqueThreadPalette(d.colorSequence);
-
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF0E131D),
-        title: Directionality(
-          textDirection: TextDirection.ltr,
-          child: Text(d.fileName, style: const TextStyle(fontSize: 16)),
-        ),
-        actions: [
-          if (d.previewJpeg != null)
-            IconButton(
-              onPressed: _openFullScreenViewer,
-              icon: const Icon(Icons.fullscreen, color: Color(0xFFD4AF37)),
-              tooltip: 'تكبير بملء الشاشة',
-            ),
-          PopupMenuButton<String>(
-            icon: _isSharing
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.share),
-            tooltip: 'مشاركة عبر واتساب',
-            onSelected: (val) {
-              if (val == 'image') {
-                _shareDesignCard(includeEmbFile: false);
-              } else if (val == 'both') {
-                _shareDesignCard(includeEmbFile: true);
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
-                value: 'image',
-                child: Text('مشاركة صورة المعاينة للواتس'),
-              ),
-              PopupMenuItem(
-                value: 'both',
-                child: Text('مشاركة الصورة + ملف EMB معاً'),
-              ),
-            ],
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(14),
-        children: [
-          RepaintBoundary(
-            key: _shareCardKey,
-            child: Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF18202E),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white12),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Column(
-                children: [
-                  GestureDetector(
-                    onTap: _openFullScreenViewer,
-                    child: Stack(
-                      children: [
-                        Container(
-                          height: 360,
-                          width: double.infinity,
-                          color: Colors.white,
-                          child: d.previewJpeg != null
-                              ? InteractiveViewer(
-                                  minScale: 0.8,
-                                  maxScale: 8.0,
-                                  child: Center(
-                                    child: Image.memory(
-                                      d.previewJpeg!,
-                                      fit: BoxFit.contain,
-                                      filterQuality: FilterQuality.high,
-                                      isAntiAlias: true,
-                                    ),
-                                  ),
-                                )
-                              : const Center(
-                                  child: Icon(Icons.image_not_supported,
-                                      size: 64, color: Colors.grey),
-                                ),
-                        ),
-                        if (d.previewJpeg != null)
-                          Positioned(
-                            bottom: 10,
-                            left: 10,
-                            child: Material(
-                              color: const Color(0xFF0E131D).withOpacity(0.88),
-                              borderRadius: BorderRadius.circular(20),
-                              child: InkWell(
-                                onTap: _openFullScreenViewer,
-                                borderRadius: BorderRadius.circular(20),
-                                child: const Padding(
-                                  padding: EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 6),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(Icons.zoom_in,
-                                          size: 18, color: Color(0xFFD4AF37)),
-                                      SizedBox(width: 4),
-                                      Text(
-                                        'تكبير ملء الشاشة بوضوح',
-                                        style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.bold),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(14),
-                    child: Column(
-                      children: [
-                        Directionality(
-                          textDirection: TextDirection.ltr,
-                          child: Text(
-                            d.fileName,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 16),
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 5),
-                          decoration: BoxDecoration(
-                            color: Colors.black26,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.folder_open,
-                                  size: 15, color: Color(0xFFD4AF37)),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Directionality(
-                                  textDirection: TextDirection.ltr,
-                                  child: SelectableText(
-                                    d.filePath,
-                                    style: const TextStyle(
-                                        color: Colors.white70, fontSize: 11),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        if (d.widthMm != null && d.heightMm != null) ...[
-                          const SizedBox(height: 6),
-                          Text(
-                            'الأبعاد: ${d.widthMm!.toStringAsFixed(1)} × ${d.heightMm!.toStringAsFixed(1)} مم',
-                            style: const TextStyle(
-                                color: Colors.white70, fontSize: 12),
-                          ),
-                        ],
-                        const SizedBox(height: 12),
-                        Wrap(
-                          spacing: 16,
-                          runSpacing: 10,
-                          alignment: WrapAlignment.spaceAround,
-                          children: [
-                            _StatBadge(
-                              label: 'الغرز',
-                              value: numFmt.format(d.stitches),
-                              color: const Color(0xFF56CCF2),
-                            ),
-                            _StatBadge(
-                              label: 'الألوان',
-                              value: '${d.colorCount}',
-                              color: const Color(0xFFD4AF37),
-                            ),
-                            _StatBadge(
-                              label: 'المراحل',
-                              value: numFmt.format(d.actualStopsCount),
-                              color: Colors.greenAccent,
-                            ),
-                            _StatBadge(
-                              label: 'الترتر',
-                              value: numFmt.format(d.sequinsCount),
-                              color: Colors.pinkAccent,
-                            ),
-                            _StatBadge(
-                              label: 'القفزات',
-                              value: numFmt.format(d.jumpsCount),
-                              color: Colors.orangeAccent,
-                            ),
-                            _StatBadge(
-                              label: 'الماكينة',
-                              value: d.machineType,
-                              color: Colors.purpleAccent,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (uniqueThreads.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            const Text(
-              'بكرات الخيوط المطلوبة للماكينة',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              height: 38,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: uniqueThreads.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (context, idx) {
-                  final t = uniqueThreads[idx];
-                  final threadColor = Color(t.colorValue);
-                  return Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF18202E),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.white12),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 14,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            color: threadColor,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white54, width: 1),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          '${t.colorName} (#${t.colorIndex})',
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-          const SizedBox(height: 18),
-          if (d.colorSequence.isNotEmpty) ...[
-            const Text(
-              'تسلسل الخيوط ومراحل التشغيل',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF18202E),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: ListView.separated(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: d.colorSequence.length,
-                separatorBuilder: (_, __) =>
-                    const Divider(height: 1, color: Colors.white10),
-                itemBuilder: (context, idx) {
-                  final step = d.colorSequence[idx];
-                  final stepColor = Color(step.colorValue);
-                  final bool isLight = stepColor.computeLuminance() > 0.55;
-                  return ListTile(
-                    dense: true,
-                    leading: CircleAvatar(
-                      radius: 15,
-                      backgroundColor: stepColor,
-                      child: Text(
-                        '${step.stopNumber}',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: isLight ? Colors.black : Colors.white,
-                        ),
-                      ),
-                    ),
-                    title: Text(step.colorName),
-                    subtitle: Text('إبرة رقم ${step.colorIndex}'),
-                    trailing: Text(
-                      '${numFmt.format(step.stitches)} غرزة',
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class FullScreenDesignViewer extends StatefulWidget {
-  final EmbDesignInfo design;
-
-  const FullScreenDesignViewer({super.key, required this.design});
-
-  @override
-  State<FullScreenDesignViewer> createState() => _FullScreenDesignViewerState();
-}
-
-class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
-  final TransformationController _transformController =
-      TransformationController();
-  TapDownDetails? _doubleTapDetails;
-
-  Color _canvasBg = Colors.white;
-  bool _enhanceClarity = true;
-  bool _showStitchView = false;
-  double _currentScale = 1.0;
-
-  @override
-  void initState() {
-    super.initState();
-    _transformController.addListener(() {
-      final scale = _transformController.value.getMaxScaleOnAxis();
-      if ((scale - _currentScale).abs() > 0.05) {
-        setState(() => _currentScale = scale);
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _transformController.dispose();
-    super.dispose();
-  }
-
-  void _handleDoubleTap() {
-    if (_transformController.value != Matrix4.identity()) {
-      _transformController.value = Matrix4.identity();
-    } else if (_doubleTapDetails != null) {
-      final position = _doubleTapDetails!.localPosition;
-      const double targetScale = 4.0;
-      _transformController.value = Matrix4.identity()
-        ..translate(
-            -position.dx * (targetScale - 1), -position.dy * (targetScale - 1))
-        ..scale(targetScale);
-    }
-  }
-
-  void _resetZoom() {
-    _transformController.value = Matrix4.identity();
-  }
-
-  static const ColorFilter _clarityMatrix = ColorFilter.matrix(<double>[
-    1.28, -0.09, -0.09, 0, -14,
-    -0.09, 1.28, -0.09, 0, -14,
-    -0.09, -0.09, 1.28, 0, -14,
-    0, 0, 0, 1, 0,
-  ]);
-
-  @override
-  Widget build(BuildContext context) {
-    final d = widget.design;
-    final Uint8List activeImage =
-        (_showStitchView && d.stitchPreviewBytes != null)
-            ? d.stitchPreviewBytes!
-            : d.previewJpeg!;
-
-    final media = MediaQuery.of(context);
-    final targetCacheWidth = (media.size.width * media.devicePixelRatio * 4)
-        .round()
-        .clamp(1024, 4096);
-
-    final imageWidget = Image.memory(
-      activeImage,
-      fit: BoxFit.contain,
-      filterQuality: FilterQuality.high,
-      isAntiAlias: true,
-      cacheWidth: d.previewWidth > 0 ? null : targetCacheWidth,
-      gaplessPlayback: true,
-    );
-
-    return Scaffold(
-      backgroundColor: _canvasBg,
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF0E131D),
-        foregroundColor: Colors.white,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Directionality(
-              textDirection: TextDirection.ltr,
-              child: Text(
-                d.fileName,
-                style: const TextStyle(fontSize: 14),
-              ),
-            ),
-            Directionality(
-              textDirection: TextDirection.ltr,
-              child: Text(
-                d.filePath,
-                style: const TextStyle(fontSize: 10, color: Colors.white60),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: Colors.white10,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '${(_currentScale * 100).round()}%',
-                style: const TextStyle(
-                  color: Color(0xFFD4AF37),
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ),
-          IconButton(
-            onPressed: _resetZoom,
-            icon: const Icon(Icons.fit_screen),
-            tooltip: 'إعادة ضبط الحجم',
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              onDoubleTapDown: (details) => _doubleTapDetails = details,
-              onDoubleTap: _handleDoubleTap,
-              child: InteractiveViewer(
-                transformationController: _transformController,
-                minScale: 0.5,
-                maxScale: 12.0,
-                boundaryMargin: const EdgeInsets.all(120),
-                child: Center(
-                  child: _enhanceClarity
-                      ? ColorFiltered(
-                          colorFilter: _clarityMatrix,
-                          child: imageWidget,
-                        )
-                      : imageWidget,
-                ),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: 18,
-            left: 14,
-            right: 14,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0E131D).withOpacity(0.92),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white12),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      const Text(
-                        'الخلفية:',
-                        style: TextStyle(color: Colors.white70, fontSize: 12),
-                      ),
-                      const SizedBox(width: 6),
-                      _BgColorDot(
-                        color: Colors.white,
-                        isSelected: _canvasBg == Colors.white,
-                        onTap: () => setState(() => _canvasBg = Colors.white),
-                      ),
-                      _BgColorDot(
-                        color: const Color(0xFF0E131D),
-                        isSelected: _canvasBg == const Color(0xFF0E131D),
-                        onTap: () =>
-                            setState(() => _canvasBg = const Color(0xFF0E131D)),
-                      ),
-                      _BgColorDot(
-                        color: Colors.black,
-                        isSelected: _canvasBg == Colors.black,
-                        onTap: () => setState(() => _canvasBg = Colors.black),
-                      ),
-                      _BgColorDot(
-                        color: const Color(0xFFD1D5DB),
-                        isSelected: _canvasBg == const Color(0xFFD1D5DB),
-                        onTap: () =>
-                            setState(() => _canvasBg = const Color(0xFFD1D5DB)),
-                      ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      if (d.stitchPreviewBytes != null)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 6),
-                          child: TextButton(
-                            onPressed: () => setState(
-                                () => _showStitchView = !_showStitchView),
-                            style: TextButton.styleFrom(
-                              backgroundColor: _showStitchView
-                                  ? const Color(0xFF3E522B)
-                                  : Colors.white10,
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 4),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            ),
-                            child: Text(
-                              _showStitchView ? 'غرز 2D' : 'مجسم 3D',
-                              style: const TextStyle(
-                                  color: Colors.white, fontSize: 12),
-                            ),
-                          ),
-                        ),
-                      TextButton.icon(
-                        onPressed: () =>
-                            setState(() => _enhanceClarity = !_enhanceClarity),
-                        style: TextButton.styleFrom(
-                          backgroundColor: _enhanceClarity
-                              ? const Color(0xFFD4AF37).withOpacity(0.22)
-                              : Colors.white10,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        icon: Icon(
-                          Icons.auto_fix_high,
-                          size: 15,
-                          color: _enhanceClarity
-                              ? const Color(0xFFD4AF37)
-                              : Colors.white60,
-                        ),
-                        label: Text(
-                          'وضوح عالٍ',
-                          style: TextStyle(
-                            color: _enhanceClarity
-                                ? const Color(0xFFD4AF37)
-                                : Colors.white60,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BgColorDot extends StatelessWidget {
-  final Color color;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _BgColorDot({
-    required this.color,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 3),
-        width: 22,
-        height: 22,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: isSelected ? const Color(0xFFD4AF37) : Colors.white38,
-            width: isSelected ? 2.5 : 1,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StatBadge extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color color;
-
-  const _StatBadge({
-    required this.label,
-    required this.value,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Text(
-          value,
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 15,
-            color: color,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          label,
-          style: const TextStyle(fontSize: 12, color: Colors.white60),
-        ),
-      ],
-    );
-  }
-}
+            
