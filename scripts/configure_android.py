@@ -1,3 +1,4 @@
+
 import os
 import re
 import glob
@@ -38,7 +39,7 @@ for p in glob.glob("android/app/build.gradle*"):
     with open(p, "w", encoding="utf-8") as f:
         f.write(s)
 
-# 2. تحديث AndroidManifest.xml ليظهر التطبيق فوراً في واتساب ومدير الملفات
+# 2. تحديث AndroidManifest.xml بصيغة متوافقة 100% مع SDK 35 وواتساب
 manifest_path = "android/app/src/main/AndroidManifest.xml"
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = f.read()
@@ -61,15 +62,11 @@ manifest = re.sub(r'android:launchMode="[^"]*"', 'android:launchMode="singleTop"
 emb_intent_filters = """
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
-                <action android:name="android.intent.action.EDIT" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
                 <data android:mimeType="application/octet-stream" />
-                <data android:mimeType="application/x-emb" />
-                <data android:mimeType="application/emb" />
-                <data android:mimeType="application/*" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -77,12 +74,7 @@ emb_intent_filters = """
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
-                <data android:host="*" />
-                <data android:mimeType="*/*" />
-                <data android:pathPattern=".*\\.emb" />
-                <data android:pathPattern=".*\\.EMB" />
-                <data android:pathPattern=".*\\..*\\.emb" />
-                <data android:pathPattern=".*\\..*\\.EMB" />
+                <data android:mimeType="application/*" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
