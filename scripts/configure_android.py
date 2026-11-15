@@ -1,78 +1,64 @@
 import os
 import re
+import glob
 import shutil
 
-# Fix Android build tool versions in the fresh Flutter project.
-# Build log: Kotlin metadata is 2.0.0, while the project expects 1.6.0;
-# one Android dependency also requires compileSdk 35.
-settings_path = "android/settings.gradle"
-if not os.path.exists(settings_path):
-    raise FileNotFoundError("android/settings.gradle was not created by flutter create")
-
-with open(settings_path, "r", encoding="utf-8") as f:
-    settings = f.read()
-
-settings, kotlin_matches = re.subn(
-    r"""(id\s+["']org\.jetbrains\.kotlin\.android["']\s+version\s+["'])[^"']+(["'])""",
-    r"""\g<1>2.0.0\2""",
-    settings,
-    count=1,
-)
-if kotlin_matches == 0:
-    raise RuntimeError("Could not find Kotlin Gradle plugin version in android/settings.gradle")
-
-with open(settings_path, "w", encoding="utf-8") as f:
-    f.write(settings)
-
-app_gradle_path = "android/app/build.gradle"
-with open(app_gradle_path, "r", encoding="utf-8") as f:
-    app_gradle = f.read()
-
-app_gradle, sdk_matches = re.subn(
-    r"compileSdkVersion\s+flutter\.compileSdkVersion",
-    "compileSdkVersion 35",
-    app_gradle,
-    count=1,
-)
-if sdk_matches == 0:
-    app_gradle, sdk_matches = re.subn(
-        r"compileSdk\s+flutter\.compileSdkVersion",
-        "compileSdk 35",
-        app_gradle,
-        count=1,
+# 1. رفع إصدار Kotlin إلى 1.9.24 و compileSdk إلى 35 لمنع فشل Gradle
+for p in glob.glob("android/settings.gradle*"):
+    with open(p, "r", encoding="utf-8") as f:
+        s = f.read()
+    s = re.sub(
+        r'(id\s+["\']org\.jetbrains\.kotlin\.android["\']\s+version\s+["\'])[^"\']+(["\'])',
+        r'\g<1>1.9.24\g<2>',
+        s,
     )
-if sdk_matches == 0:
-    raise RuntimeError("Could not find Flutter compileSdk setting in android/app/build.gradle")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(s)
 
-with open(app_gradle_path, "w", encoding="utf-8") as f:
-    f.write(app_gradle)
+for p in glob.glob("android/build.gradle*"):
+    with open(p, "r", encoding="utf-8") as f:
+        s = f.read()
+    s = re.sub(
+        r'ext\.kotlin_version\s*=\s*["\'][^"\']+["\']',
+        'ext.kotlin_version = "1.9.24"',
+        s,
+    )
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(s)
 
+for p in glob.glob("android/app/build.gradle*"):
+    with open(p, "r", encoding="utf-8") as f:
+        s = f.read()
+    s = re.sub(r'compileSdk\s*=?\s*[\w\.]+', 'compileSdk = 35', s)
+    s = re.sub(r'compileSdkVersion\s+[\w\.]+', 'compileSdkVersion 35', s)
+    s = re.sub(r'targetSdk\s*=?\s*[\w\.]+', 'targetSdk = 35', s)
+    s = re.sub(r'targetSdkVersion\s+[\w\.]+', 'targetSdkVersion 35', s)
+    s = re.sub(r'minSdk\s*=?\s*[\w\.]+', 'minSdk = 21', s)
+    s = re.sub(r'minSdkVersion\s+[\w\.]+', 'minSdkVersion 21', s)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(s)
+
+# 2. تحديث AndroidManifest.xml بالأذونات الدائمة وفلاتر واتساب
 manifest_path = "android/app/src/main/AndroidManifest.xml"
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = f.read()
 
-# 1. إضافة أذونات القراءة الدائمة لجميع إصدارات أندرويد (حتى لا يطلب إذن المجلد كل مرة)
 permissions_xml = """
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 """
 
 if "MANAGE_EXTERNAL_STORAGE" not in manifest:
     manifest = manifest.replace("<application", permissions_xml + "\n    <application", 1)
 
-# 2. تحديث اسم التطبيق وتفعيل requestLegacyExternalStorage
 manifest = re.sub(r'android:label="[^"]*"', 'android:label="Tarik emb"', manifest, count=1)
 if "requestLegacyExternalStorage" not in manifest:
     manifest = manifest.replace("<application", '<application android:requestLegacyExternalStorage="true"', 1)
 
-# 3. ضبط launchMode على singleTop ليفتح ملف الواتساب فوراً حتى لو التطبيق مفتوح بالخلفية
 manifest = re.sub(r'android:launchMode="[^"]*"', 'android:launchMode="singleTop"', manifest)
 
-# 4. فلاتر شاملة لفتح ملفات .emb مباشرة من واتساب وتليجرام ومدير الملفات
 emb_intent_filters = """
-            <!-- Open .emb files directly from WhatsApp, Telegram, and File Managers -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.EDIT" />
@@ -112,7 +98,7 @@ if "android.intent.action.VIEW" not in manifest:
 with open(manifest_path, "w", encoding="utf-8") as f:
     f.write(manifest)
 
-# 5. كتابة MainActivity.kt لدعم فتح ومشاركة ملفات الواتساب مباشرة
+# 3. كتابة MainActivity.kt لاستقبال ملفات واتساب مباشرة
 kt_dir = "android/app/src/main/kotlin/com/tarikhabrosh/emb_gallery"
 os.makedirs(kt_dir, exist_ok=True)
 kt_code = """package com.tarikhabrosh.emb_gallery
@@ -222,10 +208,9 @@ class MainActivity : FlutterActivity() {
 with open(os.path.join(kt_dir, "MainActivity.kt"), "w", encoding="utf-8") as f:
     f.write(kt_code)
 
-# 6. نسخ شعار التطبيق كأيقونة رسمية
+# 4. نسخ الشعار كأيقونة للتطبيق
 if os.path.exists("assets/logo.png"):
     for folder in ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]:
         dest_dir = f"android/app/src/main/res/{folder}"
         if os.path.exists(dest_dir):
             shutil.copy("assets/logo.png", os.path.join(dest_dir, "ic_launcher.png"))
-
