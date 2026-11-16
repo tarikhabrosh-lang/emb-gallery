@@ -13,10 +13,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'parsers/emb_parser.dart';
 
-final GlobalKey rootNavigatorKey = GlobalKey();
-final ValueNotifier isArabicNotifier = ValueNotifier(true);
+final rootNavigatorKey = GlobalKey<NavigatorState>();
+final isArabicNotifier = ValueNotifier<bool>(true);
 
-String tr(String ar, String en) => isArabicNotifier.value == true ? ar : en;
+String tr(String ar, String en) => isArabicNotifier.value ? ar : en;
 final validExtensions = ['.emb', '.dst', '.pes', '.pec', '.exp', '.ef', '.vp3', '.xxx', '.u01'];
 
 String? formatDimensionsCm(double? widthMm, double? heightMm, {bool includeMm = false}) {
@@ -32,7 +32,7 @@ String? formatDimensionsCm(double? widthMm, double? heightMm, {bool includeMm = 
 }
 
 class LicenseManager {
-  static Future checkLicense() async {
+  static Future> checkLicense() async {
     try {
       final dir = await getApplicationSupportDirectory();
       final file = File('${dir.path}/tarik_license.txt');
@@ -44,36 +44,48 @@ class LicenseManager {
       }
       final data = await file.readAsString();
       final parts = data.split('|');
-      if (parts.length != 3) return {'valid': true, 'activated': false, 'id': '123456', 'days': 7};
+      if (parts.length != 3) {
+        return {'valid': true, 'activated': false, 'id': '123456', 'days': 7};
+      }
 
       final installTime = int.tryParse(parts[0]) ?? 0;
-      final activated = parts[1] == 'true';
-      final id = parts[2];
+      final activated = parts[1].trim() == 'true';
+      final id = parts[2].trim();
 
-      if (activated) return {'valid': true, 'activated': true, 'id': id, 'days': 0};
+      if (activated) {
+        return {'valid': true, 'activated': true, 'id': id, 'days': 0};
+      }
 
       final now = DateTime.now().millisecondsSinceEpoch;
       final diff = now - installTime;
       final daysPassed = diff / (1000 * 60 * 60 * 24);
       final remaining = 7 - daysPassed.floor();
 
-      if (remaining > 0) return {'valid': true, 'activated': false, 'id': id, 'days': remaining};
-      return {'valid': true, 'activated': false, 'id': id, 'days': 0};
+      if (remaining > 0) {
+        return {'valid': true, 'activated': false, 'id': id, 'days': remaining};
+      }
+      return {'valid': false, 'activated': false, 'id': id, 'days': 0};
     } catch (e) {
       return {'valid': true, 'activated': false, 'id': '123456', 'days': 7};
     }
   }
 
-  static Future activate(String deviceId, String enteredCode) async {
+  static Future<bool> activate(String deviceId, String enteredCode) async {
     try {
-      final idNum = int.tryParse(deviceId) ?? 0;
+      final idNum = int.tryParse(deviceId.trim()) ?? 0;
       final expectedCode = (idNum * 7) + 2026;
       if (enteredCode.trim() == expectedCode.toString()) {
         final dir = await getApplicationSupportDirectory();
         final file = File('${dir.path}/tarik_license.txt');
-        final data = await file.readAsString();
-        final parts = data.split('|');
-        await file.writeAsString('${parts[0]}|true|${parts[2]}');
+        if (await file.exists()) {
+          final data = await file.readAsString();
+          final parts = data.split('|');
+          final t = parts.isNotEmpty ? parts[0] : DateTime.now().millisecondsSinceEpoch.toString();
+          await file.writeAsString('$t|true|${deviceId.trim()}');
+        } else {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          await file.writeAsString('$now|true|${deviceId.trim()}');
+        }
         return true;
       }
       return false;
@@ -83,55 +95,41 @@ class LicenseManager {
   }
 }
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const RootAppLoader());
-}
-
-class RootAppLoader extends StatelessWidget {
-  const RootAppLoader({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return FutureBuilder(
-      future: LicenseManager.checkLicense(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.done) {
-          final license = snapshot.data ?? {'valid': true, 'activated': false, 'id': '123456', 'days': 7};
-          return EmbGalleryApp(license: license as Map);
-        }
-        return MaterialApp(
-          debugShowCheckedModeBanner: false,
-          home: Scaffold(
-            backgroundColor: const Color(0xFF0E131D),
-            body: Center(
-              child: CircularProgressIndicator(color: const Color(0xFFD4AF37)),
-            ),
-          ),
-        );
-      },
-    );
-  }
+  runApp(const EmbGalleryApp());
 }
 
 class EmbGalleryApp extends StatefulWidget {
-  final Map license;
-  const EmbGalleryApp({super.key, required this.license});
+  const EmbGalleryApp({super.key});
   @override
-  State createState() => _EmbGalleryAppState();
+  State<EmbGalleryApp> createState() => _EmbGalleryAppState();
 }
 
 class _EmbGalleryAppState extends State<EmbGalleryApp> {
   static const MethodChannel _intentChannel = MethodChannel('tarik_emb/file_intent');
+  Map<String, dynamic>? _license;
 
   @override
   void initState() {
     super.initState();
-    _loadLanguagePreference();
-    if (widget.license['valid'] == true) _setupIncomingFileHandler();
+    _initApp();
   }
 
-  Future _loadLanguagePreference() async {
+  Future<void> _initApp() async {
+    await _loadLanguagePreference();
+    final lic = await LicenseManager.checkLicense();
+    if (mounted) {
+      setState(() {
+        _license = lic;
+      });
+    }
+    if (lic['valid'] == true) {
+      _setupIncomingFileHandler();
+    }
+  }
+
+  Future<void> _loadLanguagePreference() async {
     try {
       final dir = await getApplicationSupportDirectory();
       final f = File('${dir.path}/app_lang.txt');
@@ -142,16 +140,16 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
     } catch (_) {}
   }
 
-  static Future toggleLanguage() async {
-    isArabicNotifier.value = !(isArabicNotifier.value == true);
+  static Future<void> toggleLanguage() async {
+    isArabicNotifier.value = !isArabicNotifier.value;
     try {
       final dir = await getApplicationSupportDirectory();
       final f = File('${dir.path}/app_lang.txt');
-      await f.writeAsString(isArabicNotifier.value == true ? 'ar' : 'en');
+      await f.writeAsString(isArabicNotifier.value ? 'ar' : 'en');
     } catch (_) {}
   }
 
-  Future _setupIncomingFileHandler() async {
+  Future<void> _setupIncomingFileHandler() async {
     _intentChannel.setMethodCallHandler((call) async {
       if (call.method == 'onFileOpened' && call.arguments is String) {
         await _openIncomingEmbFile(call.arguments as String);
@@ -165,7 +163,7 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
     } catch (_) {}
   }
 
-  Future _openIncomingEmbFile(String path) async {
+  Future<void> _openIncomingEmbFile(String path) async {
     final lower = path.toLowerCase();
     EmbDesignInfo? info;
     if (lower.endsWith('.dst')) {
@@ -187,9 +185,8 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
     }
 
     if (info == null) return;
-    Future.delayed(const Duration(milliseconds: 250), () {
-      final nav = rootNavigatorKey.currentState as NavigatorState?;
-      nav?.push(
+    Future.delayed(const Duration(milliseconds: 300), () {
+      rootNavigatorKey.currentState?.push(
         MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info!)),
       );
     });
@@ -197,11 +194,11 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder(
+    return ValueListenableBuilder<bool>(
       valueListenable: isArabicNotifier,
       builder: (context, isAr, _) {
         return MaterialApp(
-          navigatorKey: rootNavigatorKey as GlobalKey<NavigatorState>,
+          navigatorKey: rootNavigatorKey,
           title: 'Tarik emb',
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
@@ -214,10 +211,19 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
             cardColor: const Color(0xFF18202E),
           ),
           builder: (context, child) => Directionality(
-            textDirection: isAr == true ? TextDirection.rtl : TextDirection.ltr,
-            child: child!,
+            textDirection: isAr ? TextDirection.rtl : TextDirection.ltr,
+            child: child ?? const SizedBox.shrink(),
           ),
-          home: FoldersGalleryPage(license: widget.license),
+          home: _license == null
+              ? const Scaffold(
+                  backgroundColor: Color(0xFF0E131D),
+                  body: Center(
+                    child: CircularProgressIndicator(color: Color(0xFFD4AF37)),
+                  ),
+                )
+              : (_license!['valid'] == true
+                  ? FoldersGalleryPage(license: _license!)
+                  : ActivationScreen(deviceId: _license!['id'].toString(), isExpired: true)),
         );
       },
     );
@@ -229,7 +235,7 @@ class ActivationScreen extends StatefulWidget {
   final bool isExpired;
   const ActivationScreen({super.key, required this.deviceId, required this.isExpired});
   @override
-  State createState() => _ActivationScreenState();
+  State<ActivationScreen> createState() => _ActivationScreenState();
 }
 
 class _ActivationScreenState extends State<ActivationScreen> {
@@ -238,7 +244,7 @@ class _ActivationScreenState extends State<ActivationScreen> {
 
   void _verify() async {
     final success = await LicenseManager.activate(widget.deviceId, _codeController.text);
-    if (success == true) {
+    if (success) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -249,7 +255,9 @@ class _ActivationScreenState extends State<ActivationScreen> {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
-            builder: (_) => FoldersGalleryPage(license: {'valid': true, 'activated': true, 'id': widget.deviceId, 'days': 0}),
+            builder: (_) => FoldersGalleryPage(
+              license: {'valid': true, 'activated': true, 'id': widget.deviceId, 'days': 0},
+            ),
           ),
         );
       }
@@ -271,16 +279,16 @@ class _ActivationScreenState extends State<ActivationScreen> {
 
     final msg = 'أرجو تزويدي بالكود الدائم\nرقم جهازي هو: ${widget.deviceId}';
     final url = Uri.parse("https://wa.me/963956739715?text=${Uri.encodeComponent(msg)}");
-    if (await canLaunchUrl(url)) {
+    try {
       await launchUrl(url, mode: LaunchMode.externalApplication);
-    }
+    } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0E131D),
-      appBar: AppBar(backgroundColor: const Color(0xFF0E131D), elevation: 0),
+      appBar: widget.isExpired ? null : AppBar(backgroundColor: const Color(0xFF0E131D), elevation: 0),
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -320,8 +328,8 @@ class _ActivationScreenState extends State<ActivationScreen> {
                 ElevatedButton.icon(
                   onPressed: _openWhatsApp,
                   icon: const Icon(Icons.chat, size: 20),
-                  label: Row(
-                    mainAxisSize: MainAxisSize.min,
+                  label: Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       Text(tr('تواصل عبر واتساب ', 'Contact via WhatsApp ')),
                       const Directionality(
@@ -383,40 +391,29 @@ class FoldersGalleryPage extends StatefulWidget {
   final Map license;
   const FoldersGalleryPage({super.key, required this.license});
   @override
-  State createState() => _FoldersGalleryPageState();
+  State<FoldersGalleryPage> createState() => _FoldersGalleryPageState();
 }
 
 class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   bool _isScanning = false;
   String _statusText = '';
-  final List _folders = [];
+  final List<EmbFolderGroup> _folders = [];
   int _scanToken = 0;
 
-  int get _totalFilesCount => _folders.fold(0, (sum, folder) => sum + (folder.filePaths.length as int));
+  int get _totalFilesCount => _folders.fold(0, (sum, folder) => sum + folder.filePaths.length);
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (widget.license['activated'] != true) {
-        if (widget.license['valid'] != true || (widget.license['days'] ?? 0) <= 0) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => ActivationScreen(deviceId: widget.license['id'].toString(), isExpired: true),
-            ),
-          );
-          return;
-        } else {
-          _showTrialToast();
-        }
-      }
+      if (widget.license['activated'] != true) _showTrialToast();
       _showSignatureDialog();
       _startBackgroundScan();
     });
   }
 
   void _showTrialToast() {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('${tr('نسخة تجريبية - متبقي', 'Trial - Remaining')} ${widget.license['days']} ${tr('أيام', 'days')}'),
@@ -427,6 +424,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   }
 
   void _showSignatureDialog() {
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: true,
@@ -460,7 +458,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     );
   }
 
-  Future _readSavedFolders() async {
+  Future<List<String>> _readSavedFolders() async {
     try {
       final dir = await getApplicationSupportDirectory();
       final f = File('${dir.path}/saved_emb_folders.txt');
@@ -471,9 +469,9 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     return [];
   }
 
-  Future _saveFolderToHistory(String folderPath) async {
+  Future<void> _saveFolderToHistory(String folderPath) async {
     try {
-      final List current = await _readSavedFolders();
+      final current = await _readSavedFolders();
       if (!current.contains(folderPath)) {
         current.insert(0, folderPath);
         final dir = await getApplicationSupportDirectory();
@@ -483,18 +481,22 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     } catch (_) {}
   }
 
-  Future _ensureStoragePermission() async {
+  Future<bool> _ensureStoragePermission() async {
     if (!Platform.isAndroid) return true;
-    if (await Permission.manageExternalStorage.isGranted || await Permission.storage.isGranted) return true;
-    final manageStatus = await Permission.manageExternalStorage.request();
-    if (manageStatus.isGranted) return true;
-    return (await Permission.storage.request()).isGranted;
+    try {
+      if (await Permission.manageExternalStorage.isGranted || await Permission.storage.isGranted) return true;
+      final manageStatus = await Permission.manageExternalStorage.request();
+      if (manageStatus.isGranted) return true;
+      return (await Permission.storage.request()).isGranted;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future _startBackgroundScan() async {
+  Future<void> _startBackgroundScan() async {
     final int currentToken = ++_scanToken;
     final hasPerm = await _ensureStoragePermission();
-    if (hasPerm != true) {
+    if (!hasPerm) {
       if (!mounted) return;
       setState(() {
         _isScanning = false;
@@ -509,8 +511,8 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
       _statusText = tr('جاري البحث عن المجلدات...', 'Scanning folders...');
     });
 
-    final List savedDirs = await _readSavedFolders();
-    final Set candidateDirs = {
+    final savedDirs = await _readSavedFolders();
+    final candidateDirs = <String>{
       ...savedDirs,
       '/storage/emulated/0/Download',
       '/storage/emulated/0/Documents',
@@ -519,11 +521,11 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
       '/storage/emulated/0/Telegram/Telegram Documents',
     };
 
-    final Map folderMap = {};
+    final Map<String, List<String>> folderMap = {};
 
     for (final rootPath in candidateDirs) {
       if (currentToken != _scanToken) return;
-      final rootDir = Directory(rootPath.toString());
+      final rootDir = Directory(rootPath);
       if (await rootDir.exists()) {
         try {
           int count = 0;
@@ -548,13 +550,13 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     _loadFolderCoversInBackground(currentToken);
   }
 
-  void _rebuildFoldersList(Map folderMap) {
+  void _rebuildFoldersList(Map<String, List<String>> folderMap) {
     if (!mounted) return;
-    final List list = [];
+    final List<EmbFolderGroup> list = [];
     folderMap.forEach((path, files) {
-      if ((files as List).isNotEmpty) {
-        final name = path.toString().split(Platform.pathSeparator).last;
-        list.add(EmbFolderGroup(folderPath: path.toString(), folderName: name.isEmpty ? path.toString() : name, filePaths: files));
+      if (files.isNotEmpty) {
+        final name = path.split(Platform.pathSeparator).last;
+        list.add(EmbFolderGroup(folderPath: path, folderName: name.isEmpty ? path : name, filePaths: files));
       }
     });
     setState(() {
@@ -564,7 +566,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     });
   }
 
-  Future _loadFolderCoversInBackground(int token) async {
+  Future<void> _loadFolderCoversInBackground(int token) async {
     for (final folder in _folders) {
       if (!mounted || token != _scanToken) return;
       if (folder.coverBytes == null && folder.filePaths.isNotEmpty) {
@@ -593,7 +595,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     }
   }
 
-  Future _pickSingleOrMultipleFiles() async {
+  Future<void> _pickSingleOrMultipleFiles() async {
     _scanToken++;
     setState(() => _isScanning = false);
     try {
@@ -601,8 +603,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
       final result = await FilePicker.platform.pickFiles(allowMultiple: true, type: FileType.any);
       if (result == null || result.paths.isEmpty) return;
 
-      final List validPaths = result.paths.where((p) {
-        if (p == null) return false;
+      final validPaths = result.paths.whereType<String>().where((p) {
         final lower = p.toLowerCase();
         return validExtensions.any((ext) => lower.endsWith(ext));
       }).toList();
@@ -611,11 +612,11 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
         _showSnack(tr('يرجى اختيار ملف تطريز مدعوم', 'Please select a valid embroidery file'));
         return;
       }
-      final firstParent = File(validPaths.first.toString()).parent.path;
+      final firstParent = File(validPaths.first).parent.path;
       await _saveFolderToHistory(firstParent);
 
       if (validPaths.length == 1) {
-        final p = validPaths.first.toString();
+        final p = validPaths.first;
         final lower = p.toLowerCase();
         EmbDesignInfo? info;
         if (lower.endsWith('.dst')) {
@@ -653,7 +654,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     }
   }
 
-  Future _pickCustomFolder() async {
+  Future<void> _pickCustomFolder() async {
     _scanToken++;
     setState(() => _isScanning = false);
     try {
@@ -667,7 +668,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
         _statusText = tr('جاري القراءة...', 'Reading...');
       });
 
-      final List files = [];
+      final List<String> files = [];
       try {
         await for (final entity in Directory(dirPath).list(recursive: true, followLinks: false)) {
           if (entity is File) {
@@ -708,24 +709,15 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder(
+    return ValueListenableBuilder<bool>(
       valueListenable: isArabicNotifier,
       builder: (context, isAr, _) {
         return Scaffold(
           appBar: AppBar(
             backgroundColor: const Color(0xFF0E131D),
-            title: Row(
-              children: [
-                const Text('Tarik emb', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFD4AF37), letterSpacing: 0.6)),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    tr('| استوديو المجلدات', '| Folders Studio'),
-                    style: const TextStyle(fontSize: 14, color: Colors.white70),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
+            title: const Text(
+              'Tarik emb',
+              style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFD4AF37), letterSpacing: 0.6),
             ),
             actions: [
               if (widget.license['activated'] != true)
@@ -747,7 +739,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                   setState(() {});
                 },
                 icon: const Icon(Icons.language, color: Color(0xFFD4AF37), size: 18),
-                label: Text(isAr == true ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                label: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
               ),
               IconButton(
                 icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
@@ -848,7 +840,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                         ),
                         itemCount: _folders.length,
                         itemBuilder: (context, index) {
-                          final EmbFolderGroup folder = _folders[index];
+                          final folder = _folders[index];
                           return GestureDetector(
                             onTap: () {
                               Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: folder)));
@@ -895,25 +887,20 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                                   ),
                                   Padding(
                                     padding: const EdgeInsets.all(10),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                    child: Row(
                                       children: [
-                                        Row(
-                                          children: [
-                                            const Icon(Icons.folder, size: 16, color: Color(0xFFD4AF37)),
-                                            const SizedBox(width: 6),
-                                            Expanded(
-                                              child: Directionality(
-                                                textDirection: TextDirection.ltr,
-                                                child: Text(
-                                                  folder.folderName,
-                                                  maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
-                                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
-                                                ),
-                                              ),
+                                        const Icon(Icons.folder, size: 16, color: Color(0xFFD4AF37)),
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                          child: Directionality(
+                                            textDirection: TextDirection.ltr,
+                                            child: Text(
+                                              folder.folderName,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
                                             ),
-                                          ],
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -939,12 +926,12 @@ class FolderDetailsScreen extends StatefulWidget {
   final EmbFolderGroup folderGroup;
   const FolderDetailsScreen({super.key, required this.folderGroup});
   @override
-  State createState() => _FolderDetailsScreenState();
+  State<FolderDetailsScreen> createState() => _FolderDetailsScreenState();
 }
 
 class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
-  final List _designs = [];
-  List _filteredDesigns = [];
+  final List<EmbDesignInfo> _designs = [];
+  List<EmbDesignInfo> _filteredDesigns = [];
   bool _isLoading = true;
   String _searchQuery = '';
   SortOption _sortOption = SortOption.nameAsc;
@@ -955,7 +942,7 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
     _loadFolderDesignsInBackground();
   }
 
-  Future _loadFolderDesignsInBackground() async {
+  Future<void> _loadFolderDesignsInBackground() async {
     int count = 0;
     for (final p in widget.folderGroup.filePaths) {
       if (!mounted) return;
@@ -995,19 +982,19 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
   void _applyFilterAndSort() {
     if (!mounted) return;
     final q = _searchQuery.trim().toLowerCase();
-    final List list = _designs.where((d) => q.isEmpty || d.fileName.toLowerCase().contains(q)).toList();
+    final list = _designs.where((d) => q.isEmpty || d.fileName.toLowerCase().contains(q)).toList();
     switch (_sortOption) {
       case SortOption.nameAsc:
-        list.sort((a, b) => (a.fileName as String).compareTo(b.fileName as String));
+        list.sort((a, b) => a.fileName.compareTo(b.fileName));
         break;
       case SortOption.stitchesDesc:
-        list.sort((a, b) => (b.stitches as int).compareTo(a.stitches as int));
+        list.sort((a, b) => b.stitches.compareTo(a.stitches));
         break;
       case SortOption.stitchesAsc:
-        list.sort((a, b) => (a.stitches as int).compareTo(b.stitches as int));
+        list.sort((a, b) => a.stitches.compareTo(b.stitches));
         break;
       case SortOption.colorsDesc:
-        list.sort((a, b) => (b.colorCount as int).compareTo(a.colorCount as int));
+        list.sort((a, b) => b.colorCount.compareTo(a.colorCount));
         break;
     }
     setState(() {
@@ -1018,30 +1005,15 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
   @override
   Widget build(BuildContext context) {
     final numFmt = intl.NumberFormat('#,###');
-    return ValueListenableBuilder(
+    return ValueListenableBuilder<bool>(
       valueListenable: isArabicNotifier,
       builder: (context, isAr, _) {
         return Scaffold(
           appBar: AppBar(
             backgroundColor: const Color(0xFF0E131D),
-            title: Row(
-              children: [
-                Expanded(
-                  child: Directionality(
-                    textDirection: TextDirection.ltr,
-                    child: Text(widget.folderGroup.folderName, style: const TextStyle(fontSize: 15), maxLines: 1, overflow: TextOverflow.ellipsis),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(color: const Color(0xFFD4AF37).withOpacity(0.2), borderRadius: BorderRadius.circular(10)),
-                  child: Text(
-                    '${widget.folderGroup.filePaths.length} ${tr('ملف', 'files')}',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFFD4AF37), fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
+            title: Directionality(
+              textDirection: TextDirection.ltr,
+              child: Text(widget.folderGroup.folderName, style: const TextStyle(fontSize: 15), maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
             actions: [
               TextButton(
@@ -1049,13 +1021,13 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                   await _EmbGalleryAppState.toggleLanguage();
                   setState(() {});
                 },
-                child: Text(isAr == true ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
               ),
-              PopupMenuButton(
+              PopupMenuButton<SortOption>(
                 icon: const Icon(Icons.sort),
                 tooltip: tr('ترتيب', 'Sort'),
                 onSelected: (opt) {
-                  _sortOption = opt as SortOption;
+                  _sortOption = opt;
                   _applyFilterAndSort();
                 },
                 itemBuilder: (_) => [
@@ -1119,7 +1091,7 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                         ),
                         itemCount: _filteredDesigns.length,
                         itemBuilder: (context, index) {
-                          final EmbDesignInfo item = _filteredDesigns[index];
+                          final item = _filteredDesigns[index];
                           return _DesignGridCard(
                             design: item,
                             formattedStitches: numFmt.format(item.stitches),
@@ -1219,7 +1191,7 @@ class DesignDetailScreen extends StatefulWidget {
   final EmbDesignInfo design;
   const DesignDetailScreen({super.key, required this.design});
   @override
-  State createState() => _DesignDetailScreenState();
+  State<DesignDetailScreen> createState() => _DesignDetailScreenState();
 }
 
 class _DesignDetailScreenState extends State<DesignDetailScreen> {
@@ -1230,7 +1202,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
     Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenDesignViewer(design: widget.design)));
   }
 
-  Future _shareOriginalFileOnly() async {
+  Future<void> _shareOriginalFileOnly() async {
     if (_isSharing) return;
     setState(() => _isSharing = true);
     try {
@@ -1261,7 +1233,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
     final d = widget.design;
     final ext = d.filePath.split('.').last.toUpperCase();
 
-    return ValueListenableBuilder(
+    return ValueListenableBuilder<bool>(
       valueListenable: isArabicNotifier,
       builder: (context, isAr, _) {
         final fullDimText = formatDimensionsCm(d.widthMm, d.heightMm, includeMm: true);
@@ -1277,7 +1249,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                   await _EmbGalleryAppState.toggleLanguage();
                   setState(() {});
                 },
-                child: Text(isAr == true ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
               ),
               if (d.previewJpeg != null)
                 IconButton(
@@ -1450,7 +1422,7 @@ class FullScreenDesignViewer extends StatefulWidget {
   final EmbDesignInfo design;
   const FullScreenDesignViewer({super.key, required this.design});
   @override
-  State createState() => _FullScreenDesignViewerState();
+  State<FullScreenDesignViewer> createState() => _FullScreenDesignViewerState();
 }
 
 class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
@@ -1495,12 +1467,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
         foregroundColor: Colors.white,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Directionality(textDirection: TextDirection.ltr, child: Text(d.fileName, style: const TextStyle(fontSize: 14))),
-          ],
-        ),
+        title: Directionality(textDirection: TextDirection.ltr, child: Text(d.fileName, style: const TextStyle(fontSize: 14))),
         actions: [
           IconButton(onPressed: () => _transformController.value = Matrix4.identity(), icon: const Icon(Icons.fit_screen)),
         ],
@@ -1600,17 +1567,17 @@ class _BgColorDot extends StatelessWidget {
 }
 
 class _StatBadge extends StatelessWidget {
-  final label;
-  final value;
+  final String label;
+  final String value;
   final Color color;
   const _StatBadge({required this.label, required this.value, required this.color});
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        Text(value.toString(), style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: color)),
+        Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: color)),
         const SizedBox(height: 2),
-        Text(label.toString(), style: const TextStyle(fontSize: 12, color: Colors.white60)),
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.white60)),
       ],
     );
   }
