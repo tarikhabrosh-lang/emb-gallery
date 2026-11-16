@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
@@ -9,13 +10,16 @@ import 'package:intl/intl.dart' as intl;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'parsers/emb_parser.dart';
+import 'parsers/dst_parser.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
 
 String tr(String ar, String en) => isArabicNotifier.value ? ar : en;
+final validExtensions = ['.emb', '.dst', '.pes', '.pec', '.exp', '.ef', '.vp3', '.xxx', '.u01'];
 
 String? formatDimensionsCm(double? widthMm, double? heightMm, {bool includeMm = false}) {
   if (widthMm == null || heightMm == null) return null;
@@ -29,13 +33,63 @@ String? formatDimensionsCm(double? widthMm, double? heightMm, {bool includeMm = 
   return '$wCm × $hCm $unitCm  ($wMm × $hMm $unitMm)';
 }
 
-void main() {
+class LicenseManager {
+  static Future> checkLicense() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final file = File('${dir.path}/tarik_license.txt');
+      if (!await file.exists()) {
+        final newId = (100000 + Random().nextInt(900000)).toString(); 
+        final now = DateTime.now().millisecondsSinceEpoch;
+        await file.writeAsString('$now|false|$newId');
+        return {'valid': true, 'activated': false, 'id': newId, 'days': 7};
+      }
+      final data = await file.readAsString();
+      final parts = data.split('|');
+      if (parts.length != 3) return {'valid': false, 'activated': false, 'id': 'Error', 'days': 0};
+      
+      final installTime = int.tryParse(parts[0]) ?? 0;
+      final activated = parts[1] == 'true';
+      final id = parts[2];
+      
+      if (activated) return {'valid': true, 'activated': true, 'id': id, 'days': 0};
+      
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final diff = now - installTime;
+      final daysPassed = diff / (1000 * 60 * 60 * 24);
+      final remaining = 7 - daysPassed.floor();
+      
+      if (remaining > 0) return {'valid': true, 'activated': false, 'id': id, 'days': remaining};
+      return {'valid': false, 'activated': false, 'id': id, 'days': 0};
+    } catch (e) { return {'valid': true, 'activated': false, 'id': '123456', 'days': 7}; }
+  }
+
+  static Future<bool> activate(String deviceId, String enteredCode) async {
+    try {
+      final idNum = int.tryParse(deviceId) ?? 0;
+      final expectedCode = (idNum * 7) + 2026;
+      if (enteredCode.trim() == expectedCode.toString()) {
+        final dir = await getApplicationSupportDirectory();
+        final file = File('${dir.path}/tarik_license.txt');
+        final data = await file.readAsString();
+        final parts = data.split('|');
+        await file.writeAsString('${parts[0]}|true|${parts[2]}');
+        return true;
+      }
+      return false;
+    } catch (_) { return false; }
+  }
+}
+
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const EmbGalleryApp());
+  final license = await LicenseManager.checkLicense();
+  runApp(EmbGalleryApp(license: license));
 }
 
 class EmbGalleryApp extends StatefulWidget {
-  const EmbGalleryApp({super.key});
+  final Map<String, dynamic> license;
+  const EmbGalleryApp({super.key, required this.license});
   @override
   State<EmbGalleryApp> createState() => _EmbGalleryAppState();
 }
@@ -47,7 +101,7 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
   void initState() {
     super.initState();
     _loadLanguagePreference();
-    _setupIncomingFileHandler();
+    if (widget.license['valid']) _setupIncomingFileHandler();
   }
 
   Future<void> _loadLanguagePreference() async {
@@ -72,25 +126,29 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
 
   Future<void> _setupIncomingFileHandler() async {
     _intentChannel.setMethodCallHandler((call) async {
-      if (call.method == 'onFileOpened' && call.arguments is String) {
-        await _openIncomingEmbFile(call.arguments as String);
-      }
+      if (call.method == 'onFileOpened' && call.arguments is String) await _openIncomingEmbFile(call.arguments as String);
     });
     try {
       final initialPath = await _intentChannel.invokeMethod<String>('getInitialFile');
-      if (initialPath != null && initialPath.isNotEmpty) {
-        await _openIncomingEmbFile(initialPath);
-      }
+      if (initialPath != null && initialPath.isNotEmpty) await _openIncomingEmbFile(initialPath);
     } catch (_) {}
   }
 
   Future<void> _openIncomingEmbFile(String path) async {
-    final info = await EmbParser.parseFile(path);
+    final lower = path.toLowerCase();
+    EmbDesignInfo? info;
+    if (lower.endsWith('.dst')) {
+      info = await DstParser.parseFile(path);
+    } else if (lower.endsWith('.emb')) {
+      info = await EmbParser.parseFile(path);
+    } else {
+      final name = path.split(Platform.pathSeparator).last;
+      info = EmbDesignInfo(filePath: path, fileName: name, stitches: 0, colorCount: 0, jumpsCount: 0, sequinsCount: 0, machineType: 'Other', colorSequence: []);
+    }
+    
     if (info == null) return;
     Future.delayed(const Duration(milliseconds: 250), () {
-      rootNavigatorKey.currentState?.push(
-        MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info)),
-      );
+      rootNavigatorKey.currentState?.push(MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info!)));
     });
   }
 
@@ -100,47 +158,113 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
       valueListenable: isArabicNotifier,
       builder: (context, isAr, _) {
         return MaterialApp(
-          navigatorKey: rootNavigatorKey,
-          title: 'Tarik emb',
-          debugShowCheckedModeBanner: false,
-          theme: ThemeData(
-            useMaterial3: true,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFFD4AF37),
-              brightness: Brightness.dark,
-            ),
-            scaffoldBackgroundColor: const Color(0xFF0E131D),
-            cardColor: const Color(0xFF18202E),
-          ),
-          builder: (context, child) {
-            return Directionality(
-              textDirection: isAr ? TextDirection.rtl : TextDirection.ltr,
-              child: child!,
-            );
-          },
-          home: const FoldersGalleryPage(),
+          navigatorKey: rootNavigatorKey, title: 'Tarik emb', debugShowCheckedModeBanner: false,
+          theme: ThemeData(useMaterial3: true, colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFD4AF37), brightness: Brightness.dark), scaffoldBackgroundColor: const Color(0xFF0E131D), cardColor: const Color(0xFF18202E)),
+          builder: (context, child) => Directionality(textDirection: isAr ? TextDirection.rtl : TextDirection.ltr, child: child!),
+          home: widget.license['valid'] ? FoldersGalleryPage(license: widget.license) : ActivationScreen(deviceId: widget.license['id'], isExpired: true),
         );
       },
     );
   }
 }
 
+class ActivationScreen extends StatefulWidget {
+  final String deviceId;
+  final bool isExpired;
+  const ActivationScreen({super.key, required this.deviceId, required this.isExpired});
+  @override
+  State<ActivationScreen> createState() => _ActivationScreenState();
+}
+
+class _ActivationScreenState extends State<ActivationScreen> {
+  final TextEditingController _codeController = TextEditingController();
+  bool _isError = false;
+
+  void _verify() async {
+    final success = await LicenseManager.activate(widget.deviceId, _codeController.text);
+    if (success) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('تم تفعيل البرنامج بنجاح! أعد تشغيل التطبيق.', 'App activated successfully! Restart app.')), backgroundColor: Colors.green));
+        Future.delayed(const Duration(seconds: 2), () => exit(0));
+      }
+    } else {
+      setState(() => _isError = true);
+    }
+  }
+
+  void _openWhatsApp() async {
+    final msg = tr('مرحباً، أود شراء تفعيل لتطبيق Tarik emb. رقم جهازي هو: ', 'Hello, I want to buy activation for Tarik emb. My Device ID is: ') + widget.deviceId;
+    final url = Uri.parse("https://wa.me/963956739715?text=${Uri.encodeComponent(msg)}");
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E131D),
+      appBar: widget.isExpired ? null : AppBar(backgroundColor: const Color(0xFF0E131D), elevation: 0),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: const Color(0xFF18202E), borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFFD4AF37))),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(widget.isExpired ? Icons.lock : Icons.lock_open, size: 64, color: const Color(0xFFD4AF37)),
+                const SizedBox(height: 16),
+                Text(
+                  widget.isExpired ? tr('انتهت الفترة التجريبية', 'Trial Period Expired') : tr('تفعيل النسخة الدائمة', 'Activate Full Version'), 
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  tr('لتفعيل النسخة الدائمة، أرسل هذا الكود إلى مزود الخدمة على الواتساب:', 'To activate the full version, send this code to the provider on WhatsApp:'), 
+                  textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)
+                ),
+                const SizedBox(height: 16),
+                SelectableText(widget.deviceId, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Color(0xFF56CCF2), letterSpacing: 2)),
+                const SizedBox(height: 16),
+                ElevatedButton.icon(
+                  onPressed: _openWhatsApp,
+                  icon: const Icon(Icons.chat, size: 20),
+                  label: Text(tr('تواصل عبر واتساب (+963956739715)', 'Contact via WhatsApp (+963956739715)')),
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF25D366), foregroundColor: Colors.white),
+                ),
+                const SizedBox(height: 24),
+                TextField(
+                  controller: _codeController, keyboardType: TextInputType.number, textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 20, letterSpacing: 4),
+                  decoration: InputDecoration(hintText: tr('أدخل كود التفعيل هنا', 'Enter Activation Code'), filled: true, fillColor: Colors.black26, errorText: _isError ? tr('الكود غير صحيح', 'Invalid Code') : null, border: OutlineInputBorder(borderRadius: BorderRadius.circular(12))),
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: _verify,
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD4AF37), foregroundColor: Colors.black, minimumSize: const Size.fromHeight(50)),
+                  child: Text(tr('تفعيل البرنامج', 'Activate App'), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class EmbFolderGroup {
-  final String folderPath;
-  final String folderName;
+  final String folderPath, folderName;
   final List<String> filePaths;
   Uint8List? coverBytes;
-
-  EmbFolderGroup({
-    required this.folderPath,
-    required this.folderName,
-    required this.filePaths,
-    this.coverBytes,
-  });
+  EmbFolderGroup({required this.folderPath, required this.folderName, required this.filePaths, this.coverBytes});
 }
 
 class FoldersGalleryPage extends StatefulWidget {
-  const FoldersGalleryPage({super.key});
+  final Map<String, dynamic> license;
+  const FoldersGalleryPage({super.key, required this.license});
   @override
   State<FoldersGalleryPage> createState() => _FoldersGalleryPageState();
 }
@@ -157,39 +281,24 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!widget.license['activated']) _showTrialToast();
       _showSignatureDialog();
       _startBackgroundScan();
     });
   }
 
+  void _showTrialToast() {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${tr('نسخة تجريبية - متبقي', 'Trial - Remaining')} ${widget.license['days']} ${tr('أيام', 'days')}'), backgroundColor: const Color(0xFFD4AF37), duration: const Duration(seconds: 4)));
+  }
+
   void _showSignatureDialog() {
     showDialog(
-      context: context,
-      barrierDismissible: true,
+      context: context, barrierDismissible: true,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF18202E),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
-        ),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(height: 8),
-            Text('By Tarik Habrosh',
-                style: TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 18, letterSpacing: 1.2)),
-            SizedBox(height: 8),
-          ],
-        ),
-        actions: [
-          Center(
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF3E522B), foregroundColor: Colors.white),
-              onPressed: () => Navigator.pop(ctx),
-              child: Text(tr('موافق', 'OK')),
-            ),
-          ),
-        ],
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5)),
+        content: const Column(mainAxisSize: MainAxisSize.min, children: [SizedBox(height: 8), Text('By Tarik Habrosh', style: TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 18, letterSpacing: 1.2)), SizedBox(height: 8)]),
+        actions: [Center(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF3E522B), foregroundColor: Colors.white), onPressed: () => Navigator.pop(ctx), child: Text(tr('موافق', 'OK'))))],
       ),
     );
   }
@@ -228,27 +337,17 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     final hasPerm = await _ensureStoragePermission();
     if (!hasPerm) {
       if (!mounted) return;
-      setState(() {
-        _isScanning = false;
-        _statusText = tr('يرجى منح إذن الملفات', 'Please grant file permission');
-      });
+      setState(() { _isScanning = false; _statusText = tr('يرجى منح إذن الملفات', 'Please grant file permission'); });
       return;
     }
     if (!mounted) return;
-    setState(() {
-      _isScanning = true;
-      _folders.clear();
-      _statusText = tr('جاري البحث عن المجلدات...', 'Scanning folders...');
-    });
+    setState(() { _isScanning = true; _folders.clear(); _statusText = tr('جاري البحث عن المجلدات...', 'Scanning folders...'); });
 
     final savedDirs = await _readSavedFolders();
     final candidateDirs = <String>{
-      ...savedDirs,
-      '/storage/emulated/0/Download',
-      '/storage/emulated/0/Documents',
+      ...savedDirs, '/storage/emulated/0/Download', '/storage/emulated/0/Documents',
       '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents',
-      '/storage/emulated/0/WhatsApp/Media/WhatsApp Documents',
-      '/storage/emulated/0/Telegram/Telegram Documents',
+      '/storage/emulated/0/WhatsApp/Media/WhatsApp Documents', '/storage/emulated/0/Telegram/Telegram Documents',
     };
 
     final Map<String, List<String>> folderMap = {};
@@ -264,9 +363,8 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
             count++;
             if (count % 40 == 0) await Future.delayed(const Duration(milliseconds: 1));
             final p = entity.path.toLowerCase();
-            if (entity is File && (p.endsWith('.emb') || p.endsWith('.dst'))) {
-              final parentDir = entity.parent.path;
-              folderMap.putIfAbsent(parentDir, () => []).add(entity.path);
+            if (entity is File && validExtensions.any((ext) => p.endsWith(ext))) {
+              folderMap.putIfAbsent(entity.parent.path, () => []).add(entity.path);
             }
           }
         } catch (_) {}
@@ -304,6 +402,12 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
               setState(() { folder.coverBytes = info!.previewJpeg; });
               break;
             }
+          } else if (p.toLowerCase().endsWith('.dst')) {
+            final info = await DstParser.parseFile(p);
+            if (info?.previewJpeg != null && mounted && token == _scanToken) {
+              setState(() { folder.coverBytes = info!.previewJpeg; });
+              break;
+            }
           }
         }
         await Future.delayed(const Duration(milliseconds: 20));
@@ -321,28 +425,28 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
       
       final validPaths = result.paths.whereType<String>().where((p) {
         final lower = p.toLowerCase();
-        return lower.endsWith('.emb') || lower.endsWith('.dst');
+        return validExtensions.any((ext) => lower.endsWith(ext));
       }).toList();
 
       if (validPaths.isEmpty) {
-        _showSnack(tr('يرجى اختيار ملف .emb أو .dst', 'Please select .emb or .dst file'));
+        _showSnack(tr('يرجى اختيار ملف تطريز مدعوم', 'Please select a valid embroidery file'));
         return;
       }
-
       final firstParent = File(validPaths.first).parent.path;
       await _saveFolderToHistory(firstParent);
 
       if (validPaths.length == 1) {
         final p = validPaths.first;
-        final info = await EmbParser.parseFile(p);
-        if (info != null && mounted) {
-          Navigator.push(context, MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info)));
-        }
+        final lower = p.toLowerCase();
+        EmbDesignInfo? info;
+        if (lower.endsWith('.dst')) info = await DstParser.parseFile(p);
+        else if (lower.endsWith('.emb')) info = await EmbParser.parseFile(p);
+        else info = EmbDesignInfo(filePath: p, fileName: p.split(Platform.pathSeparator).last, stitches: 0, colorCount: 0, jumpsCount: 0, sequinsCount: 0, machineType: 'Other', colorSequence: []);
+        
+        if (info != null && mounted) Navigator.push(context, MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info!)));
       } else {
         final group = EmbFolderGroup(folderPath: firstParent, folderName: tr('ملفات مختارة', 'Selected Files'), filePaths: validPaths);
-        if (mounted) {
-          Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: group)));
-        }
+        if (mounted) Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: group)));
       }
     } catch (e) {
       _showSnack('${tr('تعذر فتح الملف', 'Failed to open file')}: $e');
@@ -365,29 +469,19 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
         await for (final entity in Directory(dirPath).list(recursive: true, followLinks: false)) {
           if (entity is File) {
             final p = entity.path.toLowerCase();
-            if (p.endsWith('.emb') || p.endsWith('.dst')) files.add(entity.path);
+            if (validExtensions.any((ext) => p.endsWith(ext))) files.add(entity.path);
           }
         }
       } catch (_) {}
 
       setState(() => _isScanning = false);
-
       if (files.isEmpty) {
         _showSnack(tr('لا توجد ملفات تطريز هنا', 'No embroidery files here'));
         return;
       }
-
       final folderName = dirPath.split(Platform.pathSeparator).last;
-      final newGroup = EmbFolderGroup(
-        folderPath: dirPath,
-        folderName: folderName.isEmpty ? dirPath : folderName,
-        filePaths: files,
-      );
-
-      setState(() {
-        _folders.removeWhere((f) => f.folderPath == dirPath);
-        _folders.insert(0, newGroup);
-      });
+      final newGroup = EmbFolderGroup(folderPath: dirPath, folderName: folderName.isEmpty ? dirPath : folderName, filePaths: files);
+      setState(() { _folders.removeWhere((f) => f.folderPath == dirPath); _folders.insert(0, newGroup); });
       if (mounted) Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: newGroup)));
     } catch (e) {
       setState(() => _isScanning = false);
@@ -416,6 +510,14 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
               ],
             ),
             actions: [
+              if (!widget.license['activated'])
+                IconButton(
+                  icon: const Icon(Icons.lock_open, color: Colors.greenAccent),
+                  tooltip: tr('تفعيل النسخة', 'Activate App'),
+                  onPressed: () {
+                    Navigator.push(context, MaterialPageRoute(builder: (_) => ActivationScreen(deviceId: widget.license['id'], isExpired: false)));
+                  },
+                ),
               TextButton.icon(
                 onPressed: () async { await _EmbGalleryAppState.toggleLanguage(); setState(() {}); },
                 icon: const Icon(Icons.language, color: Color(0xFFD4AF37), size: 18),
@@ -434,7 +536,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                       child: ElevatedButton.icon(
                         onPressed: _pickSingleOrMultipleFiles,
                         icon: const Icon(Icons.insert_drive_file),
-                        label: Text(tr('فتح ملفات EMB/DST', 'Open EMB/DST')),
+                        label: Text(tr('فتح ملفات التطريز', 'Open Designs')),
                         style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12), backgroundColor: const Color(0xFF3E522B), foregroundColor: Colors.white),
                       ),
                     ),
@@ -443,7 +545,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                       child: OutlinedButton.icon(
                         onPressed: _pickCustomFolder,
                         icon: const Icon(Icons.create_new_folder, color: Color(0xFFD4AF37)),
-                        label: Text(tr('إضافة مجلد دائم', 'Add Folder'), style: const TextStyle(color: Color(0xFFD4AF37))),
+                        label: Text(tr('إضافة مجلد', 'Add Folder'), style: const TextStyle(color: Color(0xFFD4AF37))),
                         style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12), side: const BorderSide(color: Color(0xFFD4AF37))),
                       ),
                     ),
@@ -466,7 +568,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                         decoration: BoxDecoration(color: const Color(0xFF3E522B), borderRadius: BorderRadius.circular(12)),
-                        child: Text('${tr('إجمالي الملفات', 'Total Files')}: $_totalFilesCount', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                        child: Text('${tr('الكل', 'Total')}: $_totalFilesCount', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                       ),
                     ],
                   ),
@@ -494,9 +596,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                         itemBuilder: (context, index) {
                           final folder = _folders[index];
                           return GestureDetector(
-                            onTap: () {
-                              Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: folder)));
-                            },
+                            onTap: () { Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: folder))); },
                             child: Container(
                               decoration: BoxDecoration(color: const Color(0xFF18202E), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white12)),
                               clipBehavior: Clip.antiAlias,
@@ -508,11 +608,8 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                                       fit: StackFit.expand,
                                       children: [
                                         Container(
-                                          color: Colors.white,
-                                          padding: const EdgeInsets.all(6),
-                                          child: folder.coverBytes != null
-                                              ? Image.memory(folder.coverBytes!, fit: BoxFit.contain, filterQuality: FilterQuality.high)
-                                              : const Center(child: Icon(Icons.folder_rounded, size: 54, color: Color(0xFFD4AF37))),
+                                          color: Colors.white, padding: const EdgeInsets.all(6),
+                                          child: folder.coverBytes != null ? Image.memory(folder.coverBytes!, fit: BoxFit.contain, filterQuality: FilterQuality.high) : const Center(child: Icon(Icons.folder_rounded, size: 54, color: Color(0xFFD4AF37))),
                                         ),
                                         Positioned(
                                           top: 8, left: 8,
@@ -537,8 +634,6 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                                             Expanded(child: Directionality(textDirection: TextDirection.ltr, child: Text(folder.folderName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white)))),
                                           ],
                                         ),
-                                        const SizedBox(height: 4),
-                                        Text('${tr('عدد الملفات', 'Files count')}: ${folder.filePaths.length}', style: const TextStyle(color: Color(0xFF56CCF2), fontSize: 12, fontWeight: FontWeight.w600)),
                                       ],
                                     ),
                                   ),
@@ -583,7 +678,12 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
     int count = 0;
     for (final path in widget.folderGroup.filePaths) {
       if (!mounted) return;
-      final info = await EmbParser.parseFile(path);
+      final lower = path.toLowerCase();
+      EmbDesignInfo? info;
+      if (lower.endsWith('.dst')) info = await DstParser.parseFile(path);
+      else if (lower.endsWith('.emb')) info = await EmbParser.parseFile(path);
+      else info = EmbDesignInfo(filePath: path, fileName: path.split(Platform.pathSeparator).last, stitches: 0, colorCount: 0, jumpsCount: 0, sequinsCount: 0, machineType: 'Other', colorSequence: []);
+      
       if (info != null) {
         _designs.add(info);
         count++;
@@ -631,14 +731,9 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
               ],
             ),
             actions: [
-              TextButton(
-                onPressed: () async { await _EmbGalleryAppState.toggleLanguage(); setState(() {}); },
-                child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
-              ),
+              TextButton(onPressed: () async { await _EmbGalleryAppState.toggleLanguage(); setState(() {}); }, child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold))),
               PopupMenuButton<SortOption>(
-                icon: const Icon(Icons.sort),
-                tooltip: tr('ترتيب التصاميم', 'Sort Designs'),
-                onSelected: (opt) { _sortOption = opt; _applyFilterAndSort(); },
+                icon: const Icon(Icons.sort), tooltip: tr('ترتيب', 'Sort'), onSelected: (opt) { _sortOption = opt; _applyFilterAndSort(); },
                 itemBuilder: (_) => [
                   PopupMenuItem(value: SortOption.nameAsc, child: Text(tr('الاسم (أ - ي)', 'Name (A - Z)'))),
                   PopupMenuItem(value: SortOption.stitchesDesc, child: Text(tr('الأكثر غرزاً', 'Most Stitches'))),
@@ -651,23 +746,15 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
           body: Column(
             children: [
               Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                color: const Color(0xFF18202E),
-                child: Directionality(
-                  textDirection: TextDirection.ltr,
-                  child: Text('📁 ${widget.folderGroup.folderPath}', style: const TextStyle(fontSize: 11, color: Colors.white60), maxLines: 1, overflow: TextOverflow.ellipsis),
-                ),
+                width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6), color: const Color(0xFF18202E),
+                child: Directionality(textDirection: TextDirection.ltr, child: Text('📁 ${widget.folderGroup.folderPath}', style: const TextStyle(fontSize: 11, color: Colors.white60), maxLines: 1, overflow: TextOverflow.ellipsis)),
               ),
               Padding(
                 padding: const EdgeInsets.all(12),
                 child: TextField(
                   decoration: InputDecoration(
-                    hintText: tr('بحث داخل ${widget.folderGroup.filePaths.length} ملف...', 'Search in ${widget.folderGroup.filePaths.length} files...'),
-                    prefixIcon: const Icon(Icons.search),
-                    filled: true, fillColor: const Color(0xFF18202E),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                    hintText: tr('بحث...', 'Search...'), prefixIcon: const Icon(Icons.search), filled: true, fillColor: const Color(0xFF18202E),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 0), border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
                   ),
                   onChanged: (val) { _searchQuery = val; _applyFilterAndSort(); },
                 ),
@@ -675,12 +762,7 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
               if (_isLoading) const LinearProgressIndicator(color: Color(0xFFD4AF37)),
               Expanded(
                 child: _filteredDesigns.isEmpty
-                    ? Center(
-                        child: Text(
-                          _isLoading ? tr('جاري قراءة تصاميم المجلد...', 'Loading folder designs...') : tr('لا توجد تصاميم مطابقة', 'No matching designs'),
-                          style: const TextStyle(color: Colors.white70),
-                        ),
-                      )
+                    ? Center(child: Text(_isLoading ? tr('جاري القراءة...', 'Loading...') : tr('لا يوجد تطابق', 'No match'), style: const TextStyle(color: Colors.white70)))
                     : GridView.builder(
                         padding: const EdgeInsets.all(12),
                         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, crossAxisSpacing: 12, mainAxisSpacing: 12, childAspectRatio: 0.70),
@@ -690,9 +772,7 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                           return _DesignGridCard(
                             design: item,
                             formattedStitches: numFmt.format(item.stitches),
-                            onTap: () {
-                              Navigator.push(context, MaterialPageRoute(builder: (_) => DesignDetailScreen(design: item)));
-                            },
+                            onTap: () { Navigator.push(context, MaterialPageRoute(builder: (_) => DesignDetailScreen(design: item))); },
                           );
                         },
                       ),
@@ -709,13 +789,13 @@ class _DesignGridCard extends StatelessWidget {
   final EmbDesignInfo design;
   final String formattedStitches;
   final VoidCallback onTap;
-
   const _DesignGridCard({required this.design, required this.formattedStitches, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final dimCmText = formatDimensionsCm(design.widthMm, design.heightMm);
-    final isDst = design.filePath.toLowerCase().endsWith('.dst');
+    final ext = design.filePath.split('.').last.toUpperCase();
+    final hasPreview = design.previewJpeg != null;
 
     return GestureDetector(
       onTap: onTap,
@@ -727,22 +807,19 @@ class _DesignGridCard extends StatelessWidget {
           children: [
             Expanded(
               child: Container(
-                color: Colors.white,
-                padding: const EdgeInsets.all(6),
-                child: isDst
-                    ? Center(
+                color: Colors.white, padding: const EdgeInsets.all(6),
+                child: hasPreview
+                    ? Image.memory(design.previewJpeg!, fit: BoxFit.contain, filterQuality: FilterQuality.high)
+                    : Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             const Icon(Icons.architecture, size: 50, color: Color(0xFF3E522B)),
                             const SizedBox(height: 8),
-                            Text('DST', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 16)),
+                            Text(ext, style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 16)),
                           ],
                         ),
-                      )
-                    : design.previewJpeg != null
-                        ? Image.memory(design.previewJpeg!, fit: BoxFit.contain, filterQuality: FilterQuality.high)
-                        : const Center(child: Icon(Icons.image_not_supported, color: Colors.grey, size: 40)),
+                      ),
               ),
             ),
             Padding(
@@ -807,19 +884,14 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
       await outFile.writeAsBytes(byteData.buffer.asUint8List());
 
       final filesToShare = <XFile>[XFile(outFile.path)];
-      if (includeEmbFile && await File(widget.design.filePath).exists()) {
-        filesToShare.add(XFile(widget.design.filePath));
-      }
+      if (includeEmbFile && await File(widget.design.filePath).exists()) filesToShare.add(XFile(widget.design.filePath));
 
       final numFmt = intl.NumberFormat('#,###');
       final dimStr = formatDimensionsCm(widget.design.widthMm, widget.design.heightMm, includeMm: true);
       final dimLine = dimStr != null ? '\n${tr('المقاس', 'Size')}: $dimStr' : '';
       final seqText = widget.design.sequinsCount > 0 ? '\n${tr('عدد الترتر', 'Sequins')}: ${numFmt.format(widget.design.sequinsCount)}' : '';
 
-      await Share.shareXFiles(
-        filesToShare,
-        text: '${tr('موديل', 'Design')}: ${widget.design.fileName}$dimLine\n${tr('عدد الغرز', 'Stitches')}: ${numFmt.format(widget.design.stitches)}\n${tr('عدد الألوان', 'Colors')}: ${widget.design.colorCount}\n${tr('عدد المراحل', 'Stops')}: ${widget.design.actualStopsCount}$seqText',
-      );
+      await Share.shareXFiles(filesToShare, text: '${tr('موديل', 'Design')}: ${widget.design.fileName}$dimLine\n${tr('عدد الغرز', 'Stitches')}: ${numFmt.format(widget.design.stitches)}\n${tr('عدد الألوان', 'Colors')}: ${widget.design.colorCount}\n${tr('عدد المراحل', 'Stops')}: ${widget.design.actualStopsCount}$seqText');
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${tr('تعذرت المشاركة', 'Share failed')}: $e')));
     } finally {
@@ -831,7 +903,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   Widget build(BuildContext context) {
     final numFmt = intl.NumberFormat('#,###');
     final d = widget.design;
-    final isDst = d.filePath.toLowerCase().endsWith('.dst');
+    final ext = d.filePath.split('.').last.toUpperCase();
 
     return ValueListenableBuilder<bool>(
       valueListenable: isArabicNotifier,
@@ -844,21 +916,14 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
             backgroundColor: const Color(0xFF0E131D),
             title: Directionality(textDirection: TextDirection.ltr, child: Text(d.fileName, style: const TextStyle(fontSize: 15))),
             actions: [
-              TextButton(
-                onPressed: () async { await _EmbGalleryAppState.toggleLanguage(); setState(() {}); },
-                child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
-              ),
-              if (d.previewJpeg != null)
-                IconButton(icon: const Icon(Icons.fullscreen, color: Color(0xFFD4AF37)), tooltip: tr('تكبير بملء الشاشة', 'Full Screen Zoom'), onPressed: _openFullScreenViewer),
+              TextButton(onPressed: () async { await _EmbGalleryAppState.toggleLanguage(); setState(() {}); }, child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold))),
+              if (d.previewJpeg != null) IconButton(icon: const Icon(Icons.fullscreen, color: Color(0xFFD4AF37)), tooltip: tr('تكبير بملء الشاشة', 'Full Screen Zoom'), onPressed: _openFullScreenViewer),
               PopupMenuButton<String>(
                 icon: _isSharing ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.share),
-                tooltip: tr('مشاركة عبر واتساب', 'Share via WhatsApp'),
-                onSelected: (val) {
-                  if (val == 'image') _shareDesignCard(includeEmbFile: false);
-                  else if (val == 'both') _shareDesignCard(includeEmbFile: true);
-                },
+                tooltip: tr('مشاركة', 'Share'),
+                onSelected: (val) { if (val == 'image') _shareDesignCard(includeEmbFile: false); else if (val == 'both') _shareDesignCard(includeEmbFile: true); },
                 itemBuilder: (_) => [
-                  PopupMenuItem(value: 'image', child: Text(tr('مشاركة صورة المعاينة للواتس', 'Share Preview Image'))),
+                  PopupMenuItem(value: 'image', child: Text(tr('مشاركة صورة المعاينة', 'Share Preview Image'))),
                   PopupMenuItem(value: 'both', child: Text(tr('مشاركة الصورة + الملف', 'Share Image + File'))),
                 ],
               ),
@@ -880,22 +945,20 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                           children: [
                             Container(
                               height: 360, width: double.infinity, color: Colors.white,
-                              child: isDst
-                                  ? Center(
+                              child: d.previewJpeg != null
+                                  ? InteractiveViewer(minScale: 0.8, maxScale: 8.0, child: Center(child: Image.memory(d.previewJpeg!, fit: BoxFit.contain, filterQuality: FilterQuality.high, isAntiAlias: true)))
+                                  : Center(
                                       child: Column(
                                         mainAxisAlignment: MainAxisAlignment.center,
                                         children: [
                                           const Icon(Icons.architecture, size: 80, color: Color(0xFF3E522B)),
                                           const SizedBox(height: 12),
-                                          Text('DST Format', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 22)),
+                                          Text('$ext Format', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 22)),
                                           const SizedBox(height: 4),
-                                          Text(tr('صيغة الماكينة (بدون صورة مسبقة)', 'Machine format (No embedded preview)'), style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
+                                          Text(tr('صيغة غير مدعومة للرسم بعد', 'Format rendering not supported yet'), style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
                                         ],
                                       ),
-                                    )
-                                  : d.previewJpeg != null
-                                      ? InteractiveViewer(minScale: 0.8, maxScale: 8.0, child: Center(child: Image.memory(d.previewJpeg!, fit: BoxFit.contain, filterQuality: FilterQuality.high, isAntiAlias: true)))
-                                      : const Center(child: Icon(Icons.image_not_supported, size: 64, color: Colors.grey)),
+                                    ),
                             ),
                             if (d.previewJpeg != null)
                               Positioned(
