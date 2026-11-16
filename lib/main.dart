@@ -12,8 +12,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import 'parsers/emb_parser.dart';
-import 'parsers/dst_parser.dart';
+import 'parsers/emb_parser.dart'; // هذا السطر الآن يجلب كل شيء (EMB + DST)
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
