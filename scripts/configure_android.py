@@ -38,7 +38,7 @@ for p in glob.glob("android/app/build.gradle*"):
     with open(p, "w", encoding="utf-8") as f:
         f.write(s)
 
-# 2. تحديث AndroidManifest.xml بصيغة نظيفة 100% تظهر في واتساب وتنجح في SDK 35
+# 2. تحديث AndroidManifest.xml بصيغة متوافقة تماماً تظهر في واتساب
 manifest_path = "android/app/src/main/AndroidManifest.xml"
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = f.read()
@@ -89,7 +89,7 @@ if "android.intent.action.VIEW" not in manifest:
 with open(manifest_path, "w", encoding="utf-8") as f:
     f.write(manifest)
 
-# 3. كتابة MainActivity.kt لاستقبال ملفات واتساب مباشرة
+# 3. كتابة MainActivity.kt لاستقبال الملفات مباشرة
 kt_dir = "android/app/src/main/kotlin/com/tarikhabrosh/emb_gallery"
 os.makedirs(kt_dir, exist_ok=True)
 kt_code = """package com.tarikhabrosh.emb_gallery
@@ -176,7 +176,9 @@ class MainActivity : FlutterActivity() {
                     }
                 }
             }
-            if (!displayName.lowercase().endsWith(".emb")) {
+            
+            val lowerName = displayName.lowercase()
+            if (!lowerName.endsWith(".emb") && !lowerName.endsWith(".dst")) {
                 displayName = "$displayName.emb"
             }
 
