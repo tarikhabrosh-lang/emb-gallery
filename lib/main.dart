@@ -13,8 +13,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'parsers/emb_parser.dart';
 
-final rootNavigatorKey = GlobalKey<NavigatorState>();
-final isArabicNotifier = ValueNotifier<bool>(true);
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
+final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
 
 String tr(String ar, String en) => isArabicNotifier.value ? ar : en;
 final validExtensions = ['.emb', '.dst', '.pes', '.pec', '.exp', '.ef', '.vp3', '.xxx', '.u01'];
@@ -382,13 +382,13 @@ class _ActivationScreenState extends State<ActivationScreen> {
 
 class EmbFolderGroup {
   final String folderPath, folderName;
-  final List filePaths;
+  final List<String> filePaths;
   Uint8List? coverBytes;
   EmbFolderGroup({required this.folderPath, required this.folderName, required this.filePaths, this.coverBytes});
 }
 
 class FoldersGalleryPage extends StatefulWidget {
-  final Map license;
+  final Map<String, dynamic> license;
   const FoldersGalleryPage({super.key, required this.license});
   @override
   State<FoldersGalleryPage> createState() => _FoldersGalleryPageState();
