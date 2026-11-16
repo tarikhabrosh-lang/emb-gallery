@@ -109,18 +109,25 @@ class EmbParser {
               }
             }
           }
+          
           for (final entry in propPositions.entries) {
             final pid = entry.key, propPos = entry.value;
             if (pid == 0 || propPos + 8 > infoStream.length) continue;
             final propType = bd.getUint32(propPos, Endian.little), propName = pidNames[pid] ?? '';
+            
+            // قراءة الخصائص الرقمية (الألوان، الغرز، المقاسات)
             if ((propType == 3 || propType == 19 || propType == 22) && propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
-              if (propName.contains('stitches') || pid == 6) {
+              if (pid == 6 || propName == 'stitches') {
                 stitches = val;
-              } else if (propName.contains('colour') || propName.contains('color') || pid == 3) {
-                colors = val;
-              } else if (propName.contains('jump') || pid == 7) {
+              } else if (pid == 3 || propName == 'number of colors' || propName == 'total colors') {
+                colors = val; // هنا تم حل مشكلة الألوان
+              } else if (pid == 7 || propName == 'jumps') {
                 jumps = val;
+              } else if (pid == 8 || propName == 'width') {
+                widthMm = val / 10.0; // عرض التصميم الفعلي
+              } else if (pid == 9 || propName == 'height') {
+                heightMm = val / 10.0; // طول التصميم الفعلي
               } else if (propName.contains('sequin')) {
                 sequins = val;
               } else if (propName.contains('bling')) {
@@ -128,34 +135,39 @@ class EmbParser {
               } else if (propName.contains('trim')) {
                 trims = val;
               }
-            } else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
+            } 
+            // قراءة الخصائص العشرية (كخيار بديل للمقاسات)
+            else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
               final dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
                   : (propPos + 12 <= infoStream.length ? bd.getFloat64(propPos + 4, Endian.little) : 0.0);
-              if (propName == 'design left') {
-                exactLeft = dVal;
-              } else if (propName == 'design right') {
-                exactRight = dVal;
-              } else if (propName == 'design up') {
-                exactUp = dVal;
-              } else if (propName == 'design down') {
-                exactDown = dVal;
-              }
-            } else if (propType == 30 && propPos + 8 <= infoStream.length) {
+              if (propName == 'design left') exactLeft = dVal;
+              else if (propName == 'design right') exactRight = dVal;
+              else if (propName == 'design up') exactUp = dVal;
+              else if (propName == 'design down') exactDown = dVal;
+            } 
+            // قراءة النصوص (ترتيب الألوان ونوع الماكينة)
+            else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
                   .decode(infoStream.sublist(propPos + 8, (propPos + 8 + strLen).clamp(0, infoStream.length)), allowInvalid: true)
                   .replaceAll('\x00', '')
                   .trim();
-              if ((propName.contains('machine') || pid == 19) && rawStr.isNotEmpty) {
+              if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) {
                 machine = rawStr;
-              } else if ((propName.contains('colorway') || pid == 34) && rawStr.isNotEmpty) {
+              } else if ((pid == 34 || propName.contains('colorway')) && rawStr.isNotEmpty) {
                 sequence = _parseColorwayTable(rawStr);
               }
             }
           }
-          if (exactLeft != null && exactRight != null) widthMm = _resolveTrueSizeMm((exactRight - exactLeft).abs());
-          if (exactUp != null && exactDown != null) heightMm = _resolveTrueSizeMm((exactUp - exactDown).abs());
+          
+          // حساب المقاسات في حال عدم وجود PID 8 و 9
+          if (widthMm == null || widthMm == 0) {
+            if (exactLeft != null && exactRight != null) widthMm = _resolveTrueSizeMm((exactRight - exactLeft).abs());
+          }
+          if (heightMm == null || heightMm == 0) {
+            if (exactUp != null && exactDown != null) heightMm = _resolveTrueSizeMm((exactUp - exactDown).abs());
+          }
         }
       }
       if (colors == 0 && sequence.isNotEmpty) colors = sequence.length;
