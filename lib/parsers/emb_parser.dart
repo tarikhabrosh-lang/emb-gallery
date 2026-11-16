@@ -21,7 +21,7 @@ class EmbDesignInfo {
   final String filePath, fileName, machineType;
   final Uint8List? previewJpeg, stitchPreviewBytes;
   final int previewWidth, previewHeight, stitches, colorCount, jumpsCount, sequinsCount, trimsCount;
-  final List<ThreadColorStep> colorSequence;
+  final List colorSequence;
   final double? widthMm, heightMm;
 
   EmbDesignInfo({
@@ -52,7 +52,7 @@ class _ExtractedImage {
 }
 
 class EmbParser {
-  static Future<EmbDesignInfo?> parseFile(String filePath) async {
+  static Future parseFile(String filePath) async {
     try {
       final file = File(filePath);
       if (!await file.exists()) return null;
@@ -74,7 +74,7 @@ class EmbParser {
 
       int stitches = 0, colors = 0, jumps = 0, sequins = 0, blings = 0, trims = 0;
       String machine = 'Unknown';
-      List<ThreadColorStep> sequence = [];
+      List sequence = [];
       double? widthMm, heightMm, exactLeft, exactRight, exactUp, exactDown;
 
       final infoStream = ole.getStream('${String.fromCharCode(5)}WilcomDesignInformationDDD');
@@ -83,15 +83,15 @@ class EmbParser {
         final sectionOffset = bd.getUint32(44, Endian.little);
         if (sectionOffset + 8 <= infoStream.length) {
           final propCount = bd.getUint32(sectionOffset + 4, Endian.little);
-          final Map<int, int> propPositions = {};
+          final Map propPositions = {};
           for (int i = 0; i < propCount; i++) {
             final entryPos = sectionOffset + 8 + (i * 8);
             if (entryPos + 8 > infoStream.length) break;
             propPositions[bd.getUint32(entryPos, Endian.little)] = sectionOffset + bd.getUint32(entryPos + 4, Endian.little);
           }
-          final Map<int, String> pidNames = {};
+          final Map pidNames = {};
           if (propPositions.containsKey(0)) {
-            final dictPos = propPositions[0]!;
+            final int dictPos = propPositions[0];
             if (dictPos + 4 <= infoStream.length) {
               int curr = dictPos + 4;
               for (int d = 0; d < bd.getUint32(dictPos, Endian.little); d++) {
@@ -109,74 +109,91 @@ class EmbParser {
               }
             }
           }
-          
+
           for (final entry in propPositions.entries) {
-            final pid = entry.key, propPos = entry.value;
+            final int pid = entry.key;
+            final int propPos = entry.value;
             if (pid == 0 || propPos + 8 > infoStream.length) continue;
             final propType = bd.getUint32(propPos, Endian.little);
-            final propName = (pidNames[pid] ?? '').toLowerCase();
-            
+            final String propName = (pidNames[pid] ?? '').toString().toLowerCase();
+
             if ((propType == 3 || propType == 19 || propType == 22) && propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
-              if (pid == 6 || propName == 'stitches') stitches = val;
-              else if (pid == 3 || propName == 'number of colors' || propName == 'total colors' || propName == 'colors') {
+              if (pid == 6 || propName == 'stitches') {
+                stitches = val;
+              } else if (pid == 3 || propName == 'number of colors' || propName == 'total colors' || propName == 'colors') {
                 if (val > 0) colors = val;
+              } else if (pid == 7 || propName == 'jumps') {
+                jumps = val;
+              } else if (pid == 8 || propName.contains('width')) {
+                widthMm = val / 10.0;
+              } else if (pid == 9 || propName.contains('height')) {
+                heightMm = val / 10.0;
+              } else if (propName.contains('left')) {
+                exactLeft = val / 10.0;
+              } else if (propName.contains('right')) {
+                exactRight = val / 10.0;
+              } else if (propName.contains('top') || propName.contains('up')) {
+                exactUp = val / 10.0;
+              } else if (propName.contains('bottom') || propName.contains('down')) {
+                exactDown = val / 10.0;
+              } else if (propName.contains('sequin')) {
+                sequins = val;
+              } else if (propName.contains('bling')) {
+                blings = val;
+              } else if (propName.contains('trim')) {
+                trims = val;
               }
-              else if (pid == 7 || propName == 'jumps') jumps = val;
-              else if (pid == 8 || propName.contains('width')) widthMm = val / 10.0;
-              else if (pid == 9 || propName.contains('height')) heightMm = val / 10.0;
-              else if (propName.contains('left')) exactLeft = val / 10.0;
-              else if (propName.contains('right')) exactRight = val / 10.0;
-              else if (propName.contains('top') || propName.contains('up')) exactUp = val / 10.0;
-              else if (propName.contains('bottom') || propName.contains('down')) exactDown = val / 10.0;
-              else if (propName.contains('sequin')) sequins = val;
-              else if (propName.contains('bling')) blings = val;
-              else if (propName.contains('trim')) trims = val;
-            } 
-            else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
+            } else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
               final dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
                   : (propPos + 12 <= infoStream.length ? bd.getFloat64(propPos + 4, Endian.little) : 0.0);
-                  
-              if (pid == 8 || propName.contains('width')) widthMm = dVal;
-              else if (pid == 9 || propName.contains('height')) heightMm = dVal;
-              else if (propName.contains('left')) exactLeft = dVal;
-              else if (propName.contains('right')) exactRight = dVal;
-              else if (propName.contains('top') || propName.contains('up')) exactUp = dVal;
-              else if (propName.contains('bottom') || propName.contains('down')) exactDown = dVal;
-            } 
-            else if (propType == 30 && propPos + 8 <= infoStream.length) {
+
+              if (pid == 8 || propName.contains('width')) {
+                widthMm = dVal;
+              } else if (pid == 9 || propName.contains('height')) {
+                heightMm = dVal;
+              } else if (propName.contains('left')) {
+                exactLeft = dVal;
+              } else if (propName.contains('right')) {
+                exactRight = dVal;
+              } else if (propName.contains('top') || propName.contains('up')) {
+                exactUp = dVal;
+              } else if (propName.contains('bottom') || propName.contains('down')) {
+                exactDown = dVal;
+              }
+            } else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
                   .decode(infoStream.sublist(propPos + 8, (propPos + 8 + strLen).clamp(0, infoStream.length)), allowInvalid: true)
                   .replaceAll('\x00', '')
                   .trim();
-              if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) machine = rawStr;
-              else if ((pid == 34 || propName.contains('colorway') || propName.contains('thread')) && rawStr.isNotEmpty) {
+              if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) {
+                machine = rawStr;
+              } else if ((pid == 34 || propName.contains('colorway') || propName.contains('thread')) && rawStr.isNotEmpty) {
                 sequence = _parseColorwayTable(rawStr);
               }
             }
           }
-          
+
           if ((widthMm == null || widthMm == 0) && exactLeft != null && exactRight != null) {
             widthMm = (exactRight - exactLeft).abs();
           }
           if ((heightMm == null || heightMm == 0) && exactUp != null && exactDown != null) {
             heightMm = (exactUp - exactDown).abs();
           }
-          
+
           if (widthMm != null && widthMm! > 1000) widthMm = widthMm! / 10.0;
           if (heightMm != null && heightMm! > 1000) heightMm = heightMm! / 10.0;
         }
       }
 
-      // اعتماد عدد الألوان من التسلسل إذا وجد وكان أدق
       if (sequence.isNotEmpty && sequence.length > colors) {
         colors = sequence.length;
       } else if (colors == 0 && sequence.isNotEmpty) {
         colors = sequence.length;
       } else if (colors == 0) {
-        colors = 1; // قيمة افتراضية في حال عدم وجود بيانات
+        colors = 1;
       }
 
       return EmbDesignInfo(
@@ -205,19 +222,23 @@ class EmbParser {
     if (stream == null || stream.length < 16) return null;
     Uint8List? imgBytes;
     if (stream.length > 6 && stream[4] == 0x78) {
-      try { imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream.sublist(4))); } catch (_) {}
+      try {
+        imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream.sublist(4)));
+      } catch (_) {}
     }
     if (imgBytes == null && stream[0] == 0x78) {
-      try { imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream)); } catch (_) {}
+      try {
+        imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream));
+      } catch (_) {}
     }
     imgBytes ??= stream;
     final dims = _readImageDimensions(imgBytes);
     if (dims != null) return _ExtractedImage(imgBytes, dims.$1, dims.$2);
-    
-    if ((imgBytes[0] == 0x42 && imgBytes[1] == 0x4D) || 
-        (imgBytes[0] == 0xFF && imgBytes[1] == 0xD8) || 
+
+    if ((imgBytes[0] == 0x42 && imgBytes[1] == 0x4D) ||
+        (imgBytes[0] == 0xFF && imgBytes[1] == 0xD8) ||
         (imgBytes[0] == 0x89 && imgBytes[1] == 0x50)) {
-      return _ExtractedImage(imgBytes, 256, 256); 
+      return _ExtractedImage(imgBytes, 256, 256);
     }
     return null;
   }
@@ -239,10 +260,14 @@ class EmbParser {
       int offset = 2;
       final bd = ByteData.sublistView(bytes);
       while (offset + 9 < bytes.length) {
-        if (bytes[offset] != 0xFF) { offset++; continue; }
+        if (bytes[offset] != 0xFF) {
+          offset++;
+          continue;
+        }
         final marker = bytes[offset + 1];
         if (marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
-          offset += 2; continue;
+          offset += 2;
+          continue;
         }
         if (offset + 4 >= bytes.length) break;
         final segLen = bd.getUint16(offset + 2, Endian.big);
@@ -258,8 +283,8 @@ class EmbParser {
     return null;
   }
 
-  static List<ThreadColorStep> _parseColorwayTable(String rawTable) {
-    final steps = <ThreadColorStep>[];
+  static List _parseColorwayTable(String rawTable) {
+    final List steps = [];
     for (final line in rawTable.split('\n')) {
       if (line.trim().isEmpty) continue;
       final cols = line.split('\t');
@@ -268,7 +293,7 @@ class EmbParser {
         final colorIdx = int.tryParse(cols[1].trim()) ?? steps.length;
         final stepStitches = cols.length > 3 ? (int.tryParse(cols[3].trim()) ?? 0) : 0;
         final colorName = cols.length > 6 ? cols[6].trim() : 'Color $colorIdx';
-        
+
         steps.add(
           ThreadColorStep(
             stopNumber: stopNum,
@@ -298,11 +323,11 @@ class _Ole2Reader {
   bool isValid = false;
   int _sectorSize = 512, _miniSectorSize = 64, _miniCutoff = 4096;
   int _firstDirSector = 0, _firstMiniFatSector = 0, _numMiniFatSectors = 0;
-  final List<int> _fat = [], _miniFat = [];
+  final List _fat = [], _miniFat = [];
   Uint8List? _miniStream;
-  final Map<String, _DirEntry> _entries = {};
+  final Map _entries = {};
 
-  Iterable<String> get streamNames => _entries.keys;
+  Iterable get streamNames => _entries.keys;
 
   _Ole2Reader(this._data) {
     if (_data.length < 512) return;
@@ -323,7 +348,7 @@ class _Ole2Reader {
     int difatSector = _bd.getUint32(68, Endian.little);
     final numDifatSectors = _bd.getUint32(72, Endian.little);
 
-    final fatSectorIds = <int>[];
+    final List fatSectorIds = [];
     for (int i = 0; i < 109; i++) {
       final sec = _bd.getUint32(76 + i * 4, Endian.little);
       if (sec < 0xFFFFFFFA) fatSectorIds.add(sec);
@@ -339,7 +364,8 @@ class _Ole2Reader {
       difatSector = _bd.getUint32(offset + entriesPerSec * 4, Endian.little);
     }
     for (int i = 0; i < numFatSectors && i < fatSectorIds.length; i++) {
-      final offset = (fatSectorIds[i] + 1) * _sectorSize;
+      final int secId = fatSectorIds[i];
+      final offset = (secId + 1) * _sectorSize;
       if (offset + _sectorSize > _data.length) break;
       for (int j = 0; j < _sectorSize ~/ 4; j++) {
         _fat.add(_bd.getUint32(offset + j * 4, Endian.little));
@@ -358,9 +384,10 @@ class _Ole2Reader {
       final nameLen = dirBd.getUint16(off + 64, Endian.little);
       final type = dirBytes[off + 66];
       if (type == 0 || nameLen < 2 || nameLen > 64) continue;
-      final codeUnits = <int>[];
+      final List<int> codeUnits = List.filled((nameLen - 2) ~/ 2, 0);
+      int idx = 0;
       for (int c = 0; c < nameLen - 2; c += 2) {
-        codeUnits.add(dirBd.getUint16(off + c, Endian.little));
+        codeUnits[idx++] = dirBd.getUint16(off + c, Endian.little);
       }
       final name = String.fromCharCodes(codeUnits);
       final startSec = dirBd.getUint32(off + 116, Endian.little);
@@ -375,7 +402,7 @@ class _Ole2Reader {
   }
 
   Uint8List? getStream(String name) {
-    final entry = _entries[name];
+    final _DirEntry? entry = _entries[name];
     if (entry == null || entry.size == 0) return null;
     if (entry.size < _miniCutoff && _miniStream != null) {
       return _readMiniChain(entry.startSector, entry.size);
@@ -386,7 +413,7 @@ class _Ole2Reader {
   Uint8List _readChain(int startSector, {int? maxBytes}) {
     final builder = BytesBuilder(copy: false);
     int sec = startSector, collected = 0;
-    final visited = <int>{};
+    final Set visited = {};
     while (sec >= 0 && sec < 0xFFFFFFFA && !visited.contains(sec)) {
       visited.add(sec);
       final offset = (sec + 1) * _sectorSize;
@@ -404,7 +431,7 @@ class _Ole2Reader {
   Uint8List _readMiniChain(int startMiniSector, int size) {
     final builder = BytesBuilder(copy: false);
     int sec = startMiniSector, collected = 0;
-    final visited = <int>{};
+    final Set visited = {};
     while (sec >= 0 && sec < 0xFFFFFFFA && !visited.contains(sec)) {
       visited.add(sec);
       final offset = sec * _miniSectorSize;
@@ -424,4 +451,143 @@ class _DirEntry {
   final String name;
   final int startSector, size;
   _DirEntry(this.name, this.startSector, this.size);
+}
+
+class _StitchBlock {
+  final List points;
+  _StitchBlock(this.points);
+}
+
+class DstParser {
+  static Future parseFile(String filePath) async {
+    try {
+      final file = File(filePath);
+      if (!await file.exists()) return null;
+      final bytes = await file.readAsBytes();
+      if (bytes.length < 512) return null;
+      final header = String.fromCharCodes(bytes.sublist(0, 512));
+      final stitches = _extractInt(header, 'ST:');
+      final colors = _extractInt(header, 'CO:') + 1;
+      final plusX = _extractInt(header, '+X:');
+      final minusX = _extractInt(header, '-X:');
+      final plusY = _extractInt(header, '+Y:');
+      final minusY = _extractInt(header, '-Y:');
+      final widthMm = (plusX + minusX) / 10.0;
+      final heightMm = (plusY + minusY) / 10.0;
+      final imageBytes = await _renderDstToImage(bytes);
+      final fileName = filePath.split(Platform.pathSeparator).last;
+      return EmbDesignInfo(
+        filePath: filePath,
+        fileName: fileName,
+        previewJpeg: imageBytes,
+        stitches: stitches,
+        colorCount: colors,
+        jumpsCount: 0,
+        sequinsCount: 0,
+        machineType: 'Tajima (DST)',
+        colorSequence: [],
+        widthMm: widthMm > 0 ? widthMm : null,
+        heightMm: heightMm > 0 ? heightMm : null,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static int _extractInt(String header, String key) {
+    final idx = header.indexOf(key);
+    if (idx == -1) return 0;
+    final endIdx = header.indexOf('\r', idx);
+    if (endIdx == -1) return 0;
+    final valStr = header.substring(idx + key.length, endIdx).trim();
+    return int.tryParse(valStr) ?? 0;
+  }
+
+  static Future _renderDstToImage(Uint8List bytes) async {
+    int x = 0, y = 0;
+    double minX = 0, maxX = 0, minY = 0, maxY = 0;
+    List points = [];
+    List colorBlocks = [];
+    for (int i = 512; i < bytes.length - 2; i += 3) {
+      int b1 = bytes[i], b2 = bytes[i + 1], b3 = bytes[i + 2];
+      if (b1 == 0x00 && b2 == 0x00 && b3 == 0xF3) break;
+      int dx = 0, dy = 0;
+      if ((b1 & 0x01) != 0) dx += 1;
+      if ((b1 & 0x02) != 0) dx -= 1;
+      if ((b1 & 0x04) != 0) dx += 9;
+      if ((b1 & 0x08) != 0) dx -= 9;
+      if ((b1 & 0x80) != 0) dy += 1;
+      if ((b1 & 0x40) != 0) dy -= 1;
+      if ((b1 & 0x20) != 0) dy += 9;
+      if ((b1 & 0x10) != 0) dy -= 9;
+      if ((b2 & 0x01) != 0) dx += 3;
+      if ((b2 & 0x02) != 0) dx -= 3;
+      if ((b2 & 0x04) != 0) dx += 27;
+      if ((b2 & 0x08) != 0) dx -= 27;
+      if ((b2 & 0x80) != 0) dy += 3;
+      if ((b2 & 0x40) != 0) dy -= 3;
+      if ((b2 & 0x20) != 0) dy += 27;
+      if ((b2 & 0x10) != 0) dy -= 27;
+      if ((b3 & 0x04) != 0) dx += 81;
+      if ((b3 & 0x08) != 0) dx -= 81;
+      if ((b3 & 0x20) != 0) dy += 81;
+      if ((b3 & 0x10) != 0) dy -= 81;
+      x += dx;
+      y += dy;
+      double px = x.toDouble(), py = -y.toDouble();
+      bool isStop = (b3 & 0x40) != 0;
+      bool isJump = (b3 & 0x80) != 0;
+      if (isStop && points.isNotEmpty) {
+        colorBlocks.add(_StitchBlock(List.from(points)));
+        points.clear();
+      }
+      if (!isJump) {
+        points.add(Offset(px, py));
+        if (px > maxX) maxX = px;
+        if (px < minX) minX = px;
+        if (py > maxY) maxY = py;
+        if (py < minY) minY = py;
+      }
+    }
+    if (points.isNotEmpty) colorBlocks.add(_StitchBlock(points));
+    double width = maxX - minX, height = maxY - minY;
+    if (width <= 0 || height <= 0) return null;
+    double scale = 800.0 / (width > height ? width : height);
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, width * scale, height * scale));
+    canvas.drawRect(Rect.fromLTWH(0, 0, width * scale, height * scale), Paint()..color = Colors.white);
+    final palette = [
+      const Color(0xFF1E88E5),
+      const Color(0xFFE53935),
+      const Color(0xFF43A047),
+      const Color(0xFFFDD835),
+      const Color(0xFF8E24AA),
+      const Color(0xFFF4511E),
+      const Color(0xFF00ACC1),
+      const Color(0xFFD81B60),
+      const Color(0xFF7CB342),
+      const Color(0xFF3949AB),
+    ];
+    for (int c = 0; c < colorBlocks.length; c++) {
+      final paint = Paint()
+        ..color = palette[c % palette.length]
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
+        ..isAntiAlias = true;
+      final path = Path();
+      final List block = colorBlocks[c].points;
+      if (block.isEmpty) continue;
+      final Offset firstPt = block[0];
+      path.moveTo((firstPt.dx - minX) * scale, (firstPt.dy - minY) * scale);
+      for (int i = 1; i < block.length; i++) {
+        final Offset pt = block[i];
+        path.lineTo((pt.dx - minX) * scale, (pt.dy - minY) * scale);
+      }
+      canvas.drawPath(path, paint);
+    }
+    final picture = recorder.endRecording();
+    final img = await picture.toImage((width * scale).toInt(), (height * scale).toInt());
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    return byteData?.buffer.asUint8List();
+  }
 }
