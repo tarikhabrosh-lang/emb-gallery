@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart' as intl;
 import 'package:path_provider/path_provider.dart';
@@ -231,11 +230,19 @@ class _ActivationScreenState extends State<ActivationScreen> {
   }
 
   void _openWhatsApp() async {
-    final msg = tr(
-          'مرحباً، أود شراء تفعيل لتطبيق Tarik emb. رقم جهازي هو: ',
-          'Hello, I want to buy activation for Tarik emb. My Device ID is: ',
-        ) +
-        widget.deviceId;
+    // 1. نسخ كود الجهاز إلى الحافظة تلقائياً
+    await Clipboard.setData(ClipboardData(text: widget.deviceId));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(tr('تم نسخ رقم الجهاز وجاري فتح واتساب...', 'Device ID copied, opening WhatsApp...')),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+
+    // 2. تجهيز الرسالة المطلوبة وإرسالها لرقمك
+    final msg = 'أرجو تزويدي بالكود الدائم\nرقم جهازي هو: ${widget.deviceId}';
     final url = Uri.parse("https://wa.me/963956739715?text=${Uri.encodeComponent(msg)}");
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
@@ -271,8 +278,8 @@ class _ActivationScreenState extends State<ActivationScreen> {
                 const SizedBox(height: 8),
                 Text(
                   tr(
-                    'لتفعيل النسخة الدائمة، أرسل هذا الكود إلى مزود الخدمة على الواتساب:',
-                    'To activate the full version, send this code to the provider on WhatsApp:',
+                    'اضغط على زر الواتساب بالأسفل لنسخ رقم جهازك وإرساله تلقائياً لطلب الكود الدائم:',
+                    'Tap the WhatsApp button below to copy your Device ID and send it automatically:',
                   ),
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white70),
@@ -286,8 +293,24 @@ class _ActivationScreenState extends State<ActivationScreen> {
                 ElevatedButton.icon(
                   onPressed: _openWhatsApp,
                   icon: const Icon(Icons.chat, size: 20),
-                  label: Text(tr('تواصل عبر واتساب (+963956739715)', 'Contact via WhatsApp (+963956739715)')),
-                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF25D366), foregroundColor: Colors.white),
+                  label: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(tr('تواصل عبر واتساب ', 'Contact via WhatsApp ')),
+                      Directionality(
+                        textDirection: TextDirection.ltr,
+                        child: const Text(
+                          '+963956739715',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF25D366),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  ),
                 ),
                 const SizedBox(height: 24),
                 TextField(
@@ -1158,7 +1181,6 @@ class DesignDetailScreen extends StatefulWidget {
 }
 
 class _DesignDetailScreenState extends State<DesignDetailScreen> {
-  final GlobalKey _shareCardKey = GlobalKey();
   bool _isSharing = false;
 
   void _openFullScreenViewer() {
@@ -1166,37 +1188,26 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
     Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenDesignViewer(design: widget.design)));
   }
 
-  Future<void> _shareDesignCard({bool includeEmbFile = false}) async {
+  // مشاركة الملف الأصلي فقط وبضغطة واحدة
+  Future<void> _shareOriginalFileOnly() async {
     if (_isSharing) return;
     setState(() => _isSharing = true);
     try {
-      final boundary = _shareCardKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-      if (boundary == null) return;
-      final image = await boundary.toImage(pixelRatio: 3.0);
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-      if (byteData == null) return;
-      final tempDir = await getTemporaryDirectory();
-      final outFile = File('${tempDir.path}/tarik_emb_${DateTime.now().millisecondsSinceEpoch}.png');
-      await outFile.writeAsBytes(byteData.buffer.asUint8List());
-
-      final filesToShare = <XFile>[XFile(outFile.path)];
-      if (includeEmbFile && await File(widget.design.filePath).exists()) {
-        filesToShare.add(XFile(widget.design.filePath));
+      final file = File(widget.design.filePath);
+      if (await file.exists()) {
+        await Share.shareXFiles([XFile(widget.design.filePath)]);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(tr('الملف الأصلي غير موجود', 'Original file not found'))),
+          );
+        }
       }
-
-      final numFmt = intl.NumberFormat('#,###');
-      final dimStr = formatDimensionsCm(widget.design.widthMm, widget.design.heightMm, includeMm: true);
-      final dimLine = dimStr != null ? '\n${tr('المقاس', 'Size')}: $dimStr' : '';
-      final seqText = widget.design.sequinsCount > 0 ? '\n${tr('عدد الترتر', 'Sequins')}: ${numFmt.format(widget.design.sequinsCount)}' : '';
-
-      await Share.shareXFiles(
-        filesToShare,
-        text:
-            '${tr('موديل', 'Design')}: ${widget.design.fileName}$dimLine\n${tr('عدد الغرز', 'Stitches')}: ${numFmt.format(widget.design.stitches)}\n${tr('عدد الألوان', 'Colors')}: ${widget.design.colorCount}\n${tr('عدد المراحل', 'Stops')}: ${widget.design.actualStopsCount}$seqText',
-      );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${tr('تعذرت المشاركة', 'Share failed')}: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${tr('تعذرت المشاركة', 'Share failed')}: $e')),
+        );
       }
     } finally {
       if (mounted) setState(() => _isSharing = false);
@@ -1233,168 +1244,157 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                   tooltip: tr('تكبير بملء الشاشة', 'Full Screen Zoom'),
                   onPressed: _openFullScreenViewer,
                 ),
-              PopupMenuButton<String>(
-                icon: _isSharing ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.share),
-                tooltip: tr('مشاركة', 'Share'),
-                onSelected: (val) {
-                  if (val == 'image') {
-                    _shareDesignCard(includeEmbFile: false);
-                  } else if (val == 'both') {
-                    _shareDesignCard(includeEmbFile: true);
-                  }
-                },
-                itemBuilder: (_) => [
-                  PopupMenuItem(value: 'image', child: Text(tr('مشاركة صورة المعاينة', 'Share Preview Image'))),
-                  PopupMenuItem(value: 'both', child: Text(tr('مشاركة الصورة + الملف', 'Share Image + File'))),
-                ],
+              IconButton(
+                icon: _isSharing
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.share, color: Color(0xFFD4AF37)),
+                tooltip: tr('مشاركة الملف الأصلي', 'Share Original File'),
+                onPressed: _shareOriginalFileOnly,
               ),
             ],
           ),
           body: ListView(
             padding: const EdgeInsets.all(14),
             children: [
-              RepaintBoundary(
-                key: _shareCardKey,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF18202E),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.white12),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    children: [
-                      GestureDetector(
-                        onTap: _openFullScreenViewer,
-                        child: Stack(
-                          children: [
-                            Container(
-                              height: 360,
-                              width: double.infinity,
-                              color: Colors.white,
-                              child: d.previewJpeg != null
-                                  ? InteractiveViewer(
-                                      minScale: 0.8,
-                                      maxScale: 8.0,
-                                      child: Center(
-                                        child: Image.memory(
-                                          d.previewJpeg!,
-                                          fit: BoxFit.contain,
-                                          filterQuality: FilterQuality.high,
-                                          isAntiAlias: true,
-                                        ),
-                                      ),
-                                    )
-                                  : Center(
-                                      child: Column(
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                          const Icon(Icons.architecture, size: 80, color: Color(0xFF3E522B)),
-                                          const SizedBox(height: 12),
-                                          Text('$ext Format', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 22)),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            tr('صيغة غير مدعومة للرسم بعد', 'Format rendering not supported yet'),
-                                            style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-                                          ),
-                                        ],
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF18202E),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white12),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  children: [
+                    GestureDetector(
+                      onTap: _openFullScreenViewer,
+                      child: Stack(
+                        children: [
+                          Container(
+                            height: 360,
+                            width: double.infinity,
+                            color: Colors.white,
+                            child: d.previewJpeg != null
+                                ? InteractiveViewer(
+                                    minScale: 0.8,
+                                    maxScale: 8.0,
+                                    child: Center(
+                                      child: Image.memory(
+                                        d.previewJpeg!,
+                                        fit: BoxFit.contain,
+                                        filterQuality: FilterQuality.high,
+                                        isAntiAlias: true,
                                       ),
                                     ),
-                            ),
-                            if (d.previewJpeg != null)
-                              Positioned(
-                                bottom: 10,
-                                left: 10,
-                                child: Material(
-                                  color: const Color(0xFF0E131D).withOpacity(0.88),
+                                  )
+                                : Center(
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        const Icon(Icons.architecture, size: 80, color: Color(0xFF3E522B)),
+                                        const SizedBox(height: 12),
+                                        Text('$ext Format', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 22)),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          tr('صيغة غير مدعومة للرسم بعد', 'Format rendering not supported yet'),
+                                          style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                          ),
+                          if (d.previewJpeg != null)
+                            Positioned(
+                              bottom: 10,
+                              left: 10,
+                              child: Material(
+                                color: const Color(0xFF0E131D).withOpacity(0.88),
+                                borderRadius: BorderRadius.circular(20),
+                                child: InkWell(
+                                  onTap: _openFullScreenViewer,
                                   borderRadius: BorderRadius.circular(20),
-                                  child: InkWell(
-                                    onTap: _openFullScreenViewer,
-                                    borderRadius: BorderRadius.circular(20),
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const Icon(Icons.zoom_in, size: 18, color: Color(0xFFD4AF37)),
-                                          const SizedBox(width: 4),
-                                          Text(tr('تكبير بوضوح', 'HD Zoom'), style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                                        ],
-                                      ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.zoom_in, size: 18, color: Color(0xFFD4AF37)),
+                                        const SizedBox(width: 4),
+                                        Text(tr('تكبير بوضوح', 'HD Zoom'), style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                                      ],
                                     ),
                                   ),
                                 ),
                               ),
-                          ],
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Column(
-                          children: [
-                            Directionality(
-                              textDirection: TextDirection.ltr,
-                              child: Text(d.fileName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                             ),
-                            const SizedBox(height: 6),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Column(
+                        children: [
+                          Directionality(
+                            textDirection: TextDirection.ltr,
+                            child: Text(d.fileName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                          ),
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.folder_open, size: 15, color: Color(0xFFD4AF37)),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Directionality(
+                                    textDirection: TextDirection.ltr,
+                                    child: SelectableText(d.filePath, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (fullDimText != null) ...[
+                            const SizedBox(height: 8),
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                              decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF3E522B).withOpacity(0.45),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: Colors.greenAccent.withOpacity(0.4)),
+                              ),
                               child: Row(
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const Icon(Icons.folder_open, size: 15, color: Color(0xFFD4AF37)),
+                                  const Icon(Icons.straighten, size: 16, color: Colors.greenAccent),
                                   const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Directionality(
-                                      textDirection: TextDirection.ltr,
-                                      child: SelectableText(d.filePath, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                                  Flexible(
+                                    child: Text(
+                                      '${tr('المقاس', 'Size')}: $fullDimText',
+                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
                                     ),
                                   ),
                                 ],
                               ),
                             ),
-                            if (fullDimText != null) ...[
-                              const SizedBox(height: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF3E522B).withOpacity(0.45),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(color: Colors.greenAccent.withOpacity(0.4)),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(Icons.straighten, size: 16, color: Colors.greenAccent),
-                                    const SizedBox(width: 6),
-                                    Flexible(
-                                      child: Text(
-                                        '${tr('المقاس', 'Size')}: $fullDimText',
-                                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                            const SizedBox(height: 12),
-                            Wrap(
-                              spacing: 16,
-                              runSpacing: 10,
-                              alignment: WrapAlignment.spaceAround,
-                              children: [
-                                _StatBadge(label: tr('الغرز', 'Stitches'), value: numFmt.format(d.stitches), color: const Color(0xFF56CCF2)),
-                                if (shortCmText != null) _StatBadge(label: tr('المقاس (سم)', 'Size (cm)'), value: shortCmText, color: Colors.lightGreenAccent),
-                                _StatBadge(label: tr('الألوان', 'Colors'), value: '${d.colorCount}', color: const Color(0xFFD4AF37)),
-                                if (d.sequinsCount > 0) _StatBadge(label: tr('الترتر', 'Sequins'), value: numFmt.format(d.sequinsCount), color: Colors.pinkAccent),
-                                _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
-                              ],
-                            ),
                           ],
-                        ),
+                          const SizedBox(height: 12),
+                          Wrap(
+                            spacing: 16,
+                            runSpacing: 10,
+                            alignment: WrapAlignment.spaceAround,
+                            children: [
+                              _StatBadge(label: tr('الغرز', 'Stitches'), value: numFmt.format(d.stitches), color: const Color(0xFF56CCF2)),
+                              if (shortCmText != null) _StatBadge(label: tr('المقاس (سم)', 'Size (cm)'), value: shortCmText, color: Colors.lightGreenAccent),
+                              _StatBadge(label: tr('الألوان', 'Colors'), value: '${d.colorCount}', color: const Color(0xFFD4AF37)),
+                              if (d.sequinsCount > 0) _StatBadge(label: tr('الترتر', 'Sequins'), value: numFmt.format(d.sequinsCount), color: Colors.pinkAccent),
+                              _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
+                            ],
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -1574,4 +1574,3 @@ class _StatBadge extends StatelessWidget {
     );
   }
 }
- 
