@@ -116,11 +116,12 @@ class EmbParser {
             final propType = bd.getUint32(propPos, Endian.little);
             final propName = (pidNames[pid] ?? '').toLowerCase();
             
-            // قراءة الأرقام الصحيحة
             if ((propType == 3 || propType == 19 || propType == 22) && propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
               if (pid == 6 || propName == 'stitches') stitches = val;
-              else if (pid == 3 || propName.contains('color')) colors = val;
+              else if (pid == 3 || propName == 'number of colors' || propName == 'total colors' || propName == 'colors') {
+                if (val > 0) colors = val;
+              }
               else if (pid == 7 || propName == 'jumps') jumps = val;
               else if (pid == 8 || propName.contains('width')) widthMm = val / 10.0;
               else if (pid == 9 || propName.contains('height')) heightMm = val / 10.0;
@@ -132,7 +133,6 @@ class EmbParser {
               else if (propName.contains('bling')) blings = val;
               else if (propName.contains('trim')) trims = val;
             } 
-            // قراءة الأرقام العشرية
             else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
               final dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
@@ -145,7 +145,6 @@ class EmbParser {
               else if (propName.contains('top') || propName.contains('up')) exactUp = dVal;
               else if (propName.contains('bottom') || propName.contains('down')) exactDown = dVal;
             } 
-            // قراءة النصوص
             else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
@@ -153,11 +152,12 @@ class EmbParser {
                   .replaceAll('\x00', '')
                   .trim();
               if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) machine = rawStr;
-              else if ((pid == 34 || propName.contains('colorway')) && rawStr.isNotEmpty) sequence = _parseColorwayTable(rawStr);
+              else if ((pid == 34 || propName.contains('colorway') || propName.contains('thread')) && rawStr.isNotEmpty) {
+                sequence = _parseColorwayTable(rawStr);
+              }
             }
           }
           
-          // حساب المقاسات الذكي
           if ((widthMm == null || widthMm == 0) && exactLeft != null && exactRight != null) {
             widthMm = (exactRight - exactLeft).abs();
           }
@@ -165,12 +165,20 @@ class EmbParser {
             heightMm = (exactUp - exactDown).abs();
           }
           
-          // تصحيح فواصل ويلكم إذا كان الرقم ضخم جداً
           if (widthMm != null && widthMm! > 1000) widthMm = widthMm! / 10.0;
           if (heightMm != null && heightMm! > 1000) heightMm = heightMm! / 10.0;
         }
       }
-      if (colors == 0 && sequence.isNotEmpty) colors = sequence.length;
+
+      // اعتماد عدد الألوان من التسلسل إذا وجد وكان أدق
+      if (sequence.isNotEmpty && sequence.length > colors) {
+        colors = sequence.length;
+      } else if (colors == 0 && sequence.isNotEmpty) {
+        colors = sequence.length;
+      } else if (colors == 0) {
+        colors = 1; // قيمة افتراضية في حال عدم وجود بيانات
+      }
+
       return EmbDesignInfo(
         filePath: filePath,
         fileName: filePath.split(Platform.pathSeparator).last,
@@ -206,7 +214,6 @@ class EmbParser {
     final dims = _readImageDimensions(imgBytes);
     if (dims != null) return _ExtractedImage(imgBytes, dims.$1, dims.$2);
     
-    // دعم الطوارئ للصور غير المعروفة الأبعاد (تُرسل للواجهة لتعالجها تلقائياً)
     if ((imgBytes[0] == 0x42 && imgBytes[1] == 0x4D) || 
         (imgBytes[0] == 0xFF && imgBytes[1] == 0xD8) || 
         (imgBytes[0] == 0x89 && imgBytes[1] == 0x50)) {
@@ -217,23 +224,17 @@ class EmbParser {
 
   static (int, int)? _readImageDimensions(Uint8List bytes) {
     if (bytes.length < 26) return null;
-    
-    // دعم صور الـ BMP للإصدارات القديمة جداً
     if (bytes[0] == 0x42 && bytes[1] == 0x4D) {
       final bd = ByteData.sublistView(bytes);
       final w = bd.getInt32(18, Endian.little).abs();
       final h = bd.getInt32(22, Endian.little).abs();
       if (w > 0 && h > 0) return (w, h);
     }
-    
-    // صور الـ PNG
     if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
       final bd = ByteData.sublistView(bytes);
       final w = bd.getUint32(16, Endian.big), h = bd.getUint32(20, Endian.big);
       if (w > 0 && h > 0) return (w, h);
     }
-    
-    // صور الـ JPG
     if (bytes[0] == 0xFF && bytes[1] == 0xD8) {
       int offset = 2;
       final bd = ByteData.sublistView(bytes);
@@ -262,21 +263,21 @@ class EmbParser {
     for (final line in rawTable.split('\n')) {
       if (line.trim().isEmpty) continue;
       final cols = line.split('\t');
-      if (cols.length >= 7) {
-        final stopNum = int.tryParse(cols[0].trim()) ?? 0, colorIdx = int.tryParse(cols[1].trim()) ?? 0;
-        final stepStitches = int.tryParse(cols[3].trim()) ?? 0, colorName = cols[6].trim();
-        if (stopNum > 0) {
-          final resolvedName = colorName.isEmpty ? 'Color $colorIdx' : colorName;
-          steps.add(
-            ThreadColorStep(
-              stopNumber: stopNum,
-              colorIndex: colorIdx,
-              stitches: stepStitches,
-              colorName: resolvedName,
-              colorValue: _resolveColorFromName(resolvedName, colorIdx),
-            ),
-          );
-        }
+      if (cols.length >= 2) {
+        final stopNum = int.tryParse(cols[0].trim()) ?? (steps.length + 1);
+        final colorIdx = int.tryParse(cols[1].trim()) ?? steps.length;
+        final stepStitches = cols.length > 3 ? (int.tryParse(cols[3].trim()) ?? 0) : 0;
+        final colorName = cols.length > 6 ? cols[6].trim() : 'Color $colorIdx';
+        
+        steps.add(
+          ThreadColorStep(
+            stopNumber: stopNum,
+            colorIndex: colorIdx,
+            stitches: stepStitches,
+            colorName: colorName,
+            colorValue: _resolveColorFromName(colorName, colorIdx),
+          ),
+        );
       }
     }
     return steps;
@@ -285,7 +286,7 @@ class EmbParser {
   static int _resolveColorFromName(String name, int fallbackIdx) {
     const palette = [
       0xFF00BCD4, 0xFFFBC02D, 0xFF6D4C41, 0xFFF06292, 0xFF2E7D32, 0xFFE53935,
-      0xFF1E88E5, 0xFF8E24AA, 0xFFF57C00, 0xFFD4AF37,
+      0xFF1E88E5, 0xFF8E24AA, 0xFFF57C00, 0xFFD4AF37, 0xFF00897B, 0xFFE91E63,
     ];
     return palette[fallbackIdx.abs() % palette.length];
   }
@@ -423,141 +424,4 @@ class _DirEntry {
   final String name;
   final int startSector, size;
   _DirEntry(this.name, this.startSector, this.size);
-}
-
-class _StitchBlock {
-  final List<Offset> points;
-  _StitchBlock(this.points);
-}
-
-class DstParser {
-  static Future<EmbDesignInfo?> parseFile(String filePath) async {
-    try {
-      final file = File(filePath);
-      if (!await file.exists()) return null;
-      final bytes = await file.readAsBytes();
-      if (bytes.length < 512) return null;
-      final header = String.fromCharCodes(bytes.sublist(0, 512));
-      final stitches = _extractInt(header, 'ST:');
-      final colors = _extractInt(header, 'CO:') + 1;
-      final plusX = _extractInt(header, '+X:');
-      final minusX = _extractInt(header, '-X:');
-      final plusY = _extractInt(header, '+Y:');
-      final minusY = _extractInt(header, '-Y:');
-      final widthMm = (plusX + minusX) / 10.0;
-      final heightMm = (plusY + minusY) / 10.0;
-      final imageBytes = await _renderDstToImage(bytes);
-      final fileName = filePath.split(Platform.pathSeparator).last;
-      return EmbDesignInfo(
-        filePath: filePath,
-        fileName: fileName,
-        previewJpeg: imageBytes,
-        stitches: stitches,
-        colorCount: colors,
-        jumpsCount: 0,
-        sequinsCount: 0,
-        machineType: 'Tajima (DST)',
-        colorSequence: [],
-        widthMm: widthMm > 0 ? widthMm : null,
-        heightMm: heightMm > 0 ? heightMm : null,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static int _extractInt(String header, String key) {
-    final idx = header.indexOf(key);
-    if (idx == -1) return 0;
-    final endIdx = header.indexOf('\r', idx);
-    if (endIdx == -1) return 0;
-    final valStr = header.substring(idx + key.length, endIdx).trim();
-    return int.tryParse(valStr) ?? 0;
-  }
-
-  static Future<Uint8List?> _renderDstToImage(Uint8List bytes) async {
-    int x = 0, y = 0;
-    double minX = 0, maxX = 0, minY = 0, maxY = 0;
-    List<Offset> points = [];
-    List<_StitchBlock> colorBlocks = [];
-    for (int i = 512; i < bytes.length - 2; i += 3) {
-      int b1 = bytes[i], b2 = bytes[i + 1], b3 = bytes[i + 2];
-      if (b1 == 0x00 && b2 == 0x00 && b3 == 0xF3) break;
-      int dx = 0, dy = 0;
-      if ((b1 & 0x01) != 0) dx += 1;
-      if ((b1 & 0x02) != 0) dx -= 1;
-      if ((b1 & 0x04) != 0) dx += 9;
-      if ((b1 & 0x08) != 0) dx -= 9;
-      if ((b1 & 0x80) != 0) dy += 1;
-      if ((b1 & 0x40) != 0) dy -= 1;
-      if ((b1 & 0x20) != 0) dy += 9;
-      if ((b1 & 0x10) != 0) dy -= 9;
-      if ((b2 & 0x01) != 0) dx += 3;
-      if ((b2 & 0x02) != 0) dx -= 3;
-      if ((b2 & 0x04) != 0) dx += 27;
-      if ((b2 & 0x08) != 0) dx -= 27;
-      if ((b2 & 0x80) != 0) dy += 3;
-      if ((b2 & 0x40) != 0) dy -= 3;
-      if ((b2 & 0x20) != 0) dy += 27;
-      if ((b2 & 0x10) != 0) dy -= 27;
-      if ((b3 & 0x04) != 0) dx += 81;
-      if ((b3 & 0x08) != 0) dx -= 81;
-      if ((b3 & 0x20) != 0) dy += 81;
-      if ((b3 & 0x10) != 0) dy -= 81;
-      x += dx;
-      y += dy;
-      double px = x.toDouble(), py = -y.toDouble();
-      bool isStop = (b3 & 0x40) != 0;
-      bool isJump = (b3 & 0x80) != 0;
-      if (isStop && points.isNotEmpty) {
-        colorBlocks.add(_StitchBlock(List<Offset>.from(points)));
-        points.clear();
-      }
-      if (!isJump) {
-        points.add(Offset(px, py));
-        if (px > maxX) maxX = px;
-        if (px < minX) minX = px;
-        if (py > maxY) maxY = py;
-        if (py < minY) minY = py;
-      }
-    }
-    if (points.isNotEmpty) colorBlocks.add(_StitchBlock(points));
-    double width = maxX - minX, height = maxY - minY;
-    if (width <= 0 || height <= 0) return null;
-    double scale = 800.0 / (width > height ? width : height);
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, width * scale, height * scale));
-    canvas.drawRect(Rect.fromLTWH(0, 0, width * scale, height * scale), Paint()..color = Colors.white);
-    final palette = [
-      const Color(0xFF1E88E5),
-      const Color(0xFFE53935),
-      const Color(0xFF43A047),
-      const Color(0xFFFDD835),
-      const Color(0xFF8E24AA),
-      const Color(0xFFF4511E),
-      const Color(0xFF00ACC1),
-      const Color(0xFFD81B60),
-      const Color(0xFF7CB342),
-      const Color(0xFF3949AB),
-    ];
-    for (int c = 0; c < colorBlocks.length; c++) {
-      final paint = Paint()
-        ..color = palette[c % palette.length]
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2
-        ..isAntiAlias = true;
-      final path = Path();
-      final block = colorBlocks[c].points;
-      if (block.isEmpty) continue;
-      path.moveTo((block[0].dx - minX) * scale, (block[0].dy - minY) * scale);
-      for (int i = 1; i < block.length; i++) {
-        path.lineTo((block[i].dx - minX) * scale, (block[i].dy - minY) * scale);
-      }
-      canvas.drawPath(path, paint);
-    }
-    final picture = recorder.endRecording();
-    final img = await picture.toImage((width * scale).toInt(), (height * scale).toInt());
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-    return byteData?.buffer.asUint8List();
-  }
 }
