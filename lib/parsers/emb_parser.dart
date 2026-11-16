@@ -75,7 +75,8 @@ class EmbParser {
       int stitches = 0, colors = 0, jumps = 0, sequins = 0, blings = 0, trims = 0;
       String machine = 'Unknown';
       List sequence = [];
-      double? widthMm, heightMm, exactLeft, exactRight, exactUp, exactDown;
+      double? directWidthMm, directHeightMm;
+      double? exactLeft, exactRight, exactUp, exactDown;
 
       final infoStream = ole.getStream('${String.fromCharCode(5)}WilcomDesignInformationDDD');
       if (infoStream != null && infoStream.length > 56) {
@@ -117,26 +118,27 @@ class EmbParser {
             final propType = bd.getUint32(propPos, Endian.little);
             final String propName = (pidNames[pid] ?? '').toString().toLowerCase();
 
+            // 1. الخصائص الرقمية الصحيحة
             if ((propType == 3 || propType == 19 || propType == 22) && propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
-              if (pid == 6 || propName == 'stitches') {
+              if (pid == 6 || propName == 'stitches' || propName == 'stitch count') {
                 stitches = val;
-              } else if (pid == 3 || propName == 'number of colors' || propName == 'total colors' || propName == 'colors') {
-                if (val > 0) colors = val;
+              } else if (pid == 3 || propName == 'colors' || propName == 'number of colors' || propName == 'total colors' || propName == 'color changes') {
+                if (val > 0 && colors == 0) colors = val;
               } else if (pid == 7 || propName == 'jumps') {
                 jumps = val;
-              } else if (pid == 8 || propName.contains('width')) {
-                widthMm = val / 10.0;
-              } else if (pid == 9 || propName.contains('height')) {
-                heightMm = val / 10.0;
-              } else if (propName.contains('left')) {
-                exactLeft = val / 10.0;
-              } else if (propName.contains('right')) {
-                exactRight = val / 10.0;
-              } else if (propName.contains('top') || propName.contains('up')) {
-                exactUp = val / 10.0;
-              } else if (propName.contains('bottom') || propName.contains('down')) {
-                exactDown = val / 10.0;
+              } else if (propName == 'design width' || (pid == 8 && propName.isEmpty)) {
+                directWidthMm = _normalizeWilcomMm(val.toDouble());
+              } else if (propName == 'design height' || (pid == 9 && propName.isEmpty)) {
+                directHeightMm = _normalizeWilcomMm(val.toDouble());
+              } else if (propName == 'design left') {
+                exactLeft = val.toDouble();
+              } else if (propName == 'design right') {
+                exactRight = val.toDouble();
+              } else if (propName == 'design up' || propName == 'design top') {
+                exactUp = val.toDouble();
+              } else if (propName == 'design down' || propName == 'design bottom') {
+                exactDown = val.toDouble();
               } else if (propName.contains('sequin')) {
                 sequins = val;
               } else if (propName.contains('bling')) {
@@ -144,25 +146,29 @@ class EmbParser {
               } else if (propName.contains('trim')) {
                 trims = val;
               }
-            } else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
+            }
+            // 2. الخصائص العشرية الدقيقة (Floats / Doubles) الخاصة بحدود التصميم فقط
+            else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
               final dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
                   : (propPos + 12 <= infoStream.length ? bd.getFloat64(propPos + 4, Endian.little) : 0.0);
 
-              if (pid == 8 || propName.contains('width')) {
-                widthMm = dVal;
-              } else if (pid == 9 || propName.contains('height')) {
-                heightMm = dVal;
-              } else if (propName.contains('left')) {
+              if (propName == 'design width' || propName == 'width') {
+                directWidthMm = _normalizeWilcomMm(dVal.abs());
+              } else if (propName == 'design height' || propName == 'height') {
+                directHeightMm = _normalizeWilcomMm(dVal.abs());
+              } else if (propName == 'design left' || (pid == 10 && propName.isEmpty)) {
                 exactLeft = dVal;
-              } else if (propName.contains('right')) {
+              } else if (propName == 'design right' || (pid == 12 && propName.isEmpty)) {
                 exactRight = dVal;
-              } else if (propName.contains('top') || propName.contains('up')) {
+              } else if (propName == 'design up' || propName == 'design top' || (pid == 11 && propName.isEmpty)) {
                 exactUp = dVal;
-              } else if (propName.contains('bottom') || propName.contains('down')) {
+              } else if (propName == 'design down' || propName == 'design bottom' || (pid == 13 && propName.isEmpty)) {
                 exactDown = dVal;
               }
-            } else if (propType == 30 && propPos + 8 <= infoStream.length) {
+            }
+            // 3. الخصائص النصية (الماكينة وجدول الألوان)
+            else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
                   .decode(infoStream.sublist(propPos + 8, (propPos + 8 + strLen).clamp(0, infoStream.length)), allowInvalid: true)
@@ -171,26 +177,35 @@ class EmbParser {
               if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) {
                 machine = rawStr;
               } else if ((pid == 34 || propName.contains('colorway') || propName.contains('thread')) && rawStr.isNotEmpty) {
-                sequence = _parseColorwayTable(rawStr);
+                final parsed = _parseColorwayTable(rawStr);
+                if (parsed.isNotEmpty) sequence = parsed;
               }
             }
           }
-
-          if ((widthMm == null || widthMm == 0) && exactLeft != null && exactRight != null) {
-            widthMm = (exactRight - exactLeft).abs();
-          }
-          if ((heightMm == null || heightMm == 0) && exactUp != null && exactDown != null) {
-            heightMm = (exactUp - exactDown).abs();
-          }
-
-          if (widthMm != null && widthMm! > 1000) widthMm = widthMm! / 10.0;
-          if (heightMm != null && heightMm! > 1000) heightMm = heightMm! / 10.0;
         }
       }
 
-      if (sequence.isNotEmpty && sequence.length > colors) {
-        colors = sequence.length;
-      } else if (colors == 0 && sequence.isNotEmpty) {
+      // حساب مقاس التصميم الفعلي من حدود الغرز (Design Left/Right & Up/Down)
+      double? finalWidthMm = directWidthMm;
+      double? finalHeightMm = directHeightMm;
+
+      if (exactLeft != null && exactRight != null) {
+        final rawSpanX = (exactLeft < 0 || exactRight < 0)
+            ? (exactRight - exactLeft).abs()
+            : (exactLeft.abs() + exactRight.abs());
+        final calcW = _normalizeWilcomMm(rawSpanX);
+        if (calcW != null && calcW > 0) finalWidthMm = calcW;
+      }
+
+      if (exactUp != null && exactDown != null) {
+        final rawSpanY = (exactUp < 0 || exactDown < 0)
+            ? (exactUp - exactDown).abs()
+            : (exactUp.abs() + exactDown.abs());
+        final calcH = _normalizeWilcomMm(rawSpanY);
+        if (calcH != null && calcH > 0) finalHeightMm = calcH;
+      }
+
+      if (sequence.isNotEmpty) {
         colors = sequence.length;
       } else if (colors == 0) {
         colors = 1;
@@ -210,12 +225,26 @@ class EmbParser {
         trimsCount: trims,
         machineType: machine,
         colorSequence: sequence,
-        widthMm: widthMm,
-        heightMm: heightMm,
+        widthMm: finalWidthMm,
+        heightMm: finalHeightMm,
       );
     } catch (_) {
       return null;
     }
+  }
+
+  // ضبط وحدات ويلكم (تحويل أعشار المليمتر إلى مليمتر حقيقي)
+  static double? _normalizeWilcomMm(double rawVal) {
+    double v = rawVal.abs();
+    if (v <= 0.05) return null;
+    // في ويلكم، غالباً ما تُحفظ الأبعاد بوحدة (0.1 مم) أي أن 7656 تعني 765.6 مم (76.5 سم)
+    if (v > 1200.0) {
+      v = v / 10.0;
+    }
+    if (v > 1200.0) {
+      v = v / 10.0;
+    }
+    return v;
   }
 
   static _ExtractedImage? _decodeStreamImage(Uint8List? stream) {
@@ -384,12 +413,11 @@ class _Ole2Reader {
       final nameLen = dirBd.getUint16(off + 64, Endian.little);
       final type = dirBytes[off + 66];
       if (type == 0 || nameLen < 2 || nameLen > 64) continue;
-      final List<int> codeUnits = List.filled((nameLen - 2) ~/ 2, 0);
-      int idx = 0;
+      final List codeUnits = [];
       for (int c = 0; c < nameLen - 2; c += 2) {
-        codeUnits[idx++] = dirBd.getUint16(off + c, Endian.little);
+        codeUnits.add(dirBd.getUint16(off + c, Endian.little));
       }
-      final name = String.fromCharCodes(codeUnits);
+      final name = String.fromCharCodes(codeUnits.cast());
       final startSec = dirBd.getUint32(off + 116, Endian.little);
       final size = dirBd.getUint32(off + 120, Endian.little);
 
