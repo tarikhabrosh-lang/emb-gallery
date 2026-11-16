@@ -113,61 +113,61 @@ class EmbParser {
           for (final entry in propPositions.entries) {
             final pid = entry.key, propPos = entry.value;
             if (pid == 0 || propPos + 8 > infoStream.length) continue;
-            final propType = bd.getUint32(propPos, Endian.little), propName = pidNames[pid] ?? '';
+            final propType = bd.getUint32(propPos, Endian.little);
+            final propName = (pidNames[pid] ?? '').toLowerCase();
             
-            // قراءة الخصائص الرقمية (الألوان، الغرز، المقاسات)
+            // قراءة الأرقام الصحيحة
             if ((propType == 3 || propType == 19 || propType == 22) && propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
-              if (pid == 6 || propName == 'stitches') {
-                stitches = val;
-              } else if (pid == 3 || propName == 'number of colors' || propName == 'total colors') {
-                colors = val; // هنا تم حل مشكلة الألوان
-              } else if (pid == 7 || propName == 'jumps') {
-                jumps = val;
-              } else if (pid == 8 || propName == 'width') {
-                widthMm = val / 10.0; // عرض التصميم الفعلي
-              } else if (pid == 9 || propName == 'height') {
-                heightMm = val / 10.0; // طول التصميم الفعلي
-              } else if (propName.contains('sequin')) {
-                sequins = val;
-              } else if (propName.contains('bling')) {
-                blings = val;
-              } else if (propName.contains('trim')) {
-                trims = val;
-              }
+              if (pid == 6 || propName == 'stitches') stitches = val;
+              else if (pid == 3 || propName.contains('color')) colors = val;
+              else if (pid == 7 || propName == 'jumps') jumps = val;
+              else if (pid == 8 || propName.contains('width')) widthMm = val / 10.0;
+              else if (pid == 9 || propName.contains('height')) heightMm = val / 10.0;
+              else if (propName.contains('left')) exactLeft = val / 10.0;
+              else if (propName.contains('right')) exactRight = val / 10.0;
+              else if (propName.contains('top') || propName.contains('up')) exactUp = val / 10.0;
+              else if (propName.contains('bottom') || propName.contains('down')) exactDown = val / 10.0;
+              else if (propName.contains('sequin')) sequins = val;
+              else if (propName.contains('bling')) blings = val;
+              else if (propName.contains('trim')) trims = val;
             } 
-            // قراءة الخصائص العشرية (كخيار بديل للمقاسات)
+            // قراءة الأرقام العشرية
             else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
               final dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
                   : (propPos + 12 <= infoStream.length ? bd.getFloat64(propPos + 4, Endian.little) : 0.0);
-              if (propName == 'design left') exactLeft = dVal;
-              else if (propName == 'design right') exactRight = dVal;
-              else if (propName == 'design up') exactUp = dVal;
-              else if (propName == 'design down') exactDown = dVal;
+                  
+              if (pid == 8 || propName.contains('width')) widthMm = dVal;
+              else if (pid == 9 || propName.contains('height')) heightMm = dVal;
+              else if (propName.contains('left')) exactLeft = dVal;
+              else if (propName.contains('right')) exactRight = dVal;
+              else if (propName.contains('top') || propName.contains('up')) exactUp = dVal;
+              else if (propName.contains('bottom') || propName.contains('down')) exactDown = dVal;
             } 
-            // قراءة النصوص (ترتيب الألوان ونوع الماكينة)
+            // قراءة النصوص
             else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
                   .decode(infoStream.sublist(propPos + 8, (propPos + 8 + strLen).clamp(0, infoStream.length)), allowInvalid: true)
                   .replaceAll('\x00', '')
                   .trim();
-              if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) {
-                machine = rawStr;
-              } else if ((pid == 34 || propName.contains('colorway')) && rawStr.isNotEmpty) {
-                sequence = _parseColorwayTable(rawStr);
-              }
+              if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) machine = rawStr;
+              else if ((pid == 34 || propName.contains('colorway')) && rawStr.isNotEmpty) sequence = _parseColorwayTable(rawStr);
             }
           }
           
-          // حساب المقاسات في حال عدم وجود PID 8 و 9
-          if (widthMm == null || widthMm == 0) {
-            if (exactLeft != null && exactRight != null) widthMm = _resolveTrueSizeMm((exactRight - exactLeft).abs());
+          // حساب المقاسات الذكي
+          if ((widthMm == null || widthMm == 0) && exactLeft != null && exactRight != null) {
+            widthMm = (exactRight - exactLeft).abs();
           }
-          if (heightMm == null || heightMm == 0) {
-            if (exactUp != null && exactDown != null) heightMm = _resolveTrueSizeMm((exactUp - exactDown).abs());
+          if ((heightMm == null || heightMm == 0) && exactUp != null && exactDown != null) {
+            heightMm = (exactUp - exactDown).abs();
           }
+          
+          // تصحيح فواصل ويلكم إذا كان الرقم ضخم جداً
+          if (widthMm != null && widthMm! > 1000) widthMm = widthMm! / 10.0;
+          if (heightMm != null && heightMm! > 1000) heightMm = heightMm! / 10.0;
         }
       }
       if (colors == 0 && sequence.isNotEmpty) colors = sequence.length;
@@ -193,48 +193,55 @@ class EmbParser {
     }
   }
 
-  static double? _resolveTrueSizeMm(double val) {
-    if (val <= 0.1) return null;
-    return val > 2000 ? val / 10.0 : val;
-  }
-
   static _ExtractedImage? _decodeStreamImage(Uint8List? stream) {
     if (stream == null || stream.length < 16) return null;
     Uint8List? imgBytes;
     if (stream.length > 6 && stream[4] == 0x78) {
-      try {
-        imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream.sublist(4)));
-      } catch (_) {}
+      try { imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream.sublist(4))); } catch (_) {}
     }
     if (imgBytes == null && stream[0] == 0x78) {
-      try {
-        imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream));
-      } catch (_) {}
+      try { imgBytes = Uint8List.fromList(ZLibDecoder().convert(stream)); } catch (_) {}
     }
     imgBytes ??= stream;
     final dims = _readImageDimensions(imgBytes);
-    return dims == null ? null : _ExtractedImage(imgBytes, dims.$1, dims.$2);
+    if (dims != null) return _ExtractedImage(imgBytes, dims.$1, dims.$2);
+    
+    // دعم الطوارئ للصور غير المعروفة الأبعاد (تُرسل للواجهة لتعالجها تلقائياً)
+    if ((imgBytes[0] == 0x42 && imgBytes[1] == 0x4D) || 
+        (imgBytes[0] == 0xFF && imgBytes[1] == 0xD8) || 
+        (imgBytes[0] == 0x89 && imgBytes[1] == 0x50)) {
+      return _ExtractedImage(imgBytes, 256, 256); 
+    }
+    return null;
   }
 
   static (int, int)? _readImageDimensions(Uint8List bytes) {
-    if (bytes.length < 24) return null;
+    if (bytes.length < 26) return null;
+    
+    // دعم صور الـ BMP للإصدارات القديمة جداً
+    if (bytes[0] == 0x42 && bytes[1] == 0x4D) {
+      final bd = ByteData.sublistView(bytes);
+      final w = bd.getInt32(18, Endian.little).abs();
+      final h = bd.getInt32(22, Endian.little).abs();
+      if (w > 0 && h > 0) return (w, h);
+    }
+    
+    // صور الـ PNG
     if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
       final bd = ByteData.sublistView(bytes);
       final w = bd.getUint32(16, Endian.big), h = bd.getUint32(20, Endian.big);
       if (w > 0 && h > 0) return (w, h);
     }
+    
+    // صور الـ JPG
     if (bytes[0] == 0xFF && bytes[1] == 0xD8) {
       int offset = 2;
       final bd = ByteData.sublistView(bytes);
       while (offset + 9 < bytes.length) {
-        if (bytes[offset] != 0xFF) {
-          offset++;
-          continue;
-        }
+        if (bytes[offset] != 0xFF) { offset++; continue; }
         final marker = bytes[offset + 1];
         if (marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
-          offset += 2;
-          continue;
+          offset += 2; continue;
         }
         if (offset + 4 >= bytes.length) break;
         final segLen = bd.getUint16(offset + 2, Endian.big);
@@ -277,16 +284,8 @@ class EmbParser {
 
   static int _resolveColorFromName(String name, int fallbackIdx) {
     const palette = [
-      0xFF00BCD4,
-      0xFFFBC02D,
-      0xFF6D4C41,
-      0xFFF06292,
-      0xFF2E7D32,
-      0xFFE53935,
-      0xFF1E88E5,
-      0xFF8E24AA,
-      0xFFF57C00,
-      0xFFD4AF37,
+      0xFF00BCD4, 0xFFFBC02D, 0xFF6D4C41, 0xFFF06292, 0xFF2E7D32, 0xFFE53935,
+      0xFF1E88E5, 0xFF8E24AA, 0xFFF57C00, 0xFFD4AF37,
     ];
     return palette[fallbackIdx.abs() % palette.length];
   }
@@ -562,4 +561,3 @@ class DstParser {
     return byteData?.buffer.asUint8List();
   }
 }
- 
