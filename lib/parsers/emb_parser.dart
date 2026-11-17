@@ -75,8 +75,10 @@ class EmbParser {
       int stitches = 0, colors = 0, jumps = 0, sequins = 0, blings = 0, trims = 0;
       String machine = 'Unknown';
       List sequence = [];
-      double? directWidthMm, directHeightMm;
+
+      double? floatWidth, floatHeight;
       double? exactLeft, exactRight, exactUp, exactDown;
+      final Map floatPropsByPid = {};
 
       final infoStream = ole.getStream('${String.fromCharCode(5)}WilcomDesignInformationDDD');
       if (infoStream != null && infoStream.length > 56) {
@@ -118,27 +120,15 @@ class EmbParser {
             final propType = bd.getUint32(propPos, Endian.little);
             final String propName = (pidNames[pid] ?? '').toString().toLowerCase();
 
-            // 1. الخصائص الرقمية الصحيحة
+            // 1. الأعداد الصحيحة: للغرز والألوان والترتر فقط (ممنوع قراءة المقاسات منها لأنها أبعاد الصورة بالبكسل)
             if ((propType == 3 || propType == 19 || propType == 22) && propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
               if (pid == 6 || propName == 'stitches' || propName == 'stitch count') {
                 stitches = val;
-              } else if (pid == 3 || propName == 'colors' || propName == 'number of colors' || propName == 'total colors' || propName == 'color changes') {
+              } else if (pid == 3 || propName == 'colors' || propName == 'number of colors' || propName == 'total colors') {
                 if (val > 0 && colors == 0) colors = val;
               } else if (pid == 7 || propName == 'jumps') {
                 jumps = val;
-              } else if (propName == 'design width' || (pid == 8 && propName.isEmpty)) {
-                directWidthMm = _normalizeWilcomMm(val.toDouble());
-              } else if (propName == 'design height' || (pid == 9 && propName.isEmpty)) {
-                directHeightMm = _normalizeWilcomMm(val.toDouble());
-              } else if (propName == 'design left') {
-                exactLeft = val.toDouble();
-              } else if (propName == 'design right') {
-                exactRight = val.toDouble();
-              } else if (propName == 'design up' || propName == 'design top') {
-                exactUp = val.toDouble();
-              } else if (propName == 'design down' || propName == 'design bottom') {
-                exactDown = val.toDouble();
               } else if (propName.contains('sequin')) {
                 sequins = val;
               } else if (propName.contains('bling')) {
@@ -147,27 +137,30 @@ class EmbParser {
                 trims = val;
               }
             }
-            // 2. الخصائص العشرية الدقيقة (Floats / Doubles) الخاصة بحدود التصميم فقط
+            // 2. الأعداد العشرية (Float / Double): هي الوحيدة التي تحفظ مقاس غرز التصميم الفعلي بالمليمتر
             else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
-              final dVal = propType == 4
+              final double dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
                   : (propPos + 12 <= infoStream.length ? bd.getFloat64(propPos + 4, Endian.little) : 0.0);
 
-              if (propName == 'design width' || propName == 'width') {
-                directWidthMm = _normalizeWilcomMm(dVal.abs());
-              } else if (propName == 'design height' || propName == 'height') {
-                directHeightMm = _normalizeWilcomMm(dVal.abs());
-              } else if (propName == 'design left' || (pid == 10 && propName.isEmpty)) {
+              if (dVal.isNaN || dVal.isInfinite) continue;
+              floatPropsByPid[pid] = dVal;
+
+              if (propName == 'design width') {
+                floatWidth = dVal.abs();
+              } else if (propName == 'design height') {
+                floatHeight = dVal.abs();
+              } else if (propName.contains('left')) {
                 exactLeft = dVal;
-              } else if (propName == 'design right' || (pid == 12 && propName.isEmpty)) {
+              } else if (propName.contains('right')) {
                 exactRight = dVal;
-              } else if (propName == 'design up' || propName == 'design top' || (pid == 11 && propName.isEmpty)) {
+              } else if (propName.contains('up') || propName.contains('top')) {
                 exactUp = dVal;
-              } else if (propName == 'design down' || propName == 'design bottom' || (pid == 13 && propName.isEmpty)) {
+              } else if (propName.contains('down') || propName.contains('bottom')) {
                 exactDown = dVal;
               }
             }
-            // 3. الخصائص النصية (الماكينة وجدول الألوان)
+            // 3. النصوص: الماكينة وجدول الألوان
             else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
@@ -185,24 +178,73 @@ class EmbParser {
         }
       }
 
-      // حساب مقاس التصميم الفعلي من حدود الغرز (Design Left/Right & Up/Down)
-      double? finalWidthMm = directWidthMm;
-      double? finalHeightMm = directHeightMm;
+      double? finalWidthMm;
+      double? finalHeightMm;
 
+      // أولاً: إذا وجدنا حدود التصميم العشرية بالاسم (Design Left/Right/Up/Down)
       if (exactLeft != null && exactRight != null) {
-        final rawSpanX = (exactLeft < 0 || exactRight < 0)
-            ? (exactRight - exactLeft).abs()
-            : (exactLeft.abs() + exactRight.abs());
-        final calcW = _normalizeWilcomMm(rawSpanX);
-        if (calcW != null && calcW > 0) finalWidthMm = calcW;
+        finalWidthMm = (exactRight - exactLeft).abs();
+        if (finalWidthMm == 0) finalWidthMm = exactLeft.abs() + exactRight.abs();
+      }
+      if (exactUp != null && exactDown != null) {
+        finalHeightMm = (exactUp - exactDown).abs();
+        if (finalHeightMm == 0) finalHeightMm = exactUp.abs() + exactDown.abs();
       }
 
-      if (exactUp != null && exactDown != null) {
-        final rawSpanY = (exactUp < 0 || exactDown < 0)
-            ? (exactUp - exactDown).abs()
-            : (exactUp.abs() + exactDown.abs());
-        final calcH = _normalizeWilcomMm(rawSpanY);
-        if (calcH != null && calcH > 0) finalHeightMm = calcH;
+      // ثانياً: إذا وُجد عرض وطول عشري مباشر
+      if ((finalWidthMm == null || finalWidthMm == 0) && floatWidth != null && floatWidth > 0) {
+        finalWidthMm = floatWidth;
+      }
+      if ((finalHeightMm == null || finalHeightMm == 0) && floatHeight != null && floatHeight > 0) {
+        finalHeightMm = floatHeight;
+      }
+
+      // ثالثاً: إذا كان الملف بدون قاموس أسماء، نلتقط الأرقام العشرية الأربعة لحدود الغرز عبر أرقام PID القياسية في ويلكم
+      if ((finalWidthMm == null || finalHeightMm == null) && floatPropsByPid.length >= 2) {
+        final List sortedPids = floatPropsByPid.keys.toList()..sort();
+        // في ويلكم، إذا كان هناك 4 أرقام عشرية متتالية (غالباً PIDs 10,11,12,13 أو 14,15,16,17) فهي Left, Up, Right, Down
+        if (sortedPids.length >= 4) {
+          for (int i = 0; i <= sortedPids.length - 4; i++) {
+            final int p1 = sortedPids[i];
+            final int p2 = sortedPids[i + 1];
+            final int p3 = sortedPids[i + 2];
+            final int p4 = sortedPids[i + 3];
+            if (p4 - p1 == 3) {
+              final double v1 = floatPropsByPid[p1];
+              final double v2 = floatPropsByPid[p2];
+              final double v3 = floatPropsByPid[p3];
+              final double v4 = floatPropsByPid[p4];
+              // التحقق من وجود قيم سالبة وموجبة (المركز 0,0) أو حدود منطقية
+              final double wCandidate1 = (v3 - v1).abs();
+              final double hCandidate1 = (v2 - v4).abs();
+              if (wCandidate1 > 1.0 && hCandidate1 > 1.0 && wCandidate1 < 2500 && hCandidate1 < 2500) {
+                finalWidthMm ??= wCandidate1;
+                finalHeightMm ??= hCandidate1;
+                break;
+              }
+            }
+          }
+        }
+        // إذا كان هناك رقمان عشريان فقط للمقاس المباشر
+        if (finalWidthMm == null || finalHeightMm == null) {
+          final List positiveFloats = floatPropsByPid.values
+              .map((e) => (e as double).abs())
+              .where((v) => v > 2.0 && v < 2000.0)
+              .toList();
+          if (positiveFloats.length >= 2) {
+            finalWidthMm ??= positiveFloats[0];
+            finalHeightMm ??= positiveFloats[1];
+          }
+        }
+      }
+
+      // رابعاً: إذا لم توجد في الخصائص، نستخرج المقاس الفعلي من بيانات الغرز داخل DESIGN_FILE
+      if (finalWidthMm == null || finalHeightMm == null || finalWidthMm == 0 || finalHeightMm == 0) {
+        final designBounds = _extractDesignFileStitchBounds(ole.getStream('DESIGN_FILE'), stitches);
+        if (designBounds != null) {
+          finalWidthMm = designBounds.$1;
+          finalHeightMm = designBounds.$2;
+        }
       }
 
       if (sequence.isNotEmpty) {
@@ -233,18 +275,32 @@ class EmbParser {
     }
   }
 
-  // ضبط وحدات ويلكم (تحويل أعشار المليمتر إلى مليمتر حقيقي)
-  static double? _normalizeWilcomMm(double rawVal) {
-    double v = rawVal.abs();
-    if (v <= 0.05) return null;
-    // في ويلكم، غالباً ما تُحفظ الأبعاد بوحدة (0.1 مم) أي أن 7656 تعني 765.6 مم (76.5 سم)
-    if (v > 1200.0) {
-      v = v / 10.0;
+  // استخراج أبعاد التصميم من مسار DESIGN_FILE المضغوط في حال غياب الخصائص العشرية
+  static (double, double)? _extractDesignFileStitchBounds(Uint8List? rawStream, int expectedStitches) {
+    if (rawStream == null || rawStream.length < 16) return null;
+    Uint8List? decompressed;
+    for (int offset = 0; offset < math.min(32, rawStream.length - 2); offset++) {
+      if (rawStream[offset] == 0x78 && (rawStream[offset + 1] == 0x9C || rawStream[offset + 1] == 0x01 || rawStream[offset + 1] == 0xDA)) {
+        try {
+          decompressed = Uint8List.fromList(ZLibDecoder().convert(rawStream.sublist(offset)));
+          break;
+        } catch (_) {}
+      }
     }
-    if (v > 1200.0) {
-      v = v / 10.0;
+    if (decompressed == null || decompressed.length < 64) return null;
+
+    // البحث عن ترويسة أبعاد داخل البيانات المفكوكة (إن وُجدت بصيغة نصية مثل +X/-X)
+    final headerSample = latin1.decode(decompressed.sublist(0, math.min(1024, decompressed.length)), allowInvalid: true);
+    if (headerSample.contains('+X:') && headerSample.contains('-X:')) {
+      final px = DstParser._extractInt(headerSample, '+X:');
+      final mx = DstParser._extractInt(headerSample, '-X:');
+      final py = DstParser._extractInt(headerSample, '+Y:');
+      final my = DstParser._extractInt(headerSample, '-Y:');
+      if (px + mx > 0 && py + my > 0) {
+        return ((px + mx) / 10.0, (py + my) / 10.0);
+      }
     }
-    return v;
+    return null;
   }
 
   static _ExtractedImage? _decodeStreamImage(Uint8List? stream) {
