@@ -140,15 +140,13 @@ class EmbParser {
               } else if (pname == 'blings') {
                 if (val >= 0) blings = val;
               }
-            }
-            else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
+            } else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
               final double dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
                   : (propPos + 12 <= infoStream.length ? bd.getFloat64(propPos + 4, Endian.little) : 0.0);
 
               if (dVal.isNaN || dVal.isInfinite) continue;
 
-              // قراءة مقاس التصميم الفعلي بالمليمتر
               if (pname == 'design width') {
                 designWidthMm = dVal.abs();
               } else if (pname == 'design height') {
@@ -162,8 +160,7 @@ class EmbParser {
               } else if (pname == 'design down' || pname == 'design bottom') {
                 fallbackDown = dVal;
               }
-            }
-            else if (propType == 30 && propPos + 8 <= infoStream.length) {
+            } else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
                   .decode(infoStream.sublist(propPos + 8, (propPos + 8 + strLen).clamp(0, infoStream.length)), allowInvalid: true)
@@ -623,5 +620,101 @@ class DstParser {
     final img = await picture.toImage((width * scale).toInt(), (height * scale).toInt());
     final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
     return byteData?.buffer.asUint8List();
+  }
+}
+
+class DahaoParser {
+  static Future parseFile(String filePath) async {
+    try {
+      final file = File(filePath);
+      if (!await file.exists()) return null;
+      final bytes = await file.readAsBytes();
+      if (bytes.length < 32) return null;
+
+      final lower = filePath.toLowerCase();
+      final fileName = filePath.split(Platform.pathSeparator).last;
+      final bd = ByteData.sublistView(bytes);
+
+      if (lower.endsWith('.dhp')) {
+        int colors = 1;
+        int stops = 0;
+        int trims = 0;
+        if (bytes.length > 740) {
+          trims = bd.getInt32(680, Endian.little);
+          colors = bd.getInt32(700, Endian.little);
+          stops = bd.getInt32(732, Endian.little);
+          if (colors <= 0 || colors > 256) colors = 1;
+        }
+
+        // استخراج صورة المعاينة JPEG المدمجة داخل .DHP
+        Uint8List? previewImg;
+        final int jpgStart = _findBytes(bytes, [0xFF, 0xD8, 0xFF]);
+        if (jpgStart != -1) {
+          final int jpgEnd = _findBytes(bytes, [0xFF, 0xD9], startFrom: jpgStart + 3);
+          if (jpgEnd != -1 && jpgEnd + 2 <= bytes.length) {
+            previewImg = bytes.sublist(jpgStart, jpgEnd + 2);
+          }
+        }
+
+        return EmbDesignInfo(
+          filePath: filePath,
+          fileName: fileName,
+          previewJpeg: previewImg,
+          stitches: 0,
+          colorCount: colors,
+          stopsCount: stops > 0 ? stops : 0,
+          jumpsCount: 0,
+          sequinsCount: 0,
+          trimsCount: trims > 0 ? trims : 0,
+          machineType: 'Dahao CAD (.DHP)',
+          colorSequence: [],
+        );
+      } else {
+        // صيغ الماكينة (.DHA و .DHE)
+        final int rawW = bd.getUint16(0, Endian.little);
+        final int rawH = bd.getUint16(2, Endian.little);
+        final int stops = bd.getUint16(4, Endian.little);
+        final int colors = bd.getInt32(16, Endian.little);
+
+        final double? widthMm = rawW > 0 ? rawW / 10.0 : null;
+        final double? heightMm = rawH > 0 ? rawH / 10.0 : null;
+
+        final int bodyLen = bytes.length > 320 ? (bytes.length - 320) : 0;
+        final int estStitches = lower.endsWith('.dhe') ? (bodyLen ~/ 3) : (bodyLen ~/ 2);
+
+        return EmbDesignInfo(
+          filePath: filePath,
+          fileName: fileName,
+          previewJpeg: null,
+          stitches: estStitches > 0 ? estStitches : 0,
+          colorCount: (colors > 0 && colors < 256) ? colors : 1,
+          stopsCount: stops,
+          jumpsCount: 0,
+          sequinsCount: 0,
+          machineType: lower.endsWith('.dhe') ? 'Dahao (.DHE)' : 'Dahao (.DHA)',
+          colorSequence: [],
+          widthMm: widthMm,
+          heightMm: heightMm,
+        );
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static int _findBytes(Uint8List data, List pattern, {int startFrom = 0}) {
+    if (pattern.isEmpty || data.length < pattern.length) return -1;
+    final int limit = data.length - pattern.length;
+    for (int i = startFrom; i <= limit; i++) {
+      bool match = true;
+      for (int j = 0; j < pattern.length; j++) {
+        if (data[i + j] != pattern[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return i;
+    }
+    return -1;
   }
 }
