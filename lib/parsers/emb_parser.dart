@@ -136,9 +136,9 @@ class EmbParser {
                 if (val >= 0) jumps = val;
               } else if (pname == 'number of trims') {
                 if (val >= 0) trims = val;
-              } else if (pname == 'sequins') {
+              } else if (pname.contains('sequin')) {
                 if (val >= 0) sequins = val;
-              } else if (pname == 'blings') {
+              } else if (pname.contains('bling') || pname.contains('bead')) {
                 if (val >= 0) blings = val;
               }
             } else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
@@ -148,9 +148,11 @@ class EmbParser {
 
               if (dVal.isNaN || dVal.isInfinite) continue;
 
-              // تصحيح معامل مقاس ويلكم ليعطي المليمتر الصحيح تماماً
+              // معامل ويلكم الفعلي: 180 وحدة لكل 1 مليمتر (84708 / 180 = 470.6 مم)
               double correctedVal = dVal.abs();
-              if (correctedVal > 10000.0) correctedVal /= 100.0; 
+              if (correctedVal > 2000.0) {
+                correctedVal = correctedVal / 180.0;
+              }
 
               if (pname == 'design width') {
                 designWidthMm = correctedVal;
@@ -186,10 +188,14 @@ class EmbParser {
       double? finalHeightMm = designHeightMm;
 
       if ((finalWidthMm == null || finalWidthMm <= 0) && fallbackLeft != null && fallbackRight != null) {
-        finalWidthMm = (fallbackRight - fallbackLeft).abs();
+        double w = (fallbackRight - fallbackLeft).abs();
+        if (w > 2000.0) w = w / 180.0;
+        finalWidthMm = w;
       }
       if ((finalHeightMm == null || finalHeightMm <= 0) && fallbackUp != null && fallbackDown != null) {
-        finalHeightMm = (fallbackUp - fallbackDown).abs();
+        double h = (fallbackUp - fallbackDown).abs();
+        if (h > 2000.0) h = h / 180.0;
+        finalHeightMm = h;
       }
 
       if (finalWidthMm == null || finalHeightMm == null || finalWidthMm <= 0 || finalHeightMm <= 0) {
@@ -651,26 +657,13 @@ class DahaoParser {
           if (colors <= 0 || colors > 256) colors = 1;
         }
 
-        // بحث محسّن عن صورة المعاينة JPEG في ملف .DHP
-        Uint8List? previewImg;
-        int jpgStart = _findBytes(bytes, [0xFF, 0xD8, 0xFF]);
-        while (jpgStart != -1) {
-          final int jpgEnd = _findBytes(bytes, [0xFF, 0xD9], startFrom: jpgStart + 3);
-          if (jpgEnd != -1 && jpgEnd + 2 <= bytes.length) {
-            final candidate = bytes.sublist(jpgStart, jpgEnd + 2);
-            // التأكد من أن الصورة الكانديديت هي صورة وليست جزء باينري عشوائي
-            if (candidate.length > 5000) {
-              previewImg = candidate;
-              break;
-            }
-          }
-          jpgStart = _findBytes(bytes, [0xFF, 0xD8, 0xFF], startFrom: jpgStart + 3);
-        }
+        // التحقق الفعلي من صلاحية أي صورة مدمجة لتجنب الشاشة البيضاء
+        Uint8List? validPreview = await _findValidEmbeddedJpeg(bytes);
 
         return EmbDesignInfo(
           filePath: filePath,
           fileName: fileName,
-          previewJpeg: previewImg,
+          previewJpeg: validPreview,
           stitches: 0,
           colorCount: colors,
           stopsCount: stops > 0 ? stops : 0,
@@ -681,36 +674,56 @@ class DahaoParser {
           colorSequence: [],
         );
       } else {
-        // صيغ الماكينة (.DHA و .DHE)
-        final int rawW = bd.getUint16(0, Endian.little);
-        final int rawH = bd.getUint16(2, Endian.little);
+        // صيغ ماكينة داهوا (.DHA و .DHE)
         final int stops = bd.getUint16(4, Endian.little);
         final int colors = bd.getInt32(16, Endian.little);
-
-        final double? widthMm = rawW > 0 ? rawW / 10.0 : null;
-        final double? heightMm = rawH > 0 ? rawH / 10.0 : null;
+        final int validColors = (colors > 0 && colors < 256) ? colors : 1;
 
         final int bodyLen = bytes.length > 320 ? (bytes.length - 320) : 0;
-        final int estStitches = lower.endsWith('.dhe') ? (bodyLen ~/ 3) : (bodyLen ~/ 2);
+        // في .DHE كل غرزة تمثل 4 بايت (322176 / 4 = 80544 غرزة) وفي .DHA حوالي 3.7 بايت
+        final int estStitches = lower.endsWith('.dhe')
+            ? (bodyLen ~/ 4)
+            : ((bodyLen * 10) ~/ 37);
 
         return EmbDesignInfo(
           filePath: filePath,
           fileName: fileName,
           previewJpeg: null,
           stitches: estStitches > 0 ? estStitches : 0,
-          colorCount: (colors > 0 && colors < 256) ? colors : 1,
+          colorCount: validColors,
           stopsCount: stops,
           jumpsCount: 0,
           sequinsCount: 0,
           machineType: lower.endsWith('.dhe') ? 'Dahao (.DHE)' : 'Dahao (.DHA)',
           colorSequence: [],
-          widthMm: widthMm,
-          heightMm: heightMm,
         );
       }
     } catch (_) {
       return null;
     }
+  }
+
+  static Future _findValidEmbeddedJpeg(Uint8List data) async {
+    int pos = _findBytes(data, [0xFF, 0xD8, 0xFF]);
+    while (pos != -1 && pos + 16 < data.length) {
+      final int marker = data[pos + 3];
+      // التأكد من أن البايت الرابع هو ترويسة JPEG قياسية (JFIF / Exif / DQT)
+      if (marker == 0xE0 || marker == 0xE1 || marker == 0xDB || marker == 0xC0) {
+        final int endPos = _findBytes(data, [0xFF, 0xD9], startFrom: pos + 4);
+        if (endPos != -1 && endPos - pos > 2048 && endPos + 2 <= data.length) {
+          final candidate = data.sublist(pos, endPos + 2);
+          try {
+            final codec = await ui.instantiateImageCodec(candidate);
+            final frame = await codec.getNextFrame();
+            if (frame.image.width > 16 && frame.image.height > 16) {
+              return candidate;
+            }
+          } catch (_) {}
+        }
+      }
+      pos = _findBytes(data, [0xFF, 0xD8, 0xFF], startFrom: pos + 3);
+    }
+    return null;
   }
 
   static int _findBytes(Uint8List data, List pattern, {int startFrom = 0}) {
