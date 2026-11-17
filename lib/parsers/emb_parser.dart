@@ -20,7 +20,7 @@ class ThreadColorStep {
 class EmbDesignInfo {
   final String filePath, fileName, machineType;
   final Uint8List? previewJpeg, stitchPreviewBytes;
-  final int previewWidth, previewHeight, stitches, colorCount, jumpsCount, sequinsCount, trimsCount;
+  final int previewWidth, previewHeight, stitches, colorCount, stopsCount, jumpsCount, sequinsCount, trimsCount;
   final List colorSequence;
   final double? widthMm, heightMm;
 
@@ -33,6 +33,7 @@ class EmbDesignInfo {
     this.previewHeight = 0,
     required this.stitches,
     required this.colorCount,
+    this.stopsCount = 0,
     required this.jumpsCount,
     required this.sequinsCount,
     this.trimsCount = 0,
@@ -41,7 +42,7 @@ class EmbDesignInfo {
     this.widthMm,
     this.heightMm,
   });
-  int get actualStopsCount => colorSequence.isNotEmpty ? colorSequence.length : colorCount;
+  int get actualStopsCount => stopsCount > 0 ? stopsCount : (colorSequence.isNotEmpty ? colorSequence.length : colorCount);
 }
 
 class _ExtractedImage {
@@ -72,13 +73,13 @@ class EmbParser {
       final _ExtractedImage? primaryImg = bestTrueView ?? stitchView;
       final Uint8List? secondaryStitch = (bestTrueView != null && stitchView != null) ? stitchView.bytes : null;
 
-      int stitches = 0, colors = 0, jumps = 0, sequins = 0, blings = 0, trims = 0;
-      String machine = 'Unknown';
+      int stitches = 0, colors = 0, stops = 0, jumps = 0, sequins = 0, blings = 0, trims = 0;
+      String machine = 'Wilcom EMB';
       List sequence = [];
 
-      double? floatWidth, floatHeight;
-      double? exactLeft, exactRight, exactUp, exactDown;
-      final Map floatPropsByPid = {};
+      double? designWidthMm;
+      double? designHeightMm;
+      double? fallbackLeft, fallbackRight, fallbackUp, fallbackDown;
 
       final infoStream = ole.getStream('${String.fromCharCode(5)}WilcomDesignInformationDDD');
       if (infoStream != null && infoStream.length > 56) {
@@ -92,12 +93,14 @@ class EmbParser {
             if (entryPos + 8 > infoStream.length) break;
             propPositions[bd.getUint32(entryPos, Endian.little)] = sectionOffset + bd.getUint32(entryPos + 4, Endian.little);
           }
+
           final Map pidNames = {};
           if (propPositions.containsKey(0)) {
             final int dictPos = propPositions[0];
             if (dictPos + 4 <= infoStream.length) {
               int curr = dictPos + 4;
-              for (int d = 0; d < bd.getUint32(dictPos, Endian.little); d++) {
+              final int dictCount = bd.getUint32(dictPos, Endian.little);
+              for (int d = 0; d < dictCount; d++) {
                 if (curr + 8 > infoStream.length) break;
                 final dPid = bd.getUint32(curr, Endian.little);
                 final nameLen = bd.getUint32(curr + 4, Endian.little);
@@ -118,58 +121,57 @@ class EmbParser {
             final int propPos = entry.value;
             if (pid == 0 || propPos + 8 > infoStream.length) continue;
             final propType = bd.getUint32(propPos, Endian.little);
-            final String propName = (pidNames[pid] ?? '').toString().toLowerCase();
+            final String pname = (pidNames[pid] ?? '').toString().toLowerCase();
 
-            // 1. الأعداد الصحيحة: للغرز والألوان والترتر فقط (ممنوع قراءة المقاسات منها لأنها أبعاد الصورة بالبكسل)
             if ((propType == 3 || propType == 19 || propType == 22) && propPos + 8 <= infoStream.length) {
               final val = bd.getInt32(propPos + 4, Endian.little);
-              if (pid == 6 || propName == 'stitches' || propName == 'stitch count') {
-                stitches = val;
-              } else if (pid == 3 || propName == 'colors' || propName == 'number of colors' || propName == 'total colors') {
-                if (val > 0 && colors == 0) colors = val;
-              } else if (pid == 7 || propName == 'jumps') {
-                jumps = val;
-              } else if (propName.contains('sequin')) {
-                sequins = val;
-              } else if (propName.contains('bling')) {
-                blings = val;
-              } else if (propName.contains('trim')) {
-                trims = val;
+              if (pname == 'number of stitches' || pname == 'stitches' || pname == 'stitch count') {
+                if (val > 0) stitches = val;
+              } else if (pname == 'number of colours' || pname == 'number of colors' || pname == 'colors') {
+                if (val > 0) colors = val;
+              } else if (pname == 'number of stops') {
+                if (val > 0) stops = val;
+              } else if (pname == 'number of jumps') {
+                if (val >= 0) jumps = val;
+              } else if (pname == 'number of trims') {
+                if (val >= 0) trims = val;
+              } else if (pname == 'sequins') {
+                if (val >= 0) sequins = val;
+              } else if (pname == 'blings') {
+                if (val >= 0) blings = val;
               }
             }
-            // 2. الأعداد العشرية (Float / Double): هي الوحيدة التي تحفظ مقاس غرز التصميم الفعلي بالمليمتر
             else if ((propType == 4 || propType == 5) && propPos + 8 <= infoStream.length) {
               final double dVal = propType == 4
                   ? bd.getFloat32(propPos + 4, Endian.little)
                   : (propPos + 12 <= infoStream.length ? bd.getFloat64(propPos + 4, Endian.little) : 0.0);
 
               if (dVal.isNaN || dVal.isInfinite) continue;
-              floatPropsByPid[pid] = dVal;
 
-              if (propName == 'design width') {
-                floatWidth = dVal.abs();
-              } else if (propName == 'design height') {
-                floatHeight = dVal.abs();
-              } else if (propName.contains('left')) {
-                exactLeft = dVal;
-              } else if (propName.contains('right')) {
-                exactRight = dVal;
-              } else if (propName.contains('up') || propName.contains('top')) {
-                exactUp = dVal;
-              } else if (propName.contains('down') || propName.contains('bottom')) {
-                exactDown = dVal;
+              // قراءة مقاس التصميم الفعلي بالمليمتر
+              if (pname == 'design width') {
+                designWidthMm = dVal.abs();
+              } else if (pname == 'design height') {
+                designHeightMm = dVal.abs();
+              } else if (pname == 'design left') {
+                fallbackLeft = dVal;
+              } else if (pname == 'design right') {
+                fallbackRight = dVal;
+              } else if (pname == 'design up' || pname == 'design top') {
+                fallbackUp = dVal;
+              } else if (pname == 'design down' || pname == 'design bottom') {
+                fallbackDown = dVal;
               }
             }
-            // 3. النصوص: الماكينة وجدول الألوان
             else if (propType == 30 && propPos + 8 <= infoStream.length) {
               final strLen = bd.getUint32(propPos + 4, Endian.little);
               final rawStr = latin1
                   .decode(infoStream.sublist(propPos + 8, (propPos + 8 + strLen).clamp(0, infoStream.length)), allowInvalid: true)
                   .replaceAll('\x00', '')
                   .trim();
-              if ((pid == 19 || propName.contains('machine')) && rawStr.isNotEmpty) {
+              if ((pid == 19 || pname.contains('machine')) && rawStr.isNotEmpty) {
                 machine = rawStr;
-              } else if ((pid == 34 || propName.contains('colorway') || propName.contains('thread')) && rawStr.isNotEmpty) {
+              } else if ((pid == 34 || pname.contains('colorway') || pname.contains('thread')) && rawStr.isNotEmpty) {
                 final parsed = _parseColorwayTable(rawStr);
                 if (parsed.isNotEmpty) sequence = parsed;
               }
@@ -178,76 +180,25 @@ class EmbParser {
         }
       }
 
-      double? finalWidthMm;
-      double? finalHeightMm;
+      double? finalWidthMm = designWidthMm;
+      double? finalHeightMm = designHeightMm;
 
-      // أولاً: إذا وجدنا حدود التصميم العشرية بالاسم (Design Left/Right/Up/Down)
-      if (exactLeft != null && exactRight != null) {
-        finalWidthMm = (exactRight - exactLeft).abs();
-        if (finalWidthMm == 0) finalWidthMm = exactLeft.abs() + exactRight.abs();
+      if ((finalWidthMm == null || finalWidthMm <= 0) && fallbackLeft != null && fallbackRight != null) {
+        finalWidthMm = (fallbackRight - fallbackLeft).abs();
       }
-      if (exactUp != null && exactDown != null) {
-        finalHeightMm = (exactUp - exactDown).abs();
-        if (finalHeightMm == 0) finalHeightMm = exactUp.abs() + exactDown.abs();
+      if ((finalHeightMm == null || finalHeightMm <= 0) && fallbackUp != null && fallbackDown != null) {
+        finalHeightMm = (fallbackUp - fallbackDown).abs();
       }
 
-      // ثانياً: إذا وُجد عرض وطول عشري مباشر
-      if ((finalWidthMm == null || finalWidthMm == 0) && floatWidth != null && floatWidth > 0) {
-        finalWidthMm = floatWidth;
-      }
-      if ((finalHeightMm == null || finalHeightMm == 0) && floatHeight != null && floatHeight > 0) {
-        finalHeightMm = floatHeight;
-      }
-
-      // ثالثاً: إذا كان الملف بدون قاموس أسماء، نلتقط الأرقام العشرية الأربعة لحدود الغرز عبر أرقام PID القياسية في ويلكم
-      if ((finalWidthMm == null || finalHeightMm == null) && floatPropsByPid.length >= 2) {
-        final List sortedPids = floatPropsByPid.keys.toList()..sort();
-        // في ويلكم، إذا كان هناك 4 أرقام عشرية متتالية (غالباً PIDs 10,11,12,13 أو 14,15,16,17) فهي Left, Up, Right, Down
-        if (sortedPids.length >= 4) {
-          for (int i = 0; i <= sortedPids.length - 4; i++) {
-            final int p1 = sortedPids[i];
-            final int p2 = sortedPids[i + 1];
-            final int p3 = sortedPids[i + 2];
-            final int p4 = sortedPids[i + 3];
-            if (p4 - p1 == 3) {
-              final double v1 = floatPropsByPid[p1];
-              final double v2 = floatPropsByPid[p2];
-              final double v3 = floatPropsByPid[p3];
-              final double v4 = floatPropsByPid[p4];
-              // التحقق من وجود قيم سالبة وموجبة (المركز 0,0) أو حدود منطقية
-              final double wCandidate1 = (v3 - v1).abs();
-              final double hCandidate1 = (v2 - v4).abs();
-              if (wCandidate1 > 1.0 && hCandidate1 > 1.0 && wCandidate1 < 2500 && hCandidate1 < 2500) {
-                finalWidthMm ??= wCandidate1;
-                finalHeightMm ??= hCandidate1;
-                break;
-              }
-            }
-          }
-        }
-        // إذا كان هناك رقمان عشريان فقط للمقاس المباشر
-        if (finalWidthMm == null || finalHeightMm == null) {
-          final List positiveFloats = floatPropsByPid.values
-              .map((e) => (e as double).abs())
-              .where((v) => v > 2.0 && v < 2000.0)
-              .toList();
-          if (positiveFloats.length >= 2) {
-            finalWidthMm ??= positiveFloats[0];
-            finalHeightMm ??= positiveFloats[1];
-          }
+      if (finalWidthMm == null || finalHeightMm == null || finalWidthMm <= 0 || finalHeightMm <= 0) {
+        final stitchBounds = _extractDesignFileStitchBounds(ole.getStream('DESIGN_FILE'));
+        if (stitchBounds != null) {
+          finalWidthMm ??= stitchBounds.$1;
+          finalHeightMm ??= stitchBounds.$2;
         }
       }
 
-      // رابعاً: إذا لم توجد في الخصائص، نستخرج المقاس الفعلي من بيانات الغرز داخل DESIGN_FILE
-      if (finalWidthMm == null || finalHeightMm == null || finalWidthMm == 0 || finalHeightMm == 0) {
-        final designBounds = _extractDesignFileStitchBounds(ole.getStream('DESIGN_FILE'), stitches);
-        if (designBounds != null) {
-          finalWidthMm = designBounds.$1;
-          finalHeightMm = designBounds.$2;
-        }
-      }
-
-      if (sequence.isNotEmpty) {
+      if (colors == 0 && sequence.isNotEmpty) {
         colors = sequence.length;
       } else if (colors == 0) {
         colors = 1;
@@ -262,6 +213,7 @@ class EmbParser {
         previewHeight: primaryImg?.height ?? 0,
         stitches: stitches,
         colorCount: colors,
+        stopsCount: stops,
         jumpsCount: jumps,
         sequinsCount: sequins > 0 ? sequins : blings,
         trimsCount: trims,
@@ -275,8 +227,7 @@ class EmbParser {
     }
   }
 
-  // استخراج أبعاد التصميم من مسار DESIGN_FILE المضغوط في حال غياب الخصائص العشرية
-  static (double, double)? _extractDesignFileStitchBounds(Uint8List? rawStream, int expectedStitches) {
+  static (double, double)? _extractDesignFileStitchBounds(Uint8List? rawStream) {
     if (rawStream == null || rawStream.length < 16) return null;
     Uint8List? decompressed;
     for (int offset = 0; offset < math.min(32, rawStream.length - 2); offset++) {
@@ -289,7 +240,6 @@ class EmbParser {
     }
     if (decompressed == null || decompressed.length < 64) return null;
 
-    // البحث عن ترويسة أبعاد داخل البيانات المفكوكة (إن وُجدت بصيغة نصية مثل +X/-X)
     final headerSample = latin1.decode(decompressed.sublist(0, math.min(1024, decompressed.length)), allowInvalid: true);
     if (headerSample.contains('+X:') && headerSample.contains('-X:')) {
       final px = DstParser._extractInt(headerSample, '+X:');
