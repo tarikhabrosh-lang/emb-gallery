@@ -16,7 +16,30 @@ import 'parsers/emb_parser.dart';
 final ValueNotifier isArabicNotifier = ValueNotifier(true);
 
 String tr(String ar, String en) => isArabicNotifier.value == true ? ar : en;
-final validExtensions = ['.emb', '.dst', '.pes', '.pec', '.exp', '.ef', '.vp3', '.xxx', '.u01'];
+final validExtensions = ['.emb', '.dst', '.dhp', '.dha', '.dhe', '.pes', '.pec', '.exp', '.ef', '.vp3', '.xxx', '.u01'];
+
+Future parseAnyDesignFile(String path) async {
+  final lower = path.toLowerCase();
+  if (lower.endsWith('.dst')) {
+    return await DstParser.parseFile(path);
+  } else if (lower.endsWith('.emb')) {
+    return await EmbParser.parseFile(path);
+  } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
+    return await DahaoParser.parseFile(path);
+  } else {
+    final name = path.split(Platform.pathSeparator).last;
+    return EmbDesignInfo(
+      filePath: path,
+      fileName: name,
+      stitches: 0,
+      colorCount: 0,
+      jumpsCount: 0,
+      sequinsCount: 0,
+      machineType: 'Other',
+      colorSequence: [],
+    );
+  }
+}
 
 String? formatDimensionsCm(double? widthMm, double? heightMm, {bool includeMm = false}) {
   if (widthMm == null || heightMm == null) return null;
@@ -384,30 +407,11 @@ class _FoldersGalleryPageState extends State {
   }
 
   Future _openIncomingEmbFile(String path) async {
-    final lower = path.toLowerCase();
-    EmbDesignInfo? info;
-    if (lower.endsWith('.dst')) {
-      info = await DstParser.parseFile(path);
-    } else if (lower.endsWith('.emb')) {
-      info = await EmbParser.parseFile(path);
-    } else {
-      final name = path.split(Platform.pathSeparator).last;
-      info = EmbDesignInfo(
-        filePath: path,
-        fileName: name,
-        stitches: 0,
-        colorCount: 0,
-        jumpsCount: 0,
-        sequinsCount: 0,
-        machineType: 'Other',
-        colorSequence: [],
-      );
-    }
-
+    final EmbDesignInfo? info = await parseAnyDesignFile(path);
     if (info == null || !mounted) return;
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info!)),
+      MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info)),
     );
   }
 
@@ -572,22 +576,12 @@ class _FoldersGalleryPageState extends State {
       if (folder.coverBytes == null && folder.filePaths.isNotEmpty) {
         for (final p in folder.filePaths) {
           final pathStr = p.toString();
-          if (pathStr.toLowerCase().endsWith('.emb')) {
-            final info = await EmbParser.parseFile(pathStr);
-            if (info?.previewJpeg != null && mounted && token == _scanToken) {
-              setState(() {
-                folder.coverBytes = info!.previewJpeg;
-              });
-              break;
-            }
-          } else if (pathStr.toLowerCase().endsWith('.dst')) {
-            final info = await DstParser.parseFile(pathStr);
-            if (info?.previewJpeg != null && mounted && token == _scanToken) {
-              setState(() {
-                folder.coverBytes = info!.previewJpeg;
-              });
-              break;
-            }
+          final EmbDesignInfo? info = await parseAnyDesignFile(pathStr);
+          if (info?.previewJpeg != null && mounted && token == _scanToken) {
+            setState(() {
+              folder.coverBytes = info!.previewJpeg;
+            });
+            break;
           }
         }
         await Future.delayed(const Duration(milliseconds: 20));
@@ -618,27 +612,9 @@ class _FoldersGalleryPageState extends State {
 
       if (validPaths.length == 1) {
         final p = validPaths.first.toString();
-        final lower = p.toLowerCase();
-        EmbDesignInfo? info;
-        if (lower.endsWith('.dst')) {
-          info = await DstParser.parseFile(p);
-        } else if (lower.endsWith('.emb')) {
-          info = await EmbParser.parseFile(p);
-        } else {
-          info = EmbDesignInfo(
-            filePath: p,
-            fileName: p.split(Platform.pathSeparator).last,
-            stitches: 0,
-            colorCount: 0,
-            jumpsCount: 0,
-            sequinsCount: 0,
-            machineType: 'Other',
-            colorSequence: [],
-          );
-        }
-
+        final EmbDesignInfo? info = await parseAnyDesignFile(p);
         if (info != null && mounted) {
-          Navigator.push(context, MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info!)));
+          Navigator.push(context, MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info)));
         }
       } else {
         final group = EmbFolderGroup(
@@ -950,24 +926,7 @@ class _FolderDetailsScreenState extends State {
     for (final p in widget.folderGroup.filePaths) {
       if (!mounted) return;
       final path = p.toString();
-      final lower = path.toLowerCase();
-      EmbDesignInfo? info;
-      if (lower.endsWith('.dst')) {
-        info = await DstParser.parseFile(path);
-      } else if (lower.endsWith('.emb')) {
-        info = await EmbParser.parseFile(path);
-      } else {
-        info = EmbDesignInfo(
-          filePath: path,
-          fileName: path.split(Platform.pathSeparator).last,
-          stitches: 0,
-          colorCount: 0,
-          jumpsCount: 0,
-          sequinsCount: 0,
-          machineType: 'Other',
-          colorSequence: [],
-        );
-      }
+      final EmbDesignInfo? info = await parseAnyDesignFile(path);
 
       if (info != null) {
         _designs.add(info);
@@ -1313,7 +1272,7 @@ class _DesignDetailScreenState extends State {
                                         Text('$ext Format', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 22)),
                                         const SizedBox(height: 4),
                                         Text(
-                                          tr('صيغة غير مدعومة للرسم بعد', 'Format rendering not supported yet'),
+                                          tr('صيغة تشغيل ماكينة (معلومات التصميم بالأسفل)', 'Machine Format (Design Specs Below)'),
                                           style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
                                         ),
                                       ],
@@ -1402,7 +1361,7 @@ class _DesignDetailScreenState extends State {
                             runSpacing: 10,
                             alignment: WrapAlignment.spaceAround,
                             children: [
-                              _StatBadge(label: tr('الغرز', 'Stitches'), value: numFmt.format(d.stitches), color: const Color(0xFF56CCF2)),
+                              if (d.stitches > 0) _StatBadge(label: tr('الغرز', 'Stitches'), value: numFmt.format(d.stitches), color: const Color(0xFF56CCF2)),
                               if (shortCmText != null) _StatBadge(label: tr('المقاس (سم)', 'Size (cm)'), value: shortCmText, color: Colors.lightGreenAccent),
                               _StatBadge(label: tr('الألوان', 'Colors'), value: '${d.colorCount}', color: const Color(0xFFD4AF37)),
                               if (d.sequinsCount > 0) _StatBadge(label: tr('الترتر', 'Sequins'), value: numFmt.format(d.sequinsCount), color: Colors.pinkAccent),
