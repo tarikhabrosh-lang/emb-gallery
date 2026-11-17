@@ -20,7 +20,7 @@ class ThreadColorStep {
 class EmbDesignInfo {
   final String filePath, fileName, machineType;
   final Uint8List? previewJpeg, stitchPreviewBytes;
-  final int previewWidth, previewHeight, stitches, colorCount, stopsCount, jumpsCount, sequinsCount, trimsCount;
+  final int previewWidth, previewHeight, stitches, colorCount, stopsCount, jumpsCount, sequinsCount, trimsCount, beadsCount;
   final List colorSequence;
   final double? widthMm, heightMm;
 
@@ -37,6 +37,7 @@ class EmbDesignInfo {
     required this.jumpsCount,
     required this.sequinsCount,
     this.trimsCount = 0,
+    this.beadsCount = 0,
     required this.machineType,
     required this.colorSequence,
     this.widthMm,
@@ -147,10 +148,14 @@ class EmbParser {
 
               if (dVal.isNaN || dVal.isInfinite) continue;
 
+              // تصحيح معامل مقاس ويلكم ليعطي المليمتر الصحيح تماماً
+              double correctedVal = dVal.abs();
+              if (correctedVal > 10000.0) correctedVal /= 100.0; 
+
               if (pname == 'design width') {
-                designWidthMm = dVal.abs();
+                designWidthMm = correctedVal;
               } else if (pname == 'design height') {
-                designHeightMm = dVal.abs();
+                designHeightMm = correctedVal;
               } else if (pname == 'design left') {
                 fallbackLeft = dVal;
               } else if (pname == 'design right') {
@@ -646,14 +651,20 @@ class DahaoParser {
           if (colors <= 0 || colors > 256) colors = 1;
         }
 
-        // استخراج صورة المعاينة JPEG المدمجة داخل .DHP
+        // بحث محسّن عن صورة المعاينة JPEG في ملف .DHP
         Uint8List? previewImg;
-        final int jpgStart = _findBytes(bytes, [0xFF, 0xD8, 0xFF]);
-        if (jpgStart != -1) {
+        int jpgStart = _findBytes(bytes, [0xFF, 0xD8, 0xFF]);
+        while (jpgStart != -1) {
           final int jpgEnd = _findBytes(bytes, [0xFF, 0xD9], startFrom: jpgStart + 3);
           if (jpgEnd != -1 && jpgEnd + 2 <= bytes.length) {
-            previewImg = bytes.sublist(jpgStart, jpgEnd + 2);
+            final candidate = bytes.sublist(jpgStart, jpgEnd + 2);
+            // التأكد من أن الصورة الكانديديت هي صورة وليست جزء باينري عشوائي
+            if (candidate.length > 5000) {
+              previewImg = candidate;
+              break;
+            }
           }
+          jpgStart = _findBytes(bytes, [0xFF, 0xD8, 0xFF], startFrom: jpgStart + 3);
         }
 
         return EmbDesignInfo(
