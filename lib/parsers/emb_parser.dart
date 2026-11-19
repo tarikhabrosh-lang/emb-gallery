@@ -54,7 +54,7 @@ class _ExtractedImage {
 }
 
 class EmbParser {
-  static Future parseFile(String filePath) async {
+  static Future<EmbDesignInfo?> parseFile(String filePath) async {
     try {
       final file = File(filePath);
       if (!await file.exists()) return null;
@@ -148,7 +148,7 @@ class EmbParser {
 
               if (dVal.isNaN || dVal.isInfinite) continue;
 
-              // معامل ويلكم الفعلي: 180 وحدة لكل 1 مليمتر (84708 / 180 = 470.6 مم)
+              // معامل ويلكم الفعلي: 180 وحدة لكل 1 مليمتر
               double correctedVal = dVal.abs();
               if (correctedVal > 2000.0) {
                 correctedVal = correctedVal / 180.0;
@@ -501,7 +501,7 @@ class _StitchBlock {
 }
 
 class DstParser {
-  static Future parseFile(String filePath) async {
+  static Future<EmbDesignInfo?> parseFile(String filePath) async {
     try {
       final file = File(filePath);
       if (!await file.exists()) return null;
@@ -545,7 +545,7 @@ class DstParser {
     return int.tryParse(valStr) ?? 0;
   }
 
-  static Future _renderDstToImage(Uint8List bytes) async {
+  static Future<Uint8List?> _renderDstToImage(Uint8List bytes) async {
     int x = 0, y = 0;
     double minX = 0, maxX = 0, minY = 0, maxY = 0;
     List points = [];
@@ -634,8 +634,15 @@ class DstParser {
   }
 }
 
+class _DahaoEvent {
+  final double x, y;
+  final String type; // 'STITCH', 'JUMP', 'SEQUIN'
+  final int sequinCode;
+  _DahaoEvent(this.x, this.y, this.type, {this.sequinCode = 0});
+}
+
 class DahaoParser {
-  static Future parseFile(String filePath) async {
+  static Future<EmbDesignInfo?> parseFile(String filePath) async {
     try {
       final file = File(filePath);
       if (!await file.exists()) return null;
@@ -657,7 +664,6 @@ class DahaoParser {
           if (colors <= 0 || colors > 256) colors = 1;
         }
 
-        // التحقق الفعلي من صلاحية أي صورة مدمجة لتجنب الشاشة البيضاء
         Uint8List? validPreview = await _findValidEmbeddedJpeg(bytes);
 
         return EmbDesignInfo(
@@ -674,28 +680,57 @@ class DahaoParser {
           colorSequence: [],
         );
       } else {
-        // صيغ ماكينة داهوا (.DHA و .DHE)
+        // صيغ ماكينة داهوا (.DHE و .DHA)
+        final bool isDhe = lower.endsWith('.dhe');
         final int stops = bd.getUint16(4, Endian.little);
-        final int colors = bd.getInt32(16, Endian.little);
-        final int validColors = (colors > 0 && colors < 256) ? colors : 1;
+        final int rawColors = bd.getInt32(16, Endian.little);
+        final int validColors = (rawColors > 0 && rawColors < 256) ? rawColors : 1;
 
-        final int bodyLen = bytes.length > 320 ? (bytes.length - 320) : 0;
-        // في .DHE كل غرزة تمثل 4 بايت (322176 / 4 = 80544 غرزة) وفي .DHA حوالي 3.7 بايت
-        final int estStitches = lower.endsWith('.dhe')
-            ? (bodyLen ~/ 4)
-            : ((bodyLen * 10) ~/ 37);
+        Color primaryThreadColor = const Color(0xFF1E8E3E);
+        if (bytes.length > 0x1F) {
+          final r = bytes[0x1C];
+          final g = bytes[0x1D];
+          final b = bytes[0x1E];
+          if (r > 0 || g > 0 || b > 0) {
+            primaryThreadColor = Color.fromARGB(255, r, g, b);
+          }
+        }
+
+        int startPos = 0x538;
+        if (bytes.length > 0x1B2 && bytes[0x1B0] == 0x06 && bytes[0x1B1] == 0x35) {
+          int pos = 0x1B0;
+          while (pos + 2 <= bytes.length && bytes[pos] == 0x06 && bytes[pos + 1] == 0x35) {
+            pos += 2;
+          }
+          startPos = pos + 16;
+        }
+
+        final decoded = _decodeDahaoStitches(bytes, startPos, isDhe);
+        final events = decoded.$1;
+        final int stitchCount = decoded.$2;
+        final int jumpCount = decoded.$3;
+        final int sequinCount = decoded.$4;
+        final double? widthMm = decoded.$5;
+        final double? heightMm = decoded.$6;
+
+        Uint8List? previewPng;
+        if (events.length > 2) {
+          previewPng = await _renderDahaoToImage(events, primaryThreadColor);
+        }
 
         return EmbDesignInfo(
           filePath: filePath,
           fileName: fileName,
-          previewJpeg: null,
-          stitches: estStitches > 0 ? estStitches : 0,
+          previewJpeg: previewPng,
+          stitches: stitchCount,
           colorCount: validColors,
           stopsCount: stops,
-          jumpsCount: 0,
-          sequinsCount: 0,
-          machineType: lower.endsWith('.dhe') ? 'Dahao (.DHE)' : 'Dahao (.DHA)',
+          jumpsCount: jumpCount,
+          sequinsCount: sequinCount,
+          machineType: isDhe ? 'Dahao (.DHE)' : 'Dahao (.DHA)',
           colorSequence: [],
+          widthMm: widthMm,
+          heightMm: heightMm,
         );
       }
     } catch (_) {
@@ -703,11 +738,242 @@ class DahaoParser {
     }
   }
 
-  static Future _findValidEmbeddedJpeg(Uint8List data) async {
+  static (int, bool) _decodeByte(int b, int key, int highKey) {
+    if (b < 61) {
+      return ((b - key) % 61, false);
+    } else {
+      int val;
+      if (key == highKey) {
+        val = b + 4;
+      } else {
+        val = b - 37;
+        if (val < 61) val += 49;
+      }
+      return (val, true);
+    }
+  }
+
+  static (List<_DahaoEvent>, int, int, int, double?, double?) _decodeDahaoStitches(
+    Uint8List bytes,
+    int startPos,
+    bool isDhe,
+  ) {
+    final List<_DahaoEvent> events = [_DahaoEvent(0, 0, 'JUMP')];
+    if (startPos >= bytes.length - 6) {
+      return (events, 0, 0, 0, null, null);
+    }
+
+    int ky = isDhe ? 0x21 : 0x0C;
+    int kx = isDhe ? 0x33 : 0x25;
+    final int highKey = isDhe ? 0x33 : 0x25;
+
+    final Map<int, (int, int)> signMap = isDhe
+        ? const {
+            0xB5: (1, 1), 0xBF: (1, 1),
+            0xA2: (1, -1), 0xAC: (1, -1),
+            0x82: (-1, 1), 0x8C: (-1, 1),
+            0xD5: (-1, -1), 0xDF: (-1, -1),
+            0x8D: (-1, 1), 0x83: (-1, 1),
+          }
+        : const {
+            0xAF: (1, 1), 0x77: (1, 1),
+            0x9C: (1, -1), 0xB7: (1, -1),
+            0x7C: (-1, 1), 0x97: (-1, 1),
+            0xDD: (-1, -1), 0xC2: (-1, -1),
+          };
+
+    int x = 0, y = 0;
+    double minX = 0, maxX = 0, minY = 0, maxY = 0;
+    bool hasBounds = false;
+
+    int stitches = 0, jumps = 0, sequins = 0;
+    final int limit = bytes.length - 24;
+
+    for (int p = startPos; p + 2 < limit; p += 3) {
+      final int cmd = bytes[p];
+      final int b1 = bytes[p + 1];
+      final int b2 = bytes[p + 2];
+
+      if (isDhe && (cmd == 0x21 || cmd == 0x33 || cmd == 0xF7)) break;
+      if (!isDhe && cmd == 0x00 && b1 == 0x00 && b2 == 0x00) break;
+
+      final d1 = _decodeByte(b1, ky, highKey);
+      final int dy = d1.$1;
+      final bool flip1 = d1.$2;
+      if (flip1) {
+        final tmp = ky;
+        ky = kx;
+        kx = tmp;
+      }
+
+      final d2 = _decodeByte(b2, kx, highKey);
+      final int dx = d2.$1;
+      final bool flip2 = d2.$2;
+      if (flip2) {
+        final tmp = ky;
+        ky = kx;
+        kx = tmp;
+      }
+
+      if (isDhe && (cmd == 0xE0 || ((cmd == 0xD6 || cmd == 0xCC) && (flip1 || flip2)))) {
+        x -= dx;
+        y -= dy;
+        jumps++;
+        events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP'));
+      } else if (isDhe && (cmd == 0xD6 || cmd == 0xCC)) {
+        if (dx != 0 || dy != 0) {
+          sequins++;
+          events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'SEQUIN', sequinCode: dx));
+        }
+      } else if (isDhe && (cmd == 0x8D || cmd == 0x83)) {
+        x -= dx;
+        y += dy;
+        jumps++;
+        events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP'));
+      } else if (signMap.containsKey(cmd)) {
+        final s = signMap[cmd]!;
+        x += s.$1 * dx;
+        y += s.$2 * dy;
+        stitches++;
+        final px = x.toDouble();
+        final py = -y.toDouble();
+        events.add(_DahaoEvent(px, py, 'STITCH'));
+
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+
+    for (final ev in events) {
+      if (ev.type == 'SEQUIN') {
+        if (!hasBounds) {
+          minX = maxX = ev.x;
+          minY = maxY = ev.y;
+          hasBounds = true;
+        } else {
+          if (ev.x < minX) minX = ev.x;
+          if (ev.x > maxX) maxX = ev.x;
+          if (ev.y < minY) minY = ev.y;
+          if (ev.y > maxY) maxY = ev.y;
+        }
+      }
+    }
+
+    final double? widthMm = hasBounds && (maxX - minX) > 0 ? (maxX - minX) / 10.0 : null;
+    final double? heightMm = hasBounds && (maxY - minY) > 0 ? (maxY - minY) / 10.0 : null;
+
+    return (events, stitches, jumps, sequins, widthMm, heightMm);
+  }
+
+  static Future<Uint8List?> _renderDahaoToImage(
+    List<_DahaoEvent> events,
+    Color threadColor,
+  ) async {
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+
+    for (final ev in events) {
+      if (ev.type == 'STITCH' || ev.type == 'SEQUIN') {
+        if (ev.x < minX) minX = ev.x;
+        if (ev.x > maxX) maxX = ev.x;
+        if (ev.y < minY) minY = ev.y;
+        if (ev.y > maxY) maxY = ev.y;
+      }
+    }
+
+    final double rawW = maxX - minX;
+    final double rawH = maxY - minY;
+    if (!rawW.isFinite || !rawH.isFinite || rawW <= 0 || rawH <= 0) return null;
+
+    const double pad = 40.0;
+    final double scale = 800.0 / math.max(rawW, rawH);
+    final int imgW = math.max(64, (rawW * scale + pad * 2).toInt());
+    final int imgH = math.max(64, (rawH * scale + pad * 2).toInt());
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()));
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()),
+      Paint()..color = Colors.white,
+    );
+
+    final stitchPaint = Paint()
+      ..color = threadColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+
+    final Path path = Path();
+    bool hasMove = false;
+
+    for (int i = 0; i < events.length; i++) {
+      final ev = events[i];
+      final double sx = (ev.x - minX) * scale + pad;
+      final double sy = (ev.y - minY) * scale + pad;
+
+      if (ev.type == 'JUMP') {
+        hasMove = false;
+      } else if (ev.type == 'STITCH') {
+        if (!hasMove) {
+          path.moveTo(sx, sy);
+          hasMove = true;
+        } else {
+          path.lineTo(sx, sy);
+        }
+      }
+    }
+    canvas.drawPath(path, stitchPaint);
+
+    for (final ev in events) {
+      if (ev.type == 'SEQUIN') {
+        final double sx = (ev.x - minX) * scale + pad;
+        final double sy = (ev.y - minY) * scale + pad;
+
+        double radius = 9.0;
+        Color seqColor = const Color(0xFFE53935);
+        if (ev.sequinCode == 4) {
+          radius = 6.5;
+          seqColor = const Color(0xFFE53935);
+        } else if (ev.sequinCode == 6) {
+          radius = 8.5;
+          seqColor = const Color(0xFFFB8C00);
+        } else if (ev.sequinCode == 16) {
+          radius = 11.0;
+          seqColor = const Color(0xFF1E88E5);
+        } else if (ev.sequinCode == 32) {
+          radius = 13.5;
+          seqColor = const Color(0xFF8E24AA);
+        }
+
+        final seqPaint = Paint()
+          ..color = seqColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = radius * 0.55
+          ..isAntiAlias = true;
+
+        canvas.drawCircle(Offset(sx, sy), radius * 0.7, seqPaint);
+      }
+    }
+
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(imgW, imgH);
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    return byteData?.buffer.asUint8List();
+  }
+
+  static Future<Uint8List?> _findValidEmbeddedJpeg(Uint8List data) async {
     int pos = _findBytes(data, [0xFF, 0xD8, 0xFF]);
     while (pos != -1 && pos + 16 < data.length) {
       final int marker = data[pos + 3];
-      // التأكد من أن البايت الرابع هو ترويسة JPEG قياسية (JFIF / Exif / DQT)
       if (marker == 0xE0 || marker == 0xE1 || marker == 0xDB || marker == 0xC0) {
         final int endPos = _findBytes(data, [0xFF, 0xD9], startFrom: pos + 4);
         if (endPos != -1 && endPos - pos > 2048 && endPos + 2 <= data.length) {
@@ -726,7 +992,7 @@ class DahaoParser {
     return null;
   }
 
-  static int _findBytes(Uint8List data, List pattern, {int startFrom = 0}) {
+  static int _findBytes(Uint8List data, List<int> pattern, {int startFrom = 0}) {
     if (pattern.isEmpty || data.length < pattern.length) return -1;
     final int limit = data.length - pattern.length;
     for (int i = startFrom; i <= limit; i++) {
