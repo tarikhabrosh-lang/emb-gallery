@@ -224,6 +224,7 @@ class EmbParser {
         jumpsCount: jumps,
         sequinsCount: sequins > 0 ? sequins : blings,
         trimsCount: trims,
+        beadsCount: blings,
         machineType: machine,
         colorSequence: sequence,
         widthMm: finalWidthMm,
@@ -662,7 +663,7 @@ class DstParser {
 
 class _DahaoEvent {
   final double x, y;
-  final String type; // 'STITCH', 'JUMP', 'SEQUIN'
+  final String type; // 'STITCH', 'JUMP', 'SEQUIN', 'BEAD'
   final int sequinCode;
   final int colorIndex;
   _DahaoEvent(this.x, this.y, this.type, {this.sequinCode = 0, this.colorIndex = 0});
@@ -675,7 +676,15 @@ class _R2Coord {
   _R2Coord(this.sign, this.state, this.val);
 }
 
-/// محرك فك تشفير داهوا الموحّد والنهائي (جدول الأوامر الكامل + قفز (+,-) في الحلقة الرابعة + حل تصادم الترتر + إغلاق نقطة الأصل)
+class _DhpChunkMeta {
+  final int offset;
+  final int size;
+  final int type;
+  final int count;
+  _DhpChunkMeta(this.offset, this.size, this.type, this.count);
+}
+
+/// محرك فك تشفير داهوا الموحّد (.DHE / .DHA + .DHP مع فصل كامل بين الترتر والخرز)
 class DahaoParser {
   static int _mod(int a, int m) => ((a % m) + m) % m;
 
@@ -690,94 +699,397 @@ class DahaoParser {
     try {
       final file = File(filePath);
       if (!await file.exists()) return null;
-      final bytes = await file.readAsBytes();
-      if (bytes.length < 32) return null;
 
       final lower = filePath.toLowerCase();
       final fileName = filePath.split(Platform.pathSeparator).last;
-      final bd = ByteData.sublistView(bytes);
 
       if (lower.endsWith('.dhp')) {
-        int colors = 1;
-        int stops = 0;
-        int trims = 0;
-        if (bytes.length > 740) {
-          trims = bd.getInt32(680, Endian.little);
-          colors = bd.getInt32(700, Endian.little);
-          stops = bd.getInt32(732, Endian.little);
-          if (colors <= 0 || colors > 256) colors = 1;
+        return await _parseDhpFile(file, fileName);
+      }
+
+      final bytes = await file.readAsBytes();
+      if (bytes.length < 32) return null;
+      final bd = ByteData.sublistView(bytes);
+
+      final bool isDhe = lower.endsWith('.dhe');
+      final int stops = bd.getUint16(4, Endian.little);
+      final int rawColors = bd.getInt32(16, Endian.little);
+      final int validColors = (rawColors > 0 && rawColors < 256) ? rawColors : 1;
+
+      final List<Color> threadPalette = _extractHeaderPalette(bytes, validColors);
+
+      final detected = _detectStartAndKeys(bytes, isDhe);
+      final int startPos = detected.$1;
+      final int stitchEndPos = detected.$2;
+      final int ky0 = detected.$3;
+      final int kx0 = detected.$4;
+      final int? endByte = detected.$5;
+
+      final decoded = _decodeDahaoUniversal(
+        bytes,
+        startPos,
+        stitchEndPos,
+        ky0,
+        kx0,
+        endByte,
+        threadPalette.length,
+      );
+
+      final events = decoded.$1;
+      final int stitchCount = decoded.$2;
+      final int jumpCount = decoded.$3;
+      final int sequinCount = decoded.$4;
+      final double? widthMm = decoded.$5;
+      final double? heightMm = decoded.$6;
+
+      Uint8List? previewPng;
+      if (events.length > 2) {
+        previewPng = await _renderDahaoToImage(events, threadPalette);
+      }
+
+      return EmbDesignInfo(
+        filePath: filePath,
+        fileName: fileName,
+        previewJpeg: previewPng,
+        stitches: stitchCount,
+        colorCount: validColors,
+        stopsCount: stops,
+        jumpsCount: jumpCount,
+        sequinsCount: sequinCount,
+        machineType: isDhe ? 'Dahao (.DHE)' : 'Dahao (.DHA)',
+        colorSequence: [],
+        widthMm: widthMm,
+        heightMm: heightMm,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// استخراج لوحة ألوان emCAD الحقيقية (400 بايت لكل لون بعد 'Default' في الترويسة)
+  static (List<Color>, int) _extractDhpPalette(Uint8List hdr) {
+    const fallbackPalette = [
+      Color(0xFF009900),
+      Color(0xFFE53935),
+      Color(0xFFFBC02D),
+      Color(0xFF00ACC1),
+      Color(0xFFD81B60),
+      Color(0xFFFB8C00),
+      Color(0xFF5C6BC0),
+      Color(0xFF2E7D32),
+      Color(0xFF1E88E5),
+      Color(0xFF8E24AA),
+      Color(0xFF00897B),
+      Color(0xFF6D4C41),
+      Color(0xFF3949AB),
+    ];
+
+    const defaultUtf16 = [0x44, 0x00, 0x65, 0x00, 0x66, 0x00, 0x61, 0x00, 0x75, 0x00, 0x6C, 0x00, 0x74, 0x00];
+    int defPos = -1;
+    final int limit = math.min(hdr.length - defaultUtf16.length, 0x1F00);
+    for (int i = 0x1000; i <= limit; i++) {
+      bool match = true;
+      for (int j = 0; j < defaultUtf16.length; j++) {
+        if (hdr[i + j] != defaultUtf16[j]) {
+          match = false;
+          break;
         }
+      }
+      if (match) {
+        defPos = i;
+        break;
+      }
+    }
 
-        Uint8List? validPreview = await _findValidEmbeddedJpeg(bytes);
+    if (defPos < 8) {
+      return (fallbackPalette, 0);
+    }
 
+    final bd = ByteData.sublistView(hdr);
+    int colCnt = bd.getUint32(defPos - 8, Endian.little);
+    if (colCnt <= 0 || colCnt > 64) colCnt = 0;
+
+    final List<Color> parsed = [];
+    int p = defPos + 160;
+    for (int i = 0; i < (colCnt > 0 ? colCnt : 16); i++) {
+      if (p + 8 > hdr.length || p >= 0x2000) break;
+      final int structSize = bd.getUint32(p, Endian.little);
+      if (structSize != 400) break;
+      int r = hdr[p + 4];
+      int g = hdr[p + 5];
+      int b = hdr[p + 6];
+      // تخفيف الأصفر/السماوي الفاتح جداً قليلاً على الخلفية البيضاء ليظهر بوضوح
+      if (r > 235 && g > 235 && b < 40) {
+        r = 225;
+        g = 185;
+        b = 0;
+      } else if (r < 40 && g > 235 && b > 235) {
+        r = 0;
+        g = 180;
+        b = 200;
+      } else if (r > 240 && g > 240 && b > 240) {
+        r = 175;
+        g = 175;
+        b = 175;
+      }
+      parsed.add(Color.fromARGB(255, r, g, b));
+      p += 400;
+    }
+
+    final int targetCount = math.max(colCnt, parsed.length);
+    for (int i = parsed.length; i < math.max(targetCount, 13); i++) {
+      parsed.add(fallbackPalette[i % fallbackPalette.length]);
+    }
+
+    return (parsed, colCnt);
+  }
+
+  /// قارئ ملفات مشاريع emCAD (.DHP): يقرأ الغرز (type 0/2/3)، ألوان emCAD، تغيير اللون (0x17)، الترتر (0x06/0x07)، والخرز (0x01000045/46/47)
+  static Future<EmbDesignInfo?> _parseDhpFile(File file, String fileName) async {
+    RandomAccessFile? raf;
+    try {
+      raf = await file.open(mode: FileMode.read);
+      final int fileLen = await raf.length();
+      if (fileLen < 1024) return null;
+
+      final int hdrLen = math.min(fileLen, 0x2000);
+      await raf.setPosition(0);
+      final Uint8List hdr = await raf.read(hdrLen);
+      final ByteData hdrBd = ByteData.sublistView(hdr);
+
+      int colors = 1;
+      int stops = 0;
+      int trims = 0;
+      if (hdr.length > 740) {
+        trims = hdrBd.getInt32(680, Endian.little);
+        colors = hdrBd.getInt32(700, Endian.little);
+        stops = hdrBd.getInt32(732, Endian.little);
+        if (colors <= 0 || colors > 256) colors = 1;
+      }
+
+      final palResult = _extractDhpPalette(hdr);
+      final List<Color> dhpPalette = palResult.$1;
+      if (palResult.$2 > 0) {
+        colors = palResult.$2;
+      }
+
+      final int tailOffset = await _findDhpChainTail(raf, fileLen);
+      if (tailOffset == -1) {
         return EmbDesignInfo(
-          filePath: filePath,
+          filePath: file.path,
           fileName: fileName,
-          previewJpeg: validPreview,
+          previewJpeg: null,
           stitches: 0,
           colorCount: colors,
           stopsCount: stops > 0 ? stops : 0,
           jumpsCount: 0,
           sequinsCount: 0,
+          beadsCount: 0,
           trimsCount: trims > 0 ? trims : 0,
           machineType: 'Dahao CAD (.DHP)',
           colorSequence: [],
         );
-      } else {
-        final bool isDhe = lower.endsWith('.dhe');
-        final int stops = bd.getUint16(4, Endian.little);
-        final int rawColors = bd.getInt32(16, Endian.little);
-        final int validColors = (rawColors > 0 && rawColors < 256) ? rawColors : 1;
+      }
 
-        final List<Color> threadPalette = _extractHeaderPalette(bytes, validColors);
+      final List<_DhpChunkMeta> chunks = [];
+      final Set<int> visited = {};
+      int cur = tailOffset;
+      final Uint8List hdrBuf = Uint8List(20);
+      final Uint8List prevBuf = Uint8List(20);
 
-        final detected = _detectStartAndKeys(bytes, isDhe);
-        final int startPos = detected.$1;
-        final int stitchEndPos = detected.$2;
-        final int ky0 = detected.$3;
-        final int kx0 = detected.$4;
-        final int? endByte = detected.$5;
+      while (cur > 0 && cur + 20 <= fileLen && !visited.contains(cur) && chunks.length < 250000) {
+        visited.add(cur);
+        await raf.setPosition(cur);
+        if (await raf.readInto(hdrBuf) < 20) break;
+        final bd = ByteData.sublistView(hdrBuf);
+        final int sz = bd.getUint32(0, Endian.little);
+        final int typ = bd.getUint32(4, Endian.little);
+        final int prv = bd.getUint32(12, Endian.little);
+        final int cnt = bd.getUint32(16, Endian.little);
 
-        final decoded = _decodeDahaoUniversal(
-          bytes,
-          startPos,
-          stitchEndPos,
-          ky0,
-          kx0,
-          endByte,
-          threadPalette.length,
-        );
+        if (sz < 20 || cur + sz > fileLen) break;
+        chunks.add(_DhpChunkMeta(cur, sz, typ, cnt));
 
-        final events = decoded.$1;
-        final int stitchCount = decoded.$2;
-        final int jumpCount = decoded.$3;
-        final int sequinCount = decoded.$4;
-        final double? widthMm = decoded.$5;
-        final double? heightMm = decoded.$6;
+        if (prv == 0 || prv + 20 > fileLen) break;
+        await raf.setPosition(prv);
+        if (await raf.readInto(prevBuf) < 20) break;
+        final pBd = ByteData.sublistView(prevBuf);
+        final int pnxt = pBd.getUint32(8, Endian.little);
+        if (pnxt != cur) break;
+        cur = prv;
+      }
 
-        Uint8List? previewPng;
-        if (events.length > 2) {
-          previewPng = await _renderDahaoToImage(events, threadPalette);
+      final List<_DhpChunkMeta> ordered = chunks.reversed.toList();
+
+      final List<_DahaoEvent> events = [];
+      int stitchCount = 0;
+      int sequinCount = 0;
+      int beadCount = 0;
+      int jumpCount = 0;
+      int colorChangeCount = 0;
+      int currentColorIdx = 0;
+      double minX = double.infinity, maxX = -double.infinity;
+      double minY = double.infinity, maxY = -double.infinity;
+
+      for (final ch in ordered) {
+        final int nRec = (ch.size - 20) ~/ 12;
+        if (nRec <= 0) continue;
+
+        final int payloadBytes = nRec * 12;
+        await raf.setPosition(ch.offset + 20);
+        final Uint8List raw = await raf.read(payloadBytes);
+        if (raw.length < payloadBytes) continue;
+        final bd = ByteData.sublistView(raw);
+
+        // كتل الربط (type == 1): تحمل أوامر تغيير اللون الحقيقية (0x17) والقفزات
+        if (ch.type == 1) {
+          for (int i = 0; i < nRec; i++) {
+            final int fl = bd.getUint32(i * 12 + 8, Endian.little);
+            if ((fl & 0xFF) == 0x17) {
+              final int cIdx = (fl >> 16) - 1;
+              if (cIdx >= 0) {
+                currentColorIdx = cIdx % dhpPalette.length;
+                colorChangeCount++;
+              }
+            }
+          }
+          jumpCount++;
+          continue;
         }
 
-        return EmbDesignInfo(
-          filePath: filePath,
-          fileName: fileName,
-          previewJpeg: previewPng,
-          stitches: stitchCount,
-          colorCount: validColors,
-          stopsCount: stops,
-          jumpsCount: jumpCount,
-          sequinsCount: sequinCount,
-          machineType: isDhe ? 'Dahao (.DHE)' : 'Dahao (.DHA)',
-          colorSequence: [],
-          widthMm: widthMm,
-          heightMm: heightMm,
-        );
+        // كتل الغرز (type == 0: غرز عادية + ترتر + خرز، type == 2 و 3: غرز Run و Satin)
+        if (ch.type == 0 || ch.type == 2 || ch.type == 3) {
+          bool needJump = true;
+          for (int i = 0; i < nRec; i++) {
+            final int off = i * 12;
+            final int rawX = bd.getInt32(off, Endian.little);
+            final int rawY = bd.getInt32(off + 4, Endian.little);
+            final int fl = bd.getUint32(off + 8, Endian.little);
+            final int low = fl & 0xFF;
+
+            final bool isBead = ((fl & 0x01000000) != 0) && (low == 0x45 || low == 0x46 || low == 0x47);
+            final bool isSequin = !isBead && (low == 0x06 || low == 0x07);
+            final bool isNormalStitch = low == 0x00;
+
+            if (isNormalStitch || isSequin || isBead) {
+              final double px = rawX / 10.0;
+              final double py = -rawY / 10.0;
+
+              if (needJump) {
+                events.add(_DahaoEvent(px, py, 'JUMP', colorIndex: currentColorIdx));
+                jumpCount++;
+                needJump = false;
+              }
+
+              events.add(_DahaoEvent(px, py, 'STITCH', colorIndex: currentColorIdx));
+              stitchCount++;
+
+              if (isSequin) {
+                sequinCount++;
+                final int seqCode = (low == 0x07) ? 2 : 1; // A=1, B=2
+                events.add(_DahaoEvent(px, py, 'SEQUIN', sequinCode: seqCode, colorIndex: currentColorIdx));
+              } else if (isBead) {
+                beadCount++;
+                final int beadCode = (low == 0x45) ? 1 : (low == 0x46 ? 2 : 3); // A=1, B=2, C=3
+                events.add(_DahaoEvent(px, py, 'BEAD', sequinCode: beadCode, colorIndex: currentColorIdx));
+              }
+
+              if (px < minX) minX = px;
+              if (px > maxX) maxX = px;
+              if (py < minY) minY = py;
+              if (py > maxY) maxY = py;
+            } else if (low == 0x17) {
+              final int cIdx = (fl >> 16) - 1;
+              if (cIdx >= 0) {
+                currentColorIdx = cIdx % dhpPalette.length;
+                colorChangeCount++;
+              }
+              needJump = true;
+            } else {
+              needJump = true;
+            }
+          }
+        }
       }
+
+      final double? widthMm = (minX.isFinite && maxX > minX) ? (maxX - minX) / 10.0 : null;
+      final double? heightMm = (minY.isFinite && maxY > minY) ? (maxY - minY) / 10.0 : null;
+
+      Uint8List? previewPng;
+      if (events.length > 2) {
+        previewPng = await _renderDahaoToImage(events, dhpPalette);
+      }
+
+      return EmbDesignInfo(
+        filePath: file.path,
+        fileName: fileName,
+        previewJpeg: previewPng,
+        stitches: stitchCount,
+        colorCount: colors,
+        stopsCount: colorChangeCount > 0 ? colorChangeCount : (stops > 0 ? stops : 0),
+        jumpsCount: jumpCount,
+        sequinsCount: sequinCount,
+        beadsCount: beadCount,
+        trimsCount: trims > 0 ? trims : 0,
+        machineType: 'Dahao CAD (.DHP)',
+        colorSequence: [],
+        widthMm: widthMm,
+        heightMm: heightMm,
+      );
     } catch (_) {
       return null;
+    } finally {
+      await raf?.close();
     }
+  }
+
+  static Future<int> _findDhpChainTail(RandomAccessFile raf, int fileLen) async {
+    final int scanLen = math.min(fileLen - 0x2000, 2 * 1024 * 1024);
+    if (scanLen <= 24) return -1;
+
+    final int scanStart = fileLen - scanLen;
+    await raf.setPosition(scanStart);
+    final Uint8List tailBuf = await raf.read(scanLen);
+    final ByteData bd = ByteData.sublistView(tailBuf);
+    final Uint8List checkBuf = Uint8List(20);
+
+    for (int rel = (tailBuf.length - 24) & ~3; rel >= 0; rel -= 4) {
+      final int absP = scanStart + rel;
+      final int sz = bd.getUint32(rel, Endian.little);
+      final int typ = bd.getUint32(rel + 4, Endian.little);
+      final int prv = bd.getUint32(rel + 12, Endian.little);
+      final int cnt = bd.getUint32(rel + 16, Endian.little);
+
+      if ((typ == 0 || typ == 1 || typ == 2 || typ == 3 || typ == 7) &&
+          sz >= 20 &&
+          sz <= 2000000 &&
+          prv >= 0x2000 &&
+          prv < absP) {
+        final bool validSz = (typ == 1 && sz == 44) ||
+            ((sz - 20) % 12 == 0 && ((sz - 20) ~/ 12 == cnt || (sz - 20) ~/ 12 == cnt + 1));
+        if (!validSz) continue;
+
+        await raf.setPosition(prv);
+        if (await raf.readInto(checkBuf) < 20) continue;
+        final pBd = ByteData.sublistView(checkBuf);
+        if (pBd.getUint32(8, Endian.little) == absP) {
+          int cur = absP;
+          while (true) {
+            await raf.setPosition(cur);
+            if (await raf.readInto(checkBuf) < 20) return cur;
+            final cBd = ByteData.sublistView(checkBuf);
+            final int nxt = cBd.getUint32(8, Endian.little);
+            if (nxt == 0 || nxt + 20 > fileLen) return cur;
+            await raf.setPosition(nxt);
+            if (await raf.readInto(checkBuf) < 20) return cur;
+            final nBd = ByteData.sublistView(checkBuf);
+            if (nBd.getUint32(12, Endian.little) != cur) return cur;
+            cur = nxt;
+          }
+        }
+      }
+    }
+    return -1;
   }
 
   static List<Color> _extractHeaderPalette(Uint8List bytes, int count) {
@@ -817,7 +1129,6 @@ class DahaoParser {
     return colors;
   }
 
-  /// اكتشاف نقطة البداية والنهاية ومفتاحي الحلقة الأولى (ky0, kx0) وبايت END بدقة
   static (int, int, int, int, int?) _detectStartAndKeys(Uint8List bytes, bool isDhe) {
     int stitchEndPos = math.max(0, bytes.length - 24);
     int? endByte;
@@ -948,7 +1259,6 @@ class DahaoParser {
     return (startPos, stitchEndPos, ky0, kx0, endByte);
   }
 
-  /// اكتشاف مفتاحي الحلقة الثالثة (110..192، حجم 83)
   static (int, int) _detectRing3Keys(Uint8List bytes, int startPos, int endPos, int ky0, int kx0) {
     final List<int> freq = List<int>.filled(83, 0);
     final List<int> zeroFreq = List<int>.filled(83, 0);
@@ -1029,7 +1339,6 @@ class DahaoParser {
     return (bestA, bestB);
   }
 
-  /// اكتشاف مفتاحي الحلقة الرابعة (193..255، حجم 63) مع دعم قفزات (+,-) عند +32 وتصادم (r4B - r4A == 9)
   static (int, int) _detectRing4Keys(
     Uint8List bytes,
     int startPos,
@@ -1133,7 +1442,6 @@ class DahaoParser {
     return (bestA, bestB);
   }
 
-  /// فك إحداثي يقع في الحلقة الثالثة (غرزة طويلة 11.0 - 12.7 مم)
   static int _decodeRing3Coord(int b, int r3A, int r3B) {
     final int k3A = _mod(r3A - 18, 83);
     final int k3B = _mod(r3B - 18, 83);
@@ -1143,7 +1451,6 @@ class DahaoParser {
     return 110 + (d <= 17 ? d : 11);
   }
 
-  /// اكتشاف مفتاحي الحلقة الثانية (61..109، حجم 49) بدقة 0.0 مم عبر مطابقة العودة لنقطة الأصل (0, 0)
   static (int, int) _detectRing2Keys(
     Uint8List bytes,
     int startPos,
@@ -1328,7 +1635,6 @@ class DahaoParser {
         }
       }
 
-      // تقييم كل k0 (مع k1 = (k0 + bestDiff) % 49) باستخدام معيار الإغلاق عند نقطة الأصل (0, 0)
       int bestK0 = 0;
       double bestObj = 1e18;
 
@@ -1346,7 +1652,6 @@ class DahaoParser {
         }
         final double closure = (fx.abs() + fy.abs()).toDouble();
 
-        // ترجيح ثانوي خفيف للقيم القصيرة عند تساوي الإغلاق
         double tieBreak = 0.0;
         for (int b = 0; b < 49; b++) {
           if (histS0[b] > 0) {
@@ -1405,7 +1710,6 @@ class DahaoParser {
       193 + r4B: (-1, -1),
     };
 
-    // الجدول الموحد الكامل للقفزات: (+,-) في الحلقة الرابعة عند +32 لأن 0xC1 = 193 أول بايت في الحلقة الرابعة
     final Map<int, (int, int)> jumpSignMap = {
       110 + (r3A + 1) % 83: (-1, 1),
       110 + (r3B + 1) % 83: (-1, 1),
@@ -1498,7 +1802,6 @@ class DahaoParser {
 
       final bool isSpecialPayload = _isSequinOrStopPayload(flip1, flip2, dy, dx);
 
-      // فك التصادم التام بين الترتر والغرز/القفزات عند (r4B - r4A == 9 أو 10)
       if (specialCmds.contains(cmd) &&
           (!stitchSignMap.containsKey(cmd) || isSpecialPayload) &&
           (!jumpSignMap.containsKey(cmd) || isSpecialPayload)) {
@@ -1579,7 +1882,7 @@ class DahaoParser {
     double minY = double.infinity, maxY = -double.infinity;
 
     for (final ev in events) {
-      if (ev.type == 'STITCH' || ev.type == 'SEQUIN') {
+      if (ev.type == 'STITCH' || ev.type == 'SEQUIN' || ev.type == 'BEAD') {
         if (ev.x < minX) minX = ev.x;
         if (ev.x > maxX) maxX = ev.x;
         if (ev.y < minY) minY = ev.y;
@@ -1644,6 +1947,12 @@ class DahaoParser {
     }
     flushPath();
 
+    // رسم الترتر (حلقات مفرّغة) والخرز (حبات دائرية ممتلئة بلمعة وسطية)
+    final Paint beadHighlight = Paint()
+      ..color = Colors.white.withOpacity(0.75)
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+
     for (final ev in events) {
       if (ev.type == 'SEQUIN') {
         final double sx = (ev.x - minX) * scale + pad;
@@ -1665,7 +1974,7 @@ class DahaoParser {
           seqColor = const Color(0xFF8E24AA);
         }
 
-        final double radius = (radiusUnits * scale).clamp(2.5, 18.0);
+        final double radius = (radiusUnits * scale).clamp(2.2, 18.0);
         final seqPaint = Paint()
           ..color = seqColor
           ..style = PaintingStyle.stroke
@@ -1673,6 +1982,25 @@ class DahaoParser {
           ..isAntiAlias = true;
 
         canvas.drawCircle(Offset(sx, sy), radius, seqPaint);
+      } else if (ev.type == 'BEAD') {
+        final double sx = (ev.x - minX) * scale + pad;
+        final double sy = (ev.y - minY) * scale + pad;
+
+        Color beadColor = const Color(0xFFD4A017); // Bead A (ذهبي/عنبر)
+        if (ev.sequinCode == 2) {
+          beadColor = const Color(0xFF00ACC1); // Bead B (فيروزي)
+        } else if (ev.sequinCode == 3) {
+          beadColor = const Color(0xFF8E24AA); // Bead C (بنفسجي)
+        }
+
+        final double radius = (12.0 * scale).clamp(1.6, 8.0);
+        final beadPaint = Paint()
+          ..color = beadColor
+          ..style = PaintingStyle.fill
+          ..isAntiAlias = true;
+
+        canvas.drawCircle(Offset(sx, sy), radius, beadPaint);
+        canvas.drawCircle(Offset(sx - radius * 0.25, sy - radius * 0.25), radius * 0.32, beadHighlight);
       }
     }
 
@@ -1682,43 +2010,5 @@ class DahaoParser {
     img.dispose();
     picture.dispose();
     return byteData?.buffer.asUint8List();
-  }
-
-  static Future<Uint8List?> _findValidEmbeddedJpeg(Uint8List data) async {
-    int pos = _findBytes(data, [0xFF, 0xD8, 0xFF]);
-    while (pos != -1 && pos + 16 < data.length) {
-      final int marker = data[pos + 3];
-      if (marker == 0xE0 || marker == 0xE1 || marker == 0xDB || marker == 0xC0) {
-        final int endPos = _findBytes(data, [0xFF, 0xD9], startFrom: pos + 4);
-        if (endPos != -1 && endPos - pos > 2048 && endPos + 2 <= data.length) {
-          final candidate = data.sublist(pos, endPos + 2);
-          try {
-            final codec = await ui.instantiateImageCodec(candidate);
-            final frame = await codec.getNextFrame();
-            if (frame.image.width > 16 && frame.image.height > 16) {
-              return candidate;
-            }
-          } catch (_) {}
-        }
-      }
-      pos = _findBytes(data, [0xFF, 0xD8, 0xFF], startFrom: pos + 3);
-    }
-    return null;
-  }
-
-  static int _findBytes(Uint8List data, List<int> pattern, {int startFrom = 0}) {
-    if (pattern.isEmpty || data.length < pattern.length) return -1;
-    final int limit = data.length - pattern.length;
-    for (int i = startFrom; i <= limit; i++) {
-      bool match = true;
-      for (int j = 0; j < pattern.length; j++) {
-        if (data[i + j] != pattern[j]) {
-          match = false;
-          break;
-        }
-      }
-      if (match) return i;
-    }
-    return -1;
   }
 }
