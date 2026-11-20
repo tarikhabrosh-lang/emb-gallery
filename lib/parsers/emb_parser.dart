@@ -599,7 +599,6 @@ class DstParser {
     double width = maxX - minX, height = maxY - minY;
     if (!width.isFinite || !height.isFinite || width <= 0 || height <= 0) return null;
 
-    // دقة عالية جداً (2200 بكسل) مع خطوط رفيعة حادة (0.75 بكسل) تمنع الطمس والتشويش عند التكبير
     const double pad = 36.0;
     const double maxCanvas = 2200.0;
     final double scale = (maxCanvas - pad * 2) / math.max(width, height);
@@ -669,9 +668,23 @@ class _DahaoEvent {
   _DahaoEvent(this.x, this.y, this.type, {this.sequinCode = 0, this.colorIndex = 0});
 }
 
-/// محرك فك تشفير داهوا الشامل (الإصدار الثالث: فصل كامل بين حالة الحلقة 1 وحالة الحلقة 2 + دعم غرز Ring 3 + رسم فائق الدقة بخطوط رفيعة)
+class _R2Coord {
+  final int sign;
+  final int state;
+  final int val;
+  _R2Coord(this.sign, this.state, this.val);
+}
+
+/// محرك فك تشفير داهوا الموحّد والنهائي (جدول الأوامر الكامل + قفز (+,-) في الحلقة الرابعة + حل تصادم الترتر + إغلاق نقطة الأصل)
 class DahaoParser {
   static int _mod(int a, int m) => ((a % m) + m) % m;
+
+  static bool _isSequinOrStopPayload(bool flip1, bool flip2, int dy, int dx) {
+    if (flip1 || flip2) return false;
+    if (dx == 0 && dy == 0) return true;
+    return (dy == 6 || dy == 10) &&
+        (dx == 1 || dx == 2 || dx == 4 || dx == 6 || dx == 8 || dx == 16 || dx == 32);
+  }
 
   static Future<EmbDesignInfo?> parseFile(String filePath) async {
     try {
@@ -804,7 +817,7 @@ class DahaoParser {
     return colors;
   }
 
-  /// اكتشاف نقطة البداية والنهاية ومفتاحي الحلقة الأولى (ky0, kx0) بالربط بين ذيل الملف وبداية بلوك 2#
+  /// اكتشاف نقطة البداية والنهاية ومفتاحي الحلقة الأولى (ky0, kx0) وبايت END بدقة
   static (int, int, int, int, int?) _detectStartAndKeys(Uint8List bytes, bool isDhe) {
     int stitchEndPos = math.max(0, bytes.length - 24);
     int? endByte;
@@ -812,7 +825,7 @@ class DahaoParser {
     int? tailB;
 
     if (bytes.length > 64) {
-      final int tailStart = math.max(32, bytes.length - 48);
+      final int tailStart = math.max(32, bytes.length - 64);
       final int tailLimit = bytes.length - 8;
       for (int p = tailLimit - 4; p >= tailStart; p--) {
         final int a = bytes[p];
@@ -986,8 +999,8 @@ class DahaoParser {
         double score = (sA + sB).toDouble();
 
         final jSet = {
-          (a1 + 1) % 83, (a2 + 1) % 83, (a3 + 1) % 83,
-          (b1 + 1) % 83, (b2 + 1) % 83, (b3 + 1) % 83,
+          (a1 + 1) % 83, (a3 + 1) % 83,
+          (b1 + 1) % 83, (b3 + 1) % 83,
         };
         for (final j in jSet) {
           if (j != a1 && j != a2 && j != a3 && j != b1 && j != b2 && j != b3) {
@@ -1016,7 +1029,7 @@ class DahaoParser {
     return (bestA, bestB);
   }
 
-  /// اكتشاف مفتاحي الحلقة الرابعة (193..255، حجم 63) مع تتبّع دقيق لحالة الحلقة 1 عبر غرز Ring 3
+  /// اكتشاف مفتاحي الحلقة الرابعة (193..255، حجم 63) مع دعم قفزات (+,-) عند +32 وتصادم (r4B - r4A == 9)
   static (int, int) _detectRing4Keys(
     Uint8List bytes,
     int startPos,
@@ -1059,8 +1072,7 @@ class DahaoParser {
           final int dx = _mod(b2 - kx, 61);
           if (dy == 0 && dx == 0) {
             zeroCnt[r]++;
-          } else if ((dy == 0 || dy == 6 || dy == 10) &&
-              (dx == 1 || dx == 2 || dx == 4 || dx == 6 || dx == 8 || dx == 16 || dx == 32)) {
+          } else if (_isSequinOrStopPayload(false, false, dy, dx)) {
             seqCnt[r]++;
           } else {
             stitchCnt[r]++;
@@ -1071,26 +1083,23 @@ class DahaoParser {
 
     final int? knownFromEnd = (endByte != null && endByte >= 193) ? _mod(endByte - 193 - 24, 63) : null;
 
-    bool isPureSpecial(int r) {
-      final int sp = zeroCnt[r] + seqCnt[r];
-      return sp >= 3 && sp > stitchCnt[r] * 4;
-    }
-
     double bestPairScore = -1e18;
     int bestA = knownFromEnd ?? 20;
     int bestB = (bestA + 10) % 63;
 
     for (int a = 0; a < 63; a++) {
-      final int seqA = _mod(a - 9, 63);
-      final int jmpA = (a + 1) % 63;
-      final int activityA = stitchCnt[a] + zeroCnt[seqA] + seqCnt[seqA] + jumpCnt[jmpA];
-      if (activityA == 0 && a != knownFromEnd) continue;
-
       for (int b = a + 1; b < 63; b++) {
+        final int seqA = _mod(a - 9, 63);
         final int seqB = _mod(b - 9, 63);
-        final int jmpB = (b + 1) % 63;
-        final int activityB = stitchCnt[b] + zeroCnt[seqB] + seqCnt[seqB] + jumpCnt[jmpB];
-        if (activityB == 0 && b != knownFromEnd) continue;
+        final int j1A = (a + 1) % 63;
+        final int j1B = (b + 1) % 63;
+        final int j2A = (a + 32) % 63;
+        final int j2B = (b + 32) % 63;
+
+        final int act = stitchCnt[a] + stitchCnt[b] + jumpCnt[a] + jumpCnt[b] +
+            seqCnt[seqA] + seqCnt[seqB] + zeroCnt[seqA] + zeroCnt[seqB] +
+            jumpCnt[j1A] + jumpCnt[j1B] + jumpCnt[j2A] + jumpCnt[j2B];
+        if (act == 0 && a != knownFromEnd && b != knownFromEnd) continue;
 
         double score = 0.0;
 
@@ -1098,28 +1107,20 @@ class DahaoParser {
           score += 100000.0;
         }
 
-        score += (stitchCnt[a] + stitchCnt[b]) * 4.0;
-        score += (jumpCnt[a] + jumpCnt[b]) * 0.8;
+        score += (stitchCnt[a] + stitchCnt[b]) * 5.0;
+        if (stitchCnt[a] == 0 && jumpCnt[a] == 0) score -= 10000.0;
+        if (stitchCnt[b] == 0 && jumpCnt[b] == 0) score -= 10000.0;
 
-        if (isPureSpecial(a)) score -= 5000.0;
-        if (isPureSpecial(b)) score -= 5000.0;
-        score -= (zeroCnt[a] + zeroCnt[b]) * 20.0;
+        score += (seqCnt[seqA] + seqCnt[seqB]) * 4.0 + (zeroCnt[seqA] + zeroCnt[seqB]) * 50.0;
+        score += (jumpCnt[j1A] + jumpCnt[j1B]) * 3.0 + (jumpCnt[j2A] + jumpCnt[j2B]) * 6.0;
 
-        if (seqA != b) {
-          score += zeroCnt[seqA] * 30.0 + seqCnt[seqA] * 3.5;
-          if (!isPureSpecial(seqA) && stitchCnt[seqA] > 10 && seqA != jmpB) {
-            score -= stitchCnt[seqA] * 2.5;
-          }
+        if (zeroCnt[a] > 0 && a != seqB) score -= zeroCnt[a] * 80.0;
+        if (zeroCnt[b] > 0 && b != seqA) score -= zeroCnt[b] * 80.0;
+
+        if (stitchCnt[a] > 0 && stitchCnt[b] > 0) {
+          final double ratio = math.min(stitchCnt[a], stitchCnt[b]) / math.max(stitchCnt[a], stitchCnt[b]);
+          score += ratio * 500.0;
         }
-        if (seqB != a) {
-          score += zeroCnt[seqB] * 30.0 + seqCnt[seqB] * 3.5;
-          if (!isPureSpecial(seqB) && stitchCnt[seqB] > 10 && seqB != jmpA) {
-            score -= stitchCnt[seqB] * 2.5;
-          }
-        }
-
-        if (jmpA != b) score += jumpCnt[jmpA] * 1.5;
-        if (jmpB != a) score += jumpCnt[jmpB] * 1.5;
 
         if (score > bestPairScore) {
           bestPairScore = score;
@@ -1132,8 +1133,30 @@ class DahaoParser {
     return (bestA, bestB);
   }
 
-  /// اكتشاف مفتاحي الحلقة الثانية (61..109، حجم 49) — حالتها المستقلة تنقلب فقط على بايتات الحلقة 2
-  static (int, int) _detectRing2Keys(Uint8List bytes, int startPos, int endPos, int ky0, int kx0) {
+  /// فك إحداثي يقع في الحلقة الثالثة (غرزة طويلة 11.0 - 12.7 مم)
+  static int _decodeRing3Coord(int b, int r3A, int r3B) {
+    final int k3A = _mod(r3A - 18, 83);
+    final int k3B = _mod(r3B - 18, 83);
+    final int dA = _mod(b - 110 - k3A, 83);
+    final int dB = _mod(b - 110 - k3B, 83);
+    final int d = math.min(dA, dB);
+    return 110 + (d <= 17 ? d : 11);
+  }
+
+  /// اكتشاف مفتاحي الحلقة الثانية (61..109، حجم 49) بدقة 0.0 مم عبر مطابقة العودة لنقطة الأصل (0, 0)
+  static (int, int) _detectRing2Keys(
+    Uint8List bytes,
+    int startPos,
+    int endPos,
+    int ky0,
+    int kx0,
+    int r3A,
+    int r3B,
+    Map<int, (int, int)> stitchSignMap,
+    Map<int, (int, int)> jumpSignMap,
+    Set<int> specialCmds,
+    int? endByte,
+  ) {
     if (ky0 == 0x21 && kx0 == 0x33) return (45, 37);
 
     final List<int> histS0 = List<int>.filled(49, 0);
@@ -1141,16 +1164,36 @@ class DahaoParser {
     final List<double> diffVotes = List<double>.filled(49, 0.0);
     bool hasDiffVotes = false;
 
+    final List<_R2Coord> r2X = [];
+    final List<_R2Coord> r2Y = [];
+    int xR1 = 0;
+    int yR1 = 0;
+
+    bool ring1Flipped = false;
     bool ring2Flipped = false;
     int lastYState = -1, lastYVal = -1, lastYIdx = -10;
     int lastXState = -1, lastXVal = -1, lastXIdx = -10;
     int stitchIdx = 0;
 
     for (int p = startPos; p + 2 < endPos; p += 3) {
+      final int cmd = bytes[p];
       final int b1 = bytes[p + 1];
       final int b2 = bytes[p + 2];
 
-      if (b1 >= 61 && b1 <= 109) {
+      if (endByte != null && cmd == endByte && ((b1 == ky0 && b2 == kx0) || (b1 == kx0 && b2 == ky0))) {
+        break;
+      }
+      if (cmd == 0x00 && b1 == 0x00 && b2 == 0x00) break;
+
+      int? dyR1;
+      int? yR2St;
+      int? yR2Val;
+      bool flip1 = false;
+
+      if (b1 < 61) {
+        final int curKy = ring1Flipped ? kx0 : ky0;
+        dyR1 = _mod(b1 - curKy, 61);
+      } else if (b1 <= 109) {
         final int v = b1 - 61;
         final int st = ring2Flipped ? 1 : 0;
         if (st == 0) {
@@ -1168,10 +1211,29 @@ class DahaoParser {
         lastYState = st;
         lastYVal = v;
         lastYIdx = stitchIdx;
+        yR2St = st;
+        yR2Val = v;
+        flip1 = true;
+        ring1Flipped = !ring1Flipped;
         ring2Flipped = !ring2Flipped;
+      } else if (b1 <= 192) {
+        dyR1 = _decodeRing3Coord(b1, r3A, r3B);
+        flip1 = true;
+        ring1Flipped = !ring1Flipped;
+      } else {
+        stitchIdx++;
+        continue;
       }
 
-      if (b2 >= 61 && b2 <= 109) {
+      int? dxR1;
+      int? xR2St;
+      int? xR2Val;
+      bool flip2 = false;
+
+      if (b2 < 61) {
+        final int curKx = ring1Flipped ? ky0 : kx0;
+        dxR1 = _mod(b2 - curKx, 61);
+      } else if (b2 <= 109) {
         final int v = b2 - 61;
         final int st = ring2Flipped ? 1 : 0;
         if (st == 0) {
@@ -1189,7 +1251,39 @@ class DahaoParser {
         lastXState = st;
         lastXVal = v;
         lastXIdx = stitchIdx;
+        xR2St = st;
+        xR2Val = v;
+        flip2 = true;
+        ring1Flipped = !ring1Flipped;
         ring2Flipped = !ring2Flipped;
+      } else if (b2 <= 192) {
+        dxR1 = _decodeRing3Coord(b2, r3A, r3B);
+        flip2 = true;
+        ring1Flipped = !ring1Flipped;
+      } else {
+        stitchIdx++;
+        continue;
+      }
+
+      final bool isSpecial = _isSequinOrStopPayload(flip1, flip2, dyR1 ?? 99, dxR1 ?? 99);
+      final bool isSpecialCmd = specialCmds.contains(cmd) &&
+          (!stitchSignMap.containsKey(cmd) || isSpecial) &&
+          (!jumpSignMap.containsKey(cmd) || isSpecial);
+
+      if (!isSpecialCmd) {
+        final (int, int)? s = stitchSignMap[cmd] ?? jumpSignMap[cmd];
+        if (s != null) {
+          if (dyR1 != null) {
+            yR1 += s.$2 * dyR1;
+          } else if (yR2St != null && yR2Val != null) {
+            r2Y.add(_R2Coord(s.$2, yR2St, yR2Val));
+          }
+          if (dxR1 != null) {
+            xR1 += s.$1 * dxR1;
+          } else if (xR2St != null && xR2Val != null) {
+            r2X.add(_R2Coord(s.$1, xR2St, xR2Val));
+          }
+        }
       }
 
       stitchIdx++;
@@ -1220,6 +1314,10 @@ class DahaoParser {
       return bestK;
     }
 
+    if (r2X.isEmpty && r2Y.isEmpty) {
+      return (0, 0);
+    }
+
     if (hasDiffVotes) {
       int bestDiff = 0;
       double maxVote = -1.0;
@@ -1230,28 +1328,48 @@ class DahaoParser {
         }
       }
 
-      final List<int> combined = List<int>.filled(49, 0);
-      for (int v = 0; v < 49; v++) {
-        combined[v] += histS0[v];
-        combined[_mod(v - bestDiff, 49)] += histS1[v];
+      // تقييم كل k0 (مع k1 = (k0 + bestDiff) % 49) باستخدام معيار الإغلاق عند نقطة الأصل (0, 0)
+      int bestK0 = 0;
+      double bestObj = 1e18;
+
+      for (int k0 = 0; k0 < 49; k0++) {
+        final int k1 = (k0 + bestDiff) % 49;
+        int fx = xR1;
+        for (final ev in r2X) {
+          final int k = ev.state == 0 ? k0 : k1;
+          fx += ev.sign * (61 + _mod(ev.val - k, 49));
+        }
+        int fy = yR1;
+        for (final ev in r2Y) {
+          final int k = ev.state == 0 ? k0 : k1;
+          fy += ev.sign * (61 + _mod(ev.val - k, 49));
+        }
+        final double closure = (fx.abs() + fy.abs()).toDouble();
+
+        // ترجيح ثانوي خفيف للقيم القصيرة عند تساوي الإغلاق
+        double tieBreak = 0.0;
+        for (int b = 0; b < 49; b++) {
+          if (histS0[b] > 0) {
+            final int d = _mod(b - k0, 49);
+            if (d > 30) tieBreak += histS0[b] * (d - 30) * 0.02;
+          }
+          if (histS1[b] > 0) {
+            final int d = _mod(b - k1, 49);
+            if (d > 30) tieBreak += histS1[b] * (d - 30) * 0.02;
+          }
+        }
+
+        final double obj = closure + tieBreak;
+        if (obj < bestObj) {
+          bestObj = obj;
+          bestK0 = k0;
+        }
       }
 
-      final int k2S0 = fitSingle(combined);
-      final int k2S1 = _mod(k2S0 + bestDiff, 49);
-      return (k2S0, k2S1);
+      return (bestK0, (bestK0 + bestDiff) % 49);
     }
 
     return (fitSingle(histS0), fitSingle(histS1));
-  }
-
-  /// فك إحداثي يقع في الحلقة الثالثة (غرزة طويلة 11.0 - 12.7 مم)
-  static int _decodeRing3Coord(int b, int r3A, int r3B) {
-    final int k3A = _mod(r3A - 18, 83);
-    final int k3B = _mod(r3B - 18, 83);
-    final int dA = _mod(b - 110 - k3A, 83);
-    final int dB = _mod(b - 110 - k3B, 83);
-    final int d = math.min(dA, dB);
-    return 110 + (d <= 17 ? d : 11);
   }
 
   static (List<_DahaoEvent>, int, int, int, double?, double?) _decodeDahaoUniversal(
@@ -1276,10 +1394,6 @@ class DahaoParser {
     final int r4A = ring4.$1;
     final int r4B = ring4.$2;
 
-    final ring2 = _detectRing2Keys(bytes, startPos, endPos, ky0, kx0);
-    final int k2S0 = ring2.$1;
-    final int k2S1 = ring2.$2;
-
     final Map<int, (int, int)> stitchSignMap = {
       110 + r3A: (-1, 1),
       110 + r3B: (-1, 1),
@@ -1291,21 +1405,38 @@ class DahaoParser {
       193 + r4B: (-1, -1),
     };
 
+    // الجدول الموحد الكامل للقفزات: (+,-) في الحلقة الرابعة عند +32 لأن 0xC1 = 193 أول بايت في الحلقة الرابعة
     final Map<int, (int, int)> jumpSignMap = {
       110 + (r3A + 1) % 83: (-1, 1),
       110 + (r3B + 1) % 83: (-1, 1),
-      110 + (r3A + 33) % 83: (1, -1),
-      110 + (r3B + 33) % 83: (1, -1),
       110 + (r3A + 52) % 83: (1, 1),
       110 + (r3B + 52) % 83: (1, 1),
       193 + (r4A + 1) % 63: (-1, -1),
       193 + (r4B + 1) % 63: (-1, -1),
+      193 + (r4A + 32) % 63: (1, -1),
+      193 + (r4B + 32) % 63: (1, -1),
     };
 
     final Set<int> specialCmds = {
       193 + _mod(r4A - 9, 63),
       193 + _mod(r4B - 9, 63),
     };
+
+    final ring2 = _detectRing2Keys(
+      bytes,
+      startPos,
+      endPos,
+      ky0,
+      kx0,
+      r3A,
+      r3B,
+      stitchSignMap,
+      jumpSignMap,
+      specialCmds,
+      endByte,
+    );
+    final int k2S0 = ring2.$1;
+    final int k2S1 = ring2.$2;
 
     bool ring1Flipped = false;
     bool ring2Flipped = false;
@@ -1365,7 +1496,35 @@ class DahaoParser {
         continue;
       }
 
-      if (stitchSignMap.containsKey(cmd)) {
+      final bool isSpecialPayload = _isSequinOrStopPayload(flip1, flip2, dy, dx);
+
+      // فك التصادم التام بين الترتر والغرز/القفزات عند (r4B - r4A == 9 أو 10)
+      if (specialCmds.contains(cmd) &&
+          (!stitchSignMap.containsKey(cmd) || isSpecialPayload) &&
+          (!jumpSignMap.containsKey(cmd) || isSpecialPayload)) {
+        if (dx == 0 && dy == 0) {
+          if (sawRealStitchInColor && paletteSize > 1) {
+            currentColorIdx = (currentColorIdx + 1) % paletteSize;
+            sawRealStitchInColor = false;
+          }
+          events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP', colorIndex: currentColorIdx));
+        } else {
+          sequins++;
+          final px = x.toDouble();
+          final py = -y.toDouble();
+          events.add(_DahaoEvent(px, py, 'SEQUIN', sequinCode: dx, colorIndex: currentColorIdx));
+          if (!hasBounds) {
+            minX = maxX = px;
+            minY = maxY = py;
+            hasBounds = true;
+          } else {
+            if (px < minX) minX = px;
+            if (px > maxX) maxX = px;
+            if (py < minY) minY = py;
+            if (py > maxY) maxY = py;
+          }
+        }
+      } else if (stitchSignMap.containsKey(cmd)) {
         final s = stitchSignMap[cmd]!;
         x += s.$1 * dx;
         y += s.$2 * dy;
@@ -1391,35 +1550,12 @@ class DahaoParser {
           if (py < minY) minY = py;
           if (py > maxY) maxY = py;
         }
-      } else if (jumpSignMap.containsKey(cmd) && (!specialCmds.contains(cmd) || flip1 || flip2)) {
+      } else if (jumpSignMap.containsKey(cmd)) {
         final s = jumpSignMap[cmd]!;
         x += s.$1 * dx;
         y += s.$2 * dy;
         jumps++;
         events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP', colorIndex: currentColorIdx));
-      } else if (specialCmds.contains(cmd)) {
-        if (dx == 0 && dy == 0) {
-          if (sawRealStitchInColor && paletteSize > 1) {
-            currentColorIdx = (currentColorIdx + 1) % paletteSize;
-            sawRealStitchInColor = false;
-          }
-          events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP', colorIndex: currentColorIdx));
-        } else {
-          sequins++;
-          final px = x.toDouble();
-          final py = -y.toDouble();
-          events.add(_DahaoEvent(px, py, 'SEQUIN', sequinCode: dx, colorIndex: currentColorIdx));
-          if (!hasBounds) {
-            minX = maxX = px;
-            minY = maxY = py;
-            hasBounds = true;
-          } else {
-            if (px < minX) minX = px;
-            if (px > maxX) maxX = px;
-            if (py < minY) minY = py;
-            if (py > maxY) maxY = py;
-          }
-        }
       } else if (dx == 0 && dy == 0) {
         if (sawRealStitchInColor && paletteSize > 1) {
           currentColorIdx = (currentColorIdx + 1) % paletteSize;
@@ -1455,7 +1591,6 @@ class DahaoParser {
     final double rawH = maxY - minY;
     if (!rawW.isFinite || !rawH.isFinite || rawW <= 0 || rawH <= 0) return null;
 
-    // دقة عالية جداً (2200 بكسل) مع خطوط رفيعة حادة (0.75 بكسل) لإظهار الغرز منفصلة وواضحة عند التكبير
     const double pad = 36.0;
     const double maxCanvas = 2200.0;
     final double scale = (maxCanvas - pad * 2) / math.max(rawW, rawH);
@@ -1509,13 +1644,12 @@ class DahaoParser {
     }
     flushPath();
 
-    // رسم حبات الترتر بحجم نسبي واقعي وحواف رفيعة غير مطموسة
     for (final ev in events) {
       if (ev.type == 'SEQUIN') {
         final double sx = (ev.x - minX) * scale + pad;
         final double sy = (ev.y - minY) * scale + pad;
 
-        double radiusUnits = 15.0; // ترتر 3 مم
+        double radiusUnits = 15.0;
         Color seqColor = const Color(0xFFE53935);
         if (ev.sequinCode == 1 || ev.sequinCode == 4) {
           radiusUnits = 15.0;
