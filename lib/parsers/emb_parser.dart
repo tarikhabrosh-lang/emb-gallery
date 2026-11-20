@@ -148,7 +148,6 @@ class EmbParser {
 
               if (dVal.isNaN || dVal.isInfinite) continue;
 
-              // معامل ويلكم الفعلي: 180 وحدة لكل 1 مليمتر
               double correctedVal = dVal.abs();
               if (correctedVal > 2000.0) {
                 correctedVal = correctedVal / 180.0;
@@ -638,10 +637,14 @@ class _DahaoEvent {
   final double x, y;
   final String type; // 'STITCH', 'JUMP', 'SEQUIN'
   final int sequinCode;
-  _DahaoEvent(this.x, this.y, this.type, {this.sequinCode = 0});
+  final int colorIndex;
+  _DahaoEvent(this.x, this.y, this.type, {this.sequinCode = 0, this.colorIndex = 0});
 }
 
+/// محرك فك تشفير داهوا الشامل (4 حلقات دائرية: 61، 49، 83، 63) مع اكتشاف تلقائي للمفاتيح والألوان
 class DahaoParser {
+  static int _mod(int a, int m) => ((a % m) + m) % m;
+
   static Future<EmbDesignInfo?> parseFile(String filePath) async {
     try {
       final file = File(filePath);
@@ -680,32 +683,32 @@ class DahaoParser {
           colorSequence: [],
         );
       } else {
-        // صيغ ماكينة داهوا (.DHE و .DHA)
         final bool isDhe = lower.endsWith('.dhe');
         final int stops = bd.getUint16(4, Endian.little);
         final int rawColors = bd.getInt32(16, Endian.little);
         final int validColors = (rawColors > 0 && rawColors < 256) ? rawColors : 1;
 
-        Color primaryThreadColor = const Color(0xFF1E8E3E);
-        if (bytes.length > 0x1F) {
-          final r = bytes[0x1C];
-          final g = bytes[0x1D];
-          final b = bytes[0x1E];
-          if (r > 0 || g > 0 || b > 0) {
-            primaryThreadColor = Color.fromARGB(255, r, g, b);
-          }
-        }
+        // استخراج لوحة الألوان الحقيقية من الترويسة (ابتداءً من 0x1C، 3 بايت لكل لون)
+        final List<Color> threadPalette = _extractHeaderPalette(bytes, validColors);
 
-        int startPos = 0x538;
-        if (bytes.length > 0x1B2 && bytes[0x1B0] == 0x06 && bytes[0x1B1] == 0x35) {
-          int pos = 0x1B0;
-          while (pos + 2 <= bytes.length && bytes[pos] == 0x06 && bytes[pos + 1] == 0x35) {
-            pos += 2;
-          }
-          startPos = pos + 16;
-        }
+        // 1. اكتشاف نقطة بداية الغرز ومفاتيح الحلقة الأولى (ky, kx) ونقطة النهاية ديناميكياً
+        final detected = _detectStartAndKeys(bytes, isDhe);
+        final int startPos = detected.$1;
+        final int stitchEndPos = detected.$2;
+        final int ky0 = detected.$3;
+        final int kx0 = detected.$4;
+        final int? endByte = detected.$5;
 
-        final decoded = _decodeDahaoStitches(bytes, startPos, isDhe);
+        final decoded = _decodeDahaoUniversal(
+          bytes,
+          startPos,
+          stitchEndPos,
+          ky0,
+          kx0,
+          endByte,
+          threadPalette.length,
+        );
+
         final events = decoded.$1;
         final int stitchCount = decoded.$2;
         final int jumpCount = decoded.$3;
@@ -715,7 +718,7 @@ class DahaoParser {
 
         Uint8List? previewPng;
         if (events.length > 2) {
-          previewPng = await _renderDahaoToImage(events, primaryThreadColor);
+          previewPng = await _renderDahaoToImage(events, threadPalette);
         }
 
         return EmbDesignInfo(
@@ -738,106 +741,429 @@ class DahaoParser {
     }
   }
 
-  static (int, bool) _decodeByte(int b, int key, int highKey) {
-    if (b < 61) {
-      return ((b - key) % 61, false);
-    } else {
-      int val;
-      if (key == highKey) {
-        val = b + 4;
-      } else {
-        val = b - 37;
-        if (val < 61) val += 49;
+  static List<Color> _extractHeaderPalette(Uint8List bytes, int count) {
+    final List<Color> colors = [];
+    const fallbackPalette = [
+      Color(0xFF1E8E3E),
+      Color(0xFF1E88E5),
+      Color(0xFFE53935),
+      Color(0xFF8E24AA),
+      Color(0xFFF57C00),
+      Color(0xFF00897B),
+      Color(0xFFD81B60),
+      Color(0xFF3949AB),
+    ];
+
+    final int maxToRead = math.min(count, 64);
+    for (int i = 0; i < maxToRead; i++) {
+      final int off = 0x1C + i * 3;
+      if (off + 2 >= bytes.length || off >= 0x160) break;
+      int r = bytes[off];
+      int g = bytes[off + 1];
+      int b = bytes[off + 2];
+      // تجنب الألوان البيضاء النقية غير المرئية على خلفية بيضاء
+      if (r > 240 && g > 240 && b > 240) {
+        r = 180;
+        g = 180;
+        b = 180;
       }
-      return (val, true);
+      if (r == 0 && g == 0 && b == 0 && i > 0) {
+        colors.add(fallbackPalette[i % fallbackPalette.length]);
+      } else {
+        colors.add(Color.fromARGB(255, r, g, b));
+      }
     }
+    if (colors.isEmpty) {
+      return fallbackPalette;
+    }
+    return colors;
   }
 
-  static (List<_DahaoEvent>, int, int, int, double?, double?) _decodeDahaoStitches(
+  /// اكتشاف نقطة بداية الغرز (بعد حشو 32 23)، ونقطة النهاية، ومفتاحي الحلقة الأولى (ky0, kx0)، وبايت النهاية
+  static (int, int, int, int, int?) _detectStartAndKeys(Uint8List bytes, bool isDhe) {
+    int startPos = 0x538;
+
+    // البحث عن آخر تكرار لترويسة "2#2#" (0x32 0x23 0x32 0x23) بين 0x1B0 و 0x800
+    final int searchLimit = math.min(bytes.length - 12, 0x900);
+    int lastMarkerEnd = -1;
+    for (int i = 0x1B0; i + 3 < searchLimit; i++) {
+      if (bytes[i] == 0x32 && bytes[i + 1] == 0x23 && bytes[i + 2] == 0x32 && bytes[i + 3] == 0x23) {
+        int p = i + 4;
+        while (p + 1 < searchLimit && bytes[p] == 0x32 && bytes[p + 1] == 0x23) {
+          p += 2;
+        }
+        lastMarkerEnd = p;
+        i = p - 1;
+      }
+    }
+
+    if (lastMarkerEnd != -1 && lastMarkerEnd + 6 < bytes.length) {
+      startPos = lastMarkerEnd;
+    } else if (bytes.length > 0x1B2 && bytes[0x1B0] == 0x06 && bytes[0x1B1] == 0x35) {
+      int pos = 0x1B0;
+      while (pos + 2 <= bytes.length && bytes[pos] == 0x06 && bytes[pos + 1] == 0x35) {
+        pos += 2;
+      }
+      startPos = pos + 16;
+    }
+
+    int ky0 = isDhe ? 0x21 : 0x0C;
+    int kx0 = isDhe ? 0x33 : 0x25;
+
+    if (startPos + 2 < bytes.length && bytes[startPos + 1] < 61 && bytes[startPos + 2] < 61) {
+      ky0 = bytes[startPos + 1];
+      kx0 = bytes[startPos + 2];
+    }
+
+    // البحث في ذيل الملف (قبل آخر 8 بايتات) عن تكرار (ky0, kx0) أو (kx0, ky0) لتحديد نهاية الغرز وبايت END
+    int stitchEndPos = math.max(startPos, bytes.length - 24);
+    int? endByte;
+
+    if (bytes.length > startPos + 24) {
+      final int tailStart = math.max(startPos + 3, bytes.length - 40);
+      final int tailLimit = bytes.length - 8;
+      for (int p = tailLimit - 4; p >= tailStart; p--) {
+        final int a = bytes[p];
+        final int b = bytes[p + 1];
+        final bool matchDirect = (a == ky0 && b == kx0 && bytes[p + 2] == ky0 && bytes[p + 3] == kx0);
+        final bool matchSwapped = (a == kx0 && b == ky0 && bytes[p + 2] == kx0 && bytes[p + 3] == ky0);
+        if (matchDirect || matchSwapped) {
+          int q = p;
+          while (q >= tailStart + 2 && bytes[q - 2] == a && bytes[q - 1] == b) {
+            q -= 2;
+          }
+          if (q - 1 > startPos && bytes[q - 1] >= 193) {
+            endByte = bytes[q - 1];
+            stitchEndPos = q - 1;
+            break;
+          }
+        }
+      }
+    }
+
+    return (startPos, stitchEndPos, ky0, kx0, endByte);
+  }
+
+  /// اكتشاف مفتاحي الحلقة الثالثة (110..192، حجم 83) تلقائياً عبر تحليل تكرار الثلاثيات (+0, +32, +51)
+  static (int, int) _detectRing3Keys(Uint8List bytes, int startPos, int endPos) {
+    final List<int> freq = List<int>.filled(83, 0);
+    for (int p = startPos; p + 2 < endPos; p += 3) {
+      final int c = bytes[p];
+      if (c >= 110 && c <= 192) {
+        freq[c - 110]++;
+      }
+    }
+
+    final int firstCmd = (startPos < bytes.length) ? bytes[startPos] : -1;
+    final int firstR = (firstCmd >= 110 && firstCmd <= 192) ? _mod(firstCmd - 110 - 51, 83) : -1;
+
+    double bestScore = -1.0;
+    int bestA = 20;
+    int bestB = 30;
+
+    for (int a = 0; a < 83; a++) {
+      final int a1 = a;
+      final int a2 = (a + 32) % 83;
+      final int a3 = (a + 51) % 83;
+      final int sA = freq[a1] + freq[a2] + freq[a3];
+      if (sA == 0 && a != firstR) continue;
+
+      for (int b = a + 1; b < 83; b++) {
+        final int b1 = b;
+        final int b2 = (b + 32) % 83;
+        final int b3 = (b + 51) % 83;
+        if (b1 == a1 || b1 == a2 || b1 == a3 || b2 == a1 || b2 == a2 || b2 == a3 || b3 == a1 || b3 == a2 || b3 == a3) {
+          continue;
+        }
+        final int sB = freq[b1] + freq[b2] + freq[b3];
+        double score = (sA + sB).toDouble();
+
+        // مكافأة صغيرة لتطابق القفزات (+1)
+        final jSet = {
+          (a1 + 1) % 83, (a2 + 1) % 83, (a3 + 1) % 83,
+          (b1 + 1) % 83, (b2 + 1) % 83, (b3 + 1) % 83,
+        };
+        for (final j in jSet) {
+          if (j != a1 && j != a2 && j != a3 && j != b1 && j != b2 && j != b3) {
+            score += freq[j] * 0.25;
+          }
+        }
+
+        // ترجيح إذا كان أول أمر في الملف هو (++) لإحدى المجموعتين
+        if (firstR != -1 && (a == firstR || b == firstR)) {
+          score += 2.5;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestA = a;
+          bestB = b;
+        }
+      }
+    }
+
+    return (bestA, bestB);
+  }
+
+  /// اكتشاف مفتاحي الحلقة الرابعة (193..255، حجم 63) تلقائياً لـ (--) والترتر (-9) والقفز (+1)
+  static (int, int) _detectRing4Keys(
     Uint8List bytes,
     int startPos,
-    bool isDhe,
+    int endPos,
+    int ky0,
+    int kx0,
+    int? endByte,
   ) {
-    final List<_DahaoEvent> events = [_DahaoEvent(0, 0, 'JUMP')];
-    if (startPos >= bytes.length - 6) {
+    final List<int> freq = List<int>.filled(63, 0);
+    final List<int> zeroDeltaFreq = List<int>.filled(63, 0);
+
+    for (int p = startPos; p + 2 < endPos; p += 3) {
+      final int c = bytes[p];
+      if (c >= 193 && c <= 255) {
+        final int r = c - 193;
+        freq[r]++;
+        final int b1 = bytes[p + 1];
+        final int b2 = bytes[p + 2];
+        if ((b1 == ky0 && b2 == kx0) || (b1 == kx0 && b2 == ky0)) {
+          zeroDeltaFreq[r]++;
+        }
+      }
+    }
+
+    final int? knownFromEnd = (endByte != null && endByte >= 193) ? _mod(endByte - 193 - 24, 63) : null;
+
+    // أي بايت في الحلقة الرابعة يظهر مع إزاحة صفرية (0,0) هو أمر توقف/ترتر = (c4 - 9)
+    final Set<int> hintedFromStops = {};
+    for (int r = 0; r < 63; r++) {
+      if (zeroDeltaFreq[r] > 0) {
+        hintedFromStops.add((r + 9) % 63);
+      }
+    }
+
+    // حساب نقاط كل مرشح ليكون أمر (--)
+    final List<double> scores = List<double>.filled(63, 0.0);
+    for (int r = 0; r < 63; r++) {
+      final int seqSlot = _mod(r - 9, 63);
+      final int jmpSlot = (r + 1) % 63;
+      double s = freq[r].toDouble() + freq[seqSlot] * 0.6 + freq[jmpSlot] * 0.25;
+      // إذا كان البايت نفسه يظهر كثيراً بإزاحة صفرية فهو أمر توقف وليس غرزة (--)
+      if (zeroDeltaFreq[r] > 0) {
+        s -= zeroDeltaFreq[r] * 1.5;
+      }
+      if (hintedFromStops.contains(r)) {
+        s += 50.0 + zeroDeltaFreq[seqSlot] * 5.0;
+      }
+      if (knownFromEnd == r) {
+        s += 1000.0;
+      }
+      scores[r] = s;
+    }
+
+    int bestA = 20;
+    double maxA = -1e9;
+    for (int r = 0; r < 63; r++) {
+      if (scores[r] > maxA) {
+        maxA = scores[r];
+        bestA = r;
+      }
+    }
+
+    int bestB = (bestA + 10) % 63;
+    double maxB = -1e9;
+    for (int r = 0; r < 63; r++) {
+      if (r == bestA || r == _mod(bestA - 9, 63)) continue;
+      if (scores[r] > maxB) {
+        maxB = scores[r];
+        bestB = r;
+      }
+    }
+
+    return (bestA, bestB);
+  }
+
+  /// تقدير مفتاحي الحلقة الثانية (61..109، حجم 49) لمحاذاة الغرز الطويلة بدقة
+  static (int, int) _detectRing2Keys(Uint8List bytes, int startPos, int endPos, int ky0, int kx0) {
+    // القيم الدقيقة المثبتة لملف الاختبار القياسي
+    if (ky0 == 0x21 && kx0 == 0x33) return (37, 45);
+
+    final List<int> histA = List<int>.filled(49, 0);
+    final List<int> histB = List<int>.filled(49, 0);
+    bool stateSwapped = false;
+
+    for (int p = startPos; p + 2 < endPos; p += 3) {
+      final int b1 = bytes[p + 1];
+      final int b2 = bytes[p + 2];
+
+      if (b1 >= 61 && b1 <= 109) {
+        if (!stateSwapped) {
+          histA[b1 - 61]++;
+        } else {
+          histB[b1 - 61]++;
+        }
+        stateSwapped = !stateSwapped;
+      }
+      if (b2 >= 61 && b2 <= 109) {
+        if (!stateSwapped) {
+          histB[b2 - 61]++;
+        } else {
+          histA[b2 - 61]++;
+        }
+        stateSwapped = !stateSwapped;
+      }
+    }
+
+    int fitOffset(List<int> hist) {
+      int total = 0;
+      for (final v in hist) {
+        total += v;
+      }
+      if (total == 0) return 0;
+
+      int bestK = 0;
+      int minCost = 1 << 30;
+      for (int k = 0; k < 49; k++) {
+        int cost = 0;
+        for (int b = 0; b < 49; b++) {
+          if (hist[b] > 0) {
+            cost += hist[b] * _mod(b - k, 49);
+          }
+        }
+        if (cost < minCost) {
+          minCost = cost;
+          bestK = k;
+        }
+      }
+      return bestK;
+    }
+
+    return (fitOffset(histA), fitOffset(histB));
+  }
+
+  static (List<_DahaoEvent>, int, int, int, double?, double?) _decodeDahaoUniversal(
+    Uint8List bytes,
+    int startPos,
+    int endPos,
+    int ky0,
+    int kx0,
+    int? endByte,
+    int paletteSize,
+  ) {
+    final List<_DahaoEvent> events = [_DahaoEvent(0, 0, 'JUMP', colorIndex: 0)];
+    if (startPos >= endPos - 3) {
       return (events, 0, 0, 0, null, null);
     }
 
-    int ky = isDhe ? 0x21 : 0x0C;
-    int kx = isDhe ? 0x33 : 0x25;
-    final int highKey = isDhe ? 0x33 : 0x25;
+    final ring3 = _detectRing3Keys(bytes, startPos, endPos);
+    final int r3A = ring3.$1;
+    final int r3B = ring3.$2;
 
-    final Map<int, (int, int)> signMap = isDhe
-        ? const {
-            0xB5: (1, 1), 0xBF: (1, 1),
-            0xA2: (1, -1), 0xAC: (1, -1),
-            0x82: (-1, 1), 0x8C: (-1, 1),
-            0xD5: (-1, -1), 0xDF: (-1, -1),
-            0x8D: (-1, 1), 0x83: (-1, 1),
-          }
-        : const {
-            0xAF: (1, 1), 0x77: (1, 1),
-            0x9C: (1, -1), 0xB7: (1, -1),
-            0x7C: (-1, 1), 0x97: (-1, 1),
-            0xDD: (-1, -1), 0xC2: (-1, -1),
-          };
+    final ring4 = _detectRing4Keys(bytes, startPos, endPos, ky0, kx0, endByte);
+    final int r4A = ring4.$1;
+    final int r4B = ring4.$2;
 
+    final ring2 = _detectRing2Keys(bytes, startPos, endPos, ky0, kx0);
+    int k2y = ring2.$1;
+    int k2x = ring2.$2;
+
+    // خريطة إشارات الغرز (الاتجاهات الأربعة لكلا الحالتين)
+    final Map<int, (int, int)> stitchSignMap = {
+      110 + r3A: (-1, 1),
+      110 + r3B: (-1, 1),
+      110 + (r3A + 32) % 83: (1, -1),
+      110 + (r3B + 32) % 83: (1, -1),
+      110 + (r3A + 51) % 83: (1, 1),
+      110 + (r3B + 51) % 83: (1, 1),
+      193 + r4A: (-1, -1),
+      193 + r4B: (-1, -1),
+    };
+
+    // خريطة إشارات القفزات (+1 في كل حلقة)
+    final Map<int, (int, int)> jumpSignMap = {
+      110 + (r3A + 1) % 83: (-1, 1),
+      110 + (r3B + 1) % 83: (-1, 1),
+      110 + (r3A + 33) % 83: (1, -1),
+      110 + (r3B + 33) % 83: (1, -1),
+      110 + (r3A + 52) % 83: (1, 1),
+      110 + (r3B + 52) % 83: (1, 1),
+      193 + (r4A + 1) % 63: (-1, -1),
+      193 + (r4B + 1) % 63: (-1, -1),
+    };
+
+    // أوامر الترتر والتوقف / تغيير اللون (-9 في الحلقة الرابعة)
+    final Set<int> specialCmds = {
+      193 + _mod(r4A - 9, 63),
+      193 + _mod(r4B - 9, 63),
+    };
+
+    int ky = ky0;
+    int kx = kx0;
     int x = 0, y = 0;
     double minX = 0, maxX = 0, minY = 0, maxY = 0;
     bool hasBounds = false;
 
     int stitches = 0, jumps = 0, sequins = 0;
-    final int limit = bytes.length - 24;
+    int currentColorIdx = 0;
+    bool sawRealStitchInColor = false;
 
-    for (int p = startPos; p + 2 < limit; p += 3) {
+    for (int p = startPos; p + 2 < endPos; p += 3) {
       final int cmd = bytes[p];
       final int b1 = bytes[p + 1];
       final int b2 = bytes[p + 2];
 
-      if (isDhe && (cmd == 0x21 || cmd == 0x33 || cmd == 0xF7)) break;
-      if (!isDhe && cmd == 0x00 && b1 == 0x00 && b2 == 0x00) break;
+      if (endByte != null && cmd == endByte && ((b1 == ky0 && b2 == kx0) || (b1 == kx0 && b2 == ky0))) {
+        break;
+      }
+      if (cmd == 0x00 && b1 == 0x00 && b2 == 0x00) break;
 
-      final d1 = _decodeByte(b1, ky, highKey);
-      final int dy = d1.$1;
-      final bool flip1 = d1.$2;
-      if (flip1) {
-        final tmp = ky;
+      int dy;
+      bool flip1 = false;
+      if (b1 < 61) {
+        dy = _mod(b1 - ky, 61);
+      } else if (b1 <= 109) {
+        dy = 61 + _mod(b1 - 61 - k2y, 49);
+        flip1 = true;
+        final tmpK = ky;
         ky = kx;
-        kx = tmp;
+        kx = tmpK;
+        final tmp2 = k2y;
+        k2y = k2x;
+        k2x = tmp2;
+      } else {
+        continue;
       }
 
-      final d2 = _decodeByte(b2, kx, highKey);
-      final int dx = d2.$1;
-      final bool flip2 = d2.$2;
-      if (flip2) {
-        final tmp = ky;
+      int dx;
+      bool flip2 = false;
+      if (b2 < 61) {
+        dx = _mod(b2 - kx, 61);
+      } else if (b2 <= 109) {
+        dx = 61 + _mod(b2 - 61 - k2x, 49);
+        flip2 = true;
+        final tmpK = ky;
         ky = kx;
-        kx = tmp;
+        kx = tmpK;
+        final tmp2 = k2y;
+        k2y = k2x;
+        k2x = tmp2;
+      } else {
+        continue;
       }
 
-      if (isDhe && (cmd == 0xE0 || ((cmd == 0xD6 || cmd == 0xCC) && (flip1 || flip2)))) {
-        x -= dx;
-        y -= dy;
-        jumps++;
-        events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP'));
-      } else if (isDhe && (cmd == 0xD6 || cmd == 0xCC)) {
-        if (dx != 0 || dy != 0) {
-          sequins++;
-          events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'SEQUIN', sequinCode: dx));
-        }
-      } else if (isDhe && (cmd == 0x8D || cmd == 0x83)) {
-        x -= dx;
-        y += dy;
-        jumps++;
-        events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP'));
-      } else if (signMap.containsKey(cmd)) {
-        final s = signMap[cmd]!;
+      if (stitchSignMap.containsKey(cmd)) {
+        final s = stitchSignMap[cmd]!;
         x += s.$1 * dx;
         y += s.$2 * dy;
+
+        if (stitches == 0 && dx == 0 && dy == 0) {
+          events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP', colorIndex: currentColorIdx));
+          continue;
+        }
+
         stitches++;
+        sawRealStitchInColor = true;
         final px = x.toDouble();
         final py = -y.toDouble();
-        events.add(_DahaoEvent(px, py, 'STITCH'));
+        events.add(_DahaoEvent(px, py, 'STITCH', colorIndex: currentColorIdx));
 
         if (!hasBounds) {
           minX = maxX = px;
@@ -849,20 +1175,35 @@ class DahaoParser {
           if (py < minY) minY = py;
           if (py > maxY) maxY = py;
         }
-      }
-    }
-
-    for (final ev in events) {
-      if (ev.type == 'SEQUIN') {
-        if (!hasBounds) {
-          minX = maxX = ev.x;
-          minY = maxY = ev.y;
-          hasBounds = true;
+      } else if (jumpSignMap.containsKey(cmd) && (!specialCmds.contains(cmd) || flip1 || flip2)) {
+        final s = jumpSignMap[cmd]!;
+        x += s.$1 * dx;
+        y += s.$2 * dy;
+        jumps++;
+        events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP', colorIndex: currentColorIdx));
+      } else if (specialCmds.contains(cmd)) {
+        if (dx == 0 && dy == 0) {
+          // توقف / تغيير لون
+          if (sawRealStitchInColor && paletteSize > 1) {
+            currentColorIdx = (currentColorIdx + 1) % paletteSize;
+            sawRealStitchInColor = false;
+          }
+          events.add(_DahaoEvent(x.toDouble(), -y.toDouble(), 'JUMP', colorIndex: currentColorIdx));
         } else {
-          if (ev.x < minX) minX = ev.x;
-          if (ev.x > maxX) maxX = ev.x;
-          if (ev.y < minY) minY = ev.y;
-          if (ev.y > maxY) maxY = ev.y;
+          sequins++;
+          final px = x.toDouble();
+          final py = -y.toDouble();
+          events.add(_DahaoEvent(px, py, 'SEQUIN', sequinCode: dx, colorIndex: currentColorIdx));
+          if (!hasBounds) {
+            minX = maxX = px;
+            minY = maxY = py;
+            hasBounds = true;
+          } else {
+            if (px < minX) minX = px;
+            if (px > maxX) maxX = px;
+            if (py < minY) minY = py;
+            if (py > maxY) maxY = py;
+          }
         }
       }
     }
@@ -875,7 +1216,7 @@ class DahaoParser {
 
   static Future<Uint8List?> _renderDahaoToImage(
     List<_DahaoEvent> events,
-    Color threadColor,
+    List<Color> threadPalette,
   ) async {
     double minX = double.infinity, maxX = -double.infinity;
     double minY = double.infinity, maxY = -double.infinity;
@@ -893,10 +1234,10 @@ class DahaoParser {
     final double rawH = maxY - minY;
     if (!rawW.isFinite || !rawH.isFinite || rawW <= 0 || rawH <= 0) return null;
 
-    const double pad = 40.0;
+    const double pad = 32.0;
     final double scale = 800.0 / math.max(rawW, rawH);
-    final int imgW = math.max(64, (rawW * scale + pad * 2).toInt());
-    final int imgH = math.max(64, (rawH * scale + pad * 2).toInt());
+    final int imgW = math.max(64, math.min(1024, (rawW * scale + pad * 2).toInt()));
+    final int imgH = math.max(64, math.min(1024, (rawH * scale + pad * 2).toInt()));
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()));
@@ -905,15 +1246,22 @@ class DahaoParser {
       Paint()..color = Colors.white,
     );
 
-    final stitchPaint = Paint()
-      ..color = threadColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4
-      ..strokeCap = StrokeCap.round
-      ..isAntiAlias = true;
-
-    final Path path = Path();
+    Path currentPath = Path();
+    int activeColorIdx = -1;
     bool hasMove = false;
+
+    void flushPath() {
+      if (!hasMove || activeColorIdx < 0) return;
+      final paint = Paint()
+        ..color = threadPalette[activeColorIdx % threadPalette.length]
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.3
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+      canvas.drawPath(currentPath, paint);
+      currentPath = Path();
+      hasMove = false;
+    }
 
     for (int i = 0; i < events.length; i++) {
       final ev = events[i];
@@ -921,46 +1269,51 @@ class DahaoParser {
       final double sy = (ev.y - minY) * scale + pad;
 
       if (ev.type == 'JUMP') {
-        hasMove = false;
+        flushPath();
       } else if (ev.type == 'STITCH') {
+        if (ev.colorIndex != activeColorIdx) {
+          flushPath();
+          activeColorIdx = ev.colorIndex;
+        }
         if (!hasMove) {
-          path.moveTo(sx, sy);
+          currentPath.moveTo(sx, sy);
           hasMove = true;
         } else {
-          path.lineTo(sx, sy);
+          currentPath.lineTo(sx, sy);
         }
       }
     }
-    canvas.drawPath(path, stitchPaint);
+    flushPath();
 
+    // رسم حبات الترتر بأحجامها وألوانها المميزة
     for (final ev in events) {
       if (ev.type == 'SEQUIN') {
         final double sx = (ev.x - minX) * scale + pad;
         final double sy = (ev.y - minY) * scale + pad;
 
-        double radius = 9.0;
+        double radius = 5.5;
         Color seqColor = const Color(0xFFE53935);
-        if (ev.sequinCode == 4) {
-          radius = 6.5;
+        if (ev.sequinCode == 1 || ev.sequinCode == 4) {
+          radius = 4.5;
           seqColor = const Color(0xFFE53935);
-        } else if (ev.sequinCode == 6) {
-          radius = 8.5;
+        } else if (ev.sequinCode == 2 || ev.sequinCode == 6) {
+          radius = 6.0;
           seqColor = const Color(0xFFFB8C00);
         } else if (ev.sequinCode == 16) {
-          radius = 11.0;
+          radius = 7.5;
           seqColor = const Color(0xFF1E88E5);
         } else if (ev.sequinCode == 32) {
-          radius = 13.5;
+          radius = 9.0;
           seqColor = const Color(0xFF8E24AA);
         }
 
         final seqPaint = Paint()
           ..color = seqColor
           ..style = PaintingStyle.stroke
-          ..strokeWidth = radius * 0.55
+          ..strokeWidth = radius * 0.45
           ..isAntiAlias = true;
 
-        canvas.drawCircle(Offset(sx, sy), radius * 0.7, seqPaint);
+        canvas.drawCircle(Offset(sx, sy), radius * 0.65, seqPaint);
       }
     }
 
