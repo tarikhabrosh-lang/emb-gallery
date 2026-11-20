@@ -495,7 +495,7 @@ class _DirEntry {
 }
 
 class _StitchBlock {
-  final List points;
+  final List<Offset?> points;
   _StitchBlock(this.points);
 }
 
@@ -546,9 +546,10 @@ class DstParser {
 
   static Future<Uint8List?> _renderDstToImage(Uint8List bytes) async {
     int x = 0, y = 0;
-    double minX = 0, maxX = 0, minY = 0, maxY = 0;
-    List points = [];
-    List colorBlocks = [];
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    List<Offset?> points = [];
+    List<_StitchBlock> colorBlocks = [];
     for (int i = 512; i < bytes.length - 2; i += 3) {
       int b1 = bytes[i], b2 = bytes[i + 1], b3 = bytes[i + 2];
       if (b1 == 0x00 && b2 == 0x00 && b3 == 0xF3) break;
@@ -579,10 +580,14 @@ class DstParser {
       bool isStop = (b3 & 0x40) != 0;
       bool isJump = (b3 & 0x80) != 0;
       if (isStop && points.isNotEmpty) {
-        colorBlocks.add(_StitchBlock(List.from(points)));
+        colorBlocks.add(_StitchBlock(List<Offset?>.from(points)));
         points.clear();
       }
-      if (!isJump) {
+      if (isJump) {
+        if (points.isNotEmpty && points.last != null) {
+          points.add(null);
+        }
+      } else {
         points.add(Offset(px, py));
         if (px > maxX) maxX = px;
         if (px < minX) minX = px;
@@ -592,11 +597,21 @@ class DstParser {
     }
     if (points.isNotEmpty) colorBlocks.add(_StitchBlock(points));
     double width = maxX - minX, height = maxY - minY;
-    if (width <= 0 || height <= 0) return null;
-    double scale = 800.0 / (width > height ? width : height);
+    if (!width.isFinite || !height.isFinite || width <= 0 || height <= 0) return null;
+
+    // دقة عالية جداً (2200 بكسل) مع خطوط رفيعة حادة (0.75 بكسل) تمنع الطمس والتشويش عند التكبير
+    const double pad = 36.0;
+    const double maxCanvas = 2200.0;
+    final double scale = (maxCanvas - pad * 2) / math.max(width, height);
+    final int imgW = math.max(64, (width * scale + pad * 2).ceil());
+    final int imgH = math.max(64, (height * scale + pad * 2).ceil());
+
     final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, width * scale, height * scale));
-    canvas.drawRect(Rect.fromLTWH(0, 0, width * scale, height * scale), Paint()..color = Colors.white);
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()));
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()),
+      Paint()..color = Colors.white,
+    );
     final palette = [
       const Color(0xFF1E88E5),
       const Color(0xFFE53935),
@@ -613,22 +628,35 @@ class DstParser {
       final paint = Paint()
         ..color = palette[c % palette.length]
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2
+        ..strokeWidth = 0.75
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
       final path = Path();
-      final List block = colorBlocks[c].points;
-      if (block.isEmpty) continue;
-      final Offset firstPt = block[0];
-      path.moveTo((firstPt.dx - minX) * scale, (firstPt.dy - minY) * scale);
-      for (int i = 1; i < block.length; i++) {
-        final Offset pt = block[i];
-        path.lineTo((pt.dx - minX) * scale, (pt.dy - minY) * scale);
+      final List<Offset?> block = colorBlocks[c].points;
+      bool hasMove = false;
+      for (int i = 0; i < block.length; i++) {
+        final Offset? pt = block[i];
+        if (pt == null) {
+          hasMove = false;
+          continue;
+        }
+        final double sx = (pt.dx - minX) * scale + pad;
+        final double sy = (pt.dy - minY) * scale + pad;
+        if (!hasMove) {
+          path.moveTo(sx, sy);
+          hasMove = true;
+        } else {
+          path.lineTo(sx, sy);
+        }
       }
       canvas.drawPath(path, paint);
     }
     final picture = recorder.endRecording();
-    final img = await picture.toImage((width * scale).toInt(), (height * scale).toInt());
+    final img = await picture.toImage(imgW, imgH);
     final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    img.dispose();
+    picture.dispose();
     return byteData?.buffer.asUint8List();
   }
 }
@@ -641,7 +669,7 @@ class _DahaoEvent {
   _DahaoEvent(this.x, this.y, this.type, {this.sequinCode = 0, this.colorIndex = 0});
 }
 
-/// محرك فك تشفير داهوا الشامل (الإصدار الثاني المصحّح بالكامل: 4 حلقات دائرية 61، 49، 83، 63)
+/// محرك فك تشفير داهوا الشامل (الإصدار الثالث: فصل كامل بين حالة الحلقة 1 وحالة الحلقة 2 + دعم غرز Ring 3 + رسم فائق الدقة بخطوط رفيعة)
 class DahaoParser {
   static int _mod(int a, int m) => ((a % m) + m) % m;
 
@@ -690,7 +718,6 @@ class DahaoParser {
 
         final List<Color> threadPalette = _extractHeaderPalette(bytes, validColors);
 
-        // 1. اكتشاف نقطة بداية الغرز بدقة (حتى لو احتوى بلوك الـ 16 بايت على بيانات في نهايته)
         final detected = _detectStartAndKeys(bytes, isDhe);
         final int startPos = detected.$1;
         final int stitchEndPos = detected.$2;
@@ -779,7 +806,6 @@ class DahaoParser {
 
   /// اكتشاف نقطة البداية والنهاية ومفتاحي الحلقة الأولى (ky0, kx0) بالربط بين ذيل الملف وبداية بلوك 2#
   static (int, int, int, int, int?) _detectStartAndKeys(Uint8List bytes, bool isDhe) {
-    // 1. فحص ذيل الملف أولاً لاستخراج زوج المفاتيح (tailA, tailB) وبايت END بدقة 100%
     int stitchEndPos = math.max(0, bytes.length - 24);
     int? endByte;
     int? tailA;
@@ -807,7 +833,6 @@ class DahaoParser {
       }
     }
 
-    // 2. إيجاد بداية بلوك الترويسة "2#" (0x32 0x23) بين 0x1B0 و 0x900
     final int searchLimit = math.min(bytes.length - 18, 0x900);
     int firstMarker = -1;
     int lastMarkerEnd = -1;
@@ -827,7 +852,6 @@ class DahaoParser {
     int ky0 = isDhe ? 0x21 : 0x0C;
     int kx0 = isDhe ? 0x33 : 0x25;
 
-    // 3. تحديد نقطة البداية الدقيقة بعد بلوك 2# (يبحث ضمن 48 بايت عن أول غرزة صفرية تطابق مفاتيح الذيل)
     final int winStart = firstMarker != -1 ? math.max(0x1B0, firstMarker - 8) : 0x1B0;
     final int winEnd = math.min(
       bytes.length - 9,
@@ -837,7 +861,6 @@ class DahaoParser {
     bool foundExact = false;
 
     if (tailA != null && tailB != null) {
-      // أولاً: البحث عن غرزتين صفريتين متتاليتين تطابقان (tailA, tailB) أو (tailB, tailA)
       for (int p = winStart; p + 5 < winEnd; p++) {
         final int c0 = bytes[p];
         final int b1 = bytes[p + 1];
@@ -854,7 +877,6 @@ class DahaoParser {
           break;
         }
       }
-      // ثانياً: البحث عن غرزة صفرية واحدة مطابقة لمفاتيح الذيل مباشرة بعد lastMarkerEnd أو firstMarker + 16
       if (!foundExact) {
         for (int p = (lastMarkerEnd != -1 ? lastMarkerEnd : winStart); p + 2 < winEnd; p++) {
           final int c0 = bytes[p];
@@ -872,7 +894,6 @@ class DahaoParser {
       }
     }
 
-    // ثالثاً: في حال عدم وجود ذيل قياسي (مثل بعض ملفات DHA)، البحث عن غرزتين صفريتين متطابقتين
     if (!foundExact && firstMarker != -1) {
       for (int p = firstMarker + 2; p + 5 < winEnd; p++) {
         final int c0 = bytes[p];
@@ -918,14 +939,14 @@ class DahaoParser {
   static (int, int) _detectRing3Keys(Uint8List bytes, int startPos, int endPos, int ky0, int kx0) {
     final List<int> freq = List<int>.filled(83, 0);
     final List<int> zeroFreq = List<int>.filled(83, 0);
-    bool stateFlipped = false;
+    bool ring1Flipped = false;
 
     for (int p = startPos; p + 2 < endPos; p += 3) {
       final int c = bytes[p];
       final int b1 = bytes[p + 1];
       final int b2 = bytes[p + 2];
-      final int curKy = stateFlipped ? kx0 : ky0;
-      final int curKx = stateFlipped ? ky0 : kx0;
+      final int curKy = ring1Flipped ? kx0 : ky0;
+      final int curKx = ring1Flipped ? ky0 : kx0;
 
       if (c >= 110 && c <= 192) {
         final int r = c - 110;
@@ -936,8 +957,8 @@ class DahaoParser {
         }
       }
 
-      if (b1 >= 61 && b1 <= 109) stateFlipped = !stateFlipped;
-      if (b2 >= 61 && b2 <= 109) stateFlipped = !stateFlipped;
+      if (b1 >= 61 && b1 <= 192) ring1Flipped = !ring1Flipped;
+      if (b2 >= 61 && b2 <= 192) ring1Flipped = !ring1Flipped;
     }
 
     final int firstCmd = (startPos < bytes.length) ? bytes[startPos] : -1;
@@ -974,7 +995,6 @@ class DahaoParser {
           }
         }
 
-        // معاقبة أوامر تغيير اللون الصفرية الصافية داخل الحلقة الثالثة
         for (final slot in [a1, a2, a3, b1, b2, b3]) {
           if (zeroFreq[slot] > 2 && freq[slot] == 0) {
             score -= 50.0;
@@ -996,7 +1016,7 @@ class DahaoParser {
     return (bestA, bestB);
   }
 
-  /// اكتشاف مفتاحي الحلقة الرابعة (193..255، حجم 63) مع فصل كامل بين غرز (--) وأوامر الترتر/التوقف (-9)
+  /// اكتشاف مفتاحي الحلقة الرابعة (193..255، حجم 63) مع تتبّع دقيق لحالة الحلقة 1 عبر غرز Ring 3
   static (int, int) _detectRing4Keys(
     Uint8List bytes,
     int startPos,
@@ -1010,24 +1030,24 @@ class DahaoParser {
     final List<int> seqCnt = List<int>.filled(63, 0);
     final List<int> jumpCnt = List<int>.filled(63, 0);
 
-    bool stateFlipped = false;
+    bool ring1Flipped = false;
 
     for (int p = startPos; p + 2 < endPos; p += 3) {
       final int c = bytes[p];
       final int b1 = bytes[p + 1];
       final int b2 = bytes[p + 2];
 
-      final int ky = stateFlipped ? kx0 : ky0;
-      int kx = stateFlipped ? ky0 : kx0;
+      final int ky = ring1Flipped ? kx0 : ky0;
+      int kx = ring1Flipped ? ky0 : kx0;
 
-      final bool f1 = b1 >= 61 && b1 <= 109;
+      final bool f1 = b1 >= 61 && b1 <= 192;
       if (f1) {
-        stateFlipped = !stateFlipped;
-        kx = stateFlipped ? ky0 : kx0;
+        ring1Flipped = !ring1Flipped;
+        kx = ring1Flipped ? ky0 : kx0;
       }
-      final bool f2 = b2 >= 61 && b2 <= 109;
+      final bool f2 = b2 >= 61 && b2 <= 192;
       if (f2) {
-        stateFlipped = !stateFlipped;
+        ring1Flipped = !ring1Flipped;
       }
 
       if (c >= 193 && c <= 255) {
@@ -1051,21 +1071,16 @@ class DahaoParser {
 
     final int? knownFromEnd = (endByte != null && endByte >= 193) ? _mod(endByte - 193 - 24, 63) : null;
 
-    // تحديد البايتات التي سلوكها ترتر/توقف نقي (لا يمكن أن تكون غرزة --)
     bool isPureSpecial(int r) {
       final int sp = zeroCnt[r] + seqCnt[r];
       return sp >= 3 && sp > stitchCnt[r] * 4;
     }
 
-    // تقييم كل زوج (a, b) معاً لضمان عدم سرقة أمر الترتر لمكان المفتاح الثاني
     double bestPairScore = -1e18;
     int bestA = knownFromEnd ?? 20;
     int bestB = (bestA + 10) % 63;
 
     for (int a = 0; a < 63; a++) {
-      if (knownFromEnd != null && a != knownFromEnd) {
-        // نسمح بـ a أو b أن يكون knownFromEnd
-      }
       final int seqA = _mod(a - 9, 63);
       final int jmpA = (a + 1) % 63;
       final int activityA = stitchCnt[a] + zeroCnt[seqA] + seqCnt[seqA] + jumpCnt[jmpA];
@@ -1083,16 +1098,13 @@ class DahaoParser {
           score += 100000.0;
         }
 
-        // نقاط غرز الاتجاه (--)
         score += (stitchCnt[a] + stitchCnt[b]) * 4.0;
         score += (jumpCnt[a] + jumpCnt[b]) * 0.8;
 
-        // معاقبة قوية إذا كان a أو b سلوكه توقف/ترتر نقي
         if (isPureSpecial(a)) score -= 5000.0;
         if (isPureSpecial(b)) score -= 5000.0;
         score -= (zeroCnt[a] + zeroCnt[b]) * 20.0;
 
-        // مكافأة قوية لمطابقة أوامر التوقف والترتر عند (a - 9) و (b - 9)
         if (seqA != b) {
           score += zeroCnt[seqA] * 30.0 + seqCnt[seqA] * 3.5;
           if (!isPureSpecial(seqA) && stitchCnt[seqA] > 10 && seqA != jmpB) {
@@ -1106,7 +1118,6 @@ class DahaoParser {
           }
         }
 
-        // مكافأة للقفزات (+1)
         if (jmpA != b) score += jumpCnt[jmpA] * 1.5;
         if (jmpB != a) score += jumpCnt[jmpB] * 1.5;
 
@@ -1121,9 +1132,8 @@ class DahaoParser {
     return (bestA, bestB);
   }
 
-  /// اكتشاف مفتاحي الحلقة الثانية (61..109، حجم 49) للحالتين State0 و State1 بدقة 0.1 مم
+  /// اكتشاف مفتاحي الحلقة الثانية (61..109، حجم 49) — حالتها المستقلة تنقلب فقط على بايتات الحلقة 2
   static (int, int) _detectRing2Keys(Uint8List bytes, int startPos, int endPos, int ky0, int kx0) {
-    // القيم المثبتة لملف الاختبار القياسي 20.DHE (State0=45, State1=37)
     if (ky0 == 0x21 && kx0 == 0x33) return (45, 37);
 
     final List<int> histS0 = List<int>.filled(49, 0);
@@ -1131,7 +1141,7 @@ class DahaoParser {
     final List<double> diffVotes = List<double>.filled(49, 0.0);
     bool hasDiffVotes = false;
 
-    bool stateFlipped = false;
+    bool ring2Flipped = false;
     int lastYState = -1, lastYVal = -1, lastYIdx = -10;
     int lastXState = -1, lastXVal = -1, lastXIdx = -10;
     int stitchIdx = 0;
@@ -1142,7 +1152,7 @@ class DahaoParser {
 
       if (b1 >= 61 && b1 <= 109) {
         final int v = b1 - 61;
-        final int st = stateFlipped ? 1 : 0;
+        final int st = ring2Flipped ? 1 : 0;
         if (st == 0) {
           histS0[v]++;
         } else {
@@ -1158,12 +1168,12 @@ class DahaoParser {
         lastYState = st;
         lastYVal = v;
         lastYIdx = stitchIdx;
-        stateFlipped = !stateFlipped;
+        ring2Flipped = !ring2Flipped;
       }
 
       if (b2 >= 61 && b2 <= 109) {
         final int v = b2 - 61;
-        final int st = stateFlipped ? 1 : 0;
+        final int st = ring2Flipped ? 1 : 0;
         if (st == 0) {
           histS0[v]++;
         } else {
@@ -1179,7 +1189,7 @@ class DahaoParser {
         lastXState = st;
         lastXVal = v;
         lastXIdx = stitchIdx;
-        stateFlipped = !stateFlipped;
+        ring2Flipped = !ring2Flipped;
       }
 
       stitchIdx++;
@@ -1232,6 +1242,16 @@ class DahaoParser {
     }
 
     return (fitSingle(histS0), fitSingle(histS1));
+  }
+
+  /// فك إحداثي يقع في الحلقة الثالثة (غرزة طويلة 11.0 - 12.7 مم)
+  static int _decodeRing3Coord(int b, int r3A, int r3B) {
+    final int k3A = _mod(r3A - 18, 83);
+    final int k3B = _mod(r3B - 18, 83);
+    final int dA = _mod(b - 110 - k3A, 83);
+    final int dB = _mod(b - 110 - k3B, 83);
+    final int d = math.min(dA, dB);
+    return 110 + (d <= 17 ? d : 11);
   }
 
   static (List<_DahaoEvent>, int, int, int, double?, double?) _decodeDahaoUniversal(
@@ -1287,7 +1307,8 @@ class DahaoParser {
       193 + _mod(r4B - 9, 63),
     };
 
-    bool stateFlipped = false;
+    bool ring1Flipped = false;
+    bool ring2Flipped = false;
     int x = 0, y = 0;
     double minX = 0, maxX = 0, minY = 0, maxY = 0;
     bool hasBounds = false;
@@ -1309,13 +1330,18 @@ class DahaoParser {
       int dy;
       bool flip1 = false;
       if (b1 < 61) {
-        final int curKy = stateFlipped ? kx0 : ky0;
+        final int curKy = ring1Flipped ? kx0 : ky0;
         dy = _mod(b1 - curKy, 61);
       } else if (b1 <= 109) {
-        final int curK2 = stateFlipped ? k2S1 : k2S0;
+        final int curK2 = ring2Flipped ? k2S1 : k2S0;
         dy = 61 + _mod(b1 - 61 - curK2, 49);
         flip1 = true;
-        stateFlipped = !stateFlipped;
+        ring1Flipped = !ring1Flipped;
+        ring2Flipped = !ring2Flipped;
+      } else if (b1 <= 192) {
+        dy = _decodeRing3Coord(b1, r3A, r3B);
+        flip1 = true;
+        ring1Flipped = !ring1Flipped;
       } else {
         continue;
       }
@@ -1323,13 +1349,18 @@ class DahaoParser {
       int dx;
       bool flip2 = false;
       if (b2 < 61) {
-        final int curKx = stateFlipped ? ky0 : kx0;
+        final int curKx = ring1Flipped ? ky0 : kx0;
         dx = _mod(b2 - curKx, 61);
       } else if (b2 <= 109) {
-        final int curK2 = stateFlipped ? k2S1 : k2S0;
+        final int curK2 = ring2Flipped ? k2S1 : k2S0;
         dx = 61 + _mod(b2 - 61 - curK2, 49);
         flip2 = true;
-        stateFlipped = !stateFlipped;
+        ring1Flipped = !ring1Flipped;
+        ring2Flipped = !ring2Flipped;
+      } else if (b2 <= 192) {
+        dx = _decodeRing3Coord(b2, r3A, r3B);
+        flip2 = true;
+        ring1Flipped = !ring1Flipped;
       } else {
         continue;
       }
@@ -1390,7 +1421,6 @@ class DahaoParser {
           }
         }
       } else if (dx == 0 && dy == 0) {
-        // أوامر تغيير اللون الإضافية في الحلقة الثالثة مثل 0x6F / 0x77 / 0x80 / 0x76
         if (sawRealStitchInColor && paletteSize > 1) {
           currentColorIdx = (currentColorIdx + 1) % paletteSize;
           sawRealStitchInColor = false;
@@ -1425,10 +1455,12 @@ class DahaoParser {
     final double rawH = maxY - minY;
     if (!rawW.isFinite || !rawH.isFinite || rawW <= 0 || rawH <= 0) return null;
 
-    const double pad = 32.0;
-    final double scale = 800.0 / math.max(rawW, rawH);
-    final int imgW = math.max(64, math.min(1024, (rawW * scale + pad * 2).toInt()));
-    final int imgH = math.max(64, math.min(1024, (rawH * scale + pad * 2).toInt()));
+    // دقة عالية جداً (2200 بكسل) مع خطوط رفيعة حادة (0.75 بكسل) لإظهار الغرز منفصلة وواضحة عند التكبير
+    const double pad = 36.0;
+    const double maxCanvas = 2200.0;
+    final double scale = (maxCanvas - pad * 2) / math.max(rawW, rawH);
+    final int imgW = math.max(64, (rawW * scale + pad * 2).ceil());
+    final int imgH = math.max(64, (rawH * scale + pad * 2).ceil());
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()));
@@ -1446,8 +1478,9 @@ class DahaoParser {
       final paint = Paint()
         ..color = threadPalette[activeColorIdx % threadPalette.length]
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.3
+        ..strokeWidth = 0.75
         ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
       canvas.drawPath(currentPath, paint);
       currentPath = Path();
@@ -1476,40 +1509,44 @@ class DahaoParser {
     }
     flushPath();
 
+    // رسم حبات الترتر بحجم نسبي واقعي وحواف رفيعة غير مطموسة
     for (final ev in events) {
       if (ev.type == 'SEQUIN') {
         final double sx = (ev.x - minX) * scale + pad;
         final double sy = (ev.y - minY) * scale + pad;
 
-        double radius = 5.5;
+        double radiusUnits = 15.0; // ترتر 3 مم
         Color seqColor = const Color(0xFFE53935);
         if (ev.sequinCode == 1 || ev.sequinCode == 4) {
-          radius = 4.5;
+          radiusUnits = 15.0;
           seqColor = const Color(0xFFE53935);
         } else if (ev.sequinCode == 2 || ev.sequinCode == 6) {
-          radius = 6.0;
+          radiusUnits = 22.0;
           seqColor = const Color(0xFFFB8C00);
         } else if (ev.sequinCode == 16) {
-          radius = 7.5;
+          radiusUnits = 28.0;
           seqColor = const Color(0xFF1E88E5);
         } else if (ev.sequinCode == 32) {
-          radius = 9.0;
+          radiusUnits = 35.0;
           seqColor = const Color(0xFF8E24AA);
         }
 
+        final double radius = (radiusUnits * scale).clamp(2.5, 18.0);
         final seqPaint = Paint()
           ..color = seqColor
           ..style = PaintingStyle.stroke
-          ..strokeWidth = radius * 0.45
+          ..strokeWidth = (radius * 0.25).clamp(0.7, 2.2)
           ..isAntiAlias = true;
 
-        canvas.drawCircle(Offset(sx, sy), radius * 0.65, seqPaint);
+        canvas.drawCircle(Offset(sx, sy), radius, seqPaint);
       }
     }
 
     final picture = recorder.endRecording();
     final img = await picture.toImage(imgW, imgH);
     final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    img.dispose();
+    picture.dispose();
     return byteData?.buffer.asUint8List();
   }
 
