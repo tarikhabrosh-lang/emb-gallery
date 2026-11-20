@@ -42,11 +42,11 @@ int compareNatural(String a, String b) {
 Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
   final lower = path.toLowerCase();
   if (lower.endsWith('.dst')) {
-    return await DstParser.parseFile(path);
+    return await DstParser.parseFile(path, maxCanvas: 640.0);
   } else if (lower.endsWith('.emb')) {
     return await EmbParser.parseFile(path);
   } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
-    return await DahaoParser.parseFile(path);
+    return await DahaoParser.parseFile(path, maxCanvas: 640.0);
   } else {
     final name = path.split(Platform.pathSeparator).last;
     return EmbDesignInfo(
@@ -70,7 +70,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v2');
+    final dir = Directory('${supportDir.path}/design_cache_v3');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -127,6 +127,7 @@ class DesignCacheManager {
               stopsCount: meta['stopsCount'] ?? 0,
               jumpsCount: meta['jumpsCount'] ?? 0,
               sequinsCount: meta['sequinsCount'] ?? 0,
+              beadsCount: meta['beadsCount'] ?? 0,
               trimsCount: meta['trimsCount'] ?? 0,
               machineType: meta['machineType'] ?? 'Embroidery',
               colorSequence: [],
@@ -156,6 +157,7 @@ class DesignCacheManager {
             'stopsCount': parsed.stopsCount,
             'jumpsCount': parsed.jumpsCount,
             'sequinsCount': parsed.sequinsCount,
+            'beadsCount': parsed.beadsCount,
             'trimsCount': parsed.trimsCount,
             'machineType': parsed.machineType,
             'widthMm': parsed.widthMm,
@@ -185,7 +187,7 @@ String? formatDimensionsCm(double? widthMm, double? heightMm, {bool includeMm = 
 }
 
 class LicenseManager {
-  static Future<Map<String, dynamic>> checkLicense() async {
+  static Future> checkLicense() async {
     try {
       final dir = await getApplicationSupportDirectory();
       final file = File('${dir.path}/tarik_license.txt');
@@ -1558,6 +1560,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                               if (shortCmText != null) _StatBadge(label: tr('المقاس (سم)', 'Size (cm)'), value: shortCmText, color: Colors.lightGreenAccent),
                               _StatBadge(label: tr('الألوان', 'Colors'), value: '${d.colorCount}', color: const Color(0xFFD4AF37)),
                               if (d.sequinsCount > 0) _StatBadge(label: tr('الترتر', 'Sequins'), value: numFmt.format(d.sequinsCount), color: Colors.pinkAccent),
+                              if (d.beadsCount > 0) _StatBadge(label: tr('الخرز', 'Beads'), value: numFmt.format(d.beadsCount), color: const Color(0xFFFFCA28)),
                               _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
                             ],
                           ),
@@ -1588,6 +1591,8 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   Color _canvasBg = Colors.white;
   bool _enhanceClarity = true;
   double _currentScale = 1.0;
+  Uint8List? _hdBytes;
+  bool _loadingHd = false;
 
   @override
   void initState() {
@@ -1596,6 +1601,37 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
       final scale = _transformController.value.getMaxScaleOnAxis();
       if ((scale - _currentScale).abs() > 0.05) setState(() => _currentScale = scale);
     });
+    _loadHdIfSupported();
+  }
+
+  @override
+  void dispose() {
+    _transformController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadHdIfSupported() async {
+    final lower = widget.design.filePath.toLowerCase();
+    final isDst = lower.endsWith('.dst');
+    final isDahao = lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe');
+    if (!isDst && !isDahao) return;
+
+    if (mounted) setState(() => _loadingHd = true);
+    Uint8List? hd;
+    try {
+      if (isDst) {
+        hd = await DstParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
+      } else {
+        hd = await DahaoParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
+      }
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() {
+        if (hd != null && hd.isNotEmpty) _hdBytes = hd;
+        _loadingHd = false;
+      });
+    }
   }
 
   void _handleDoubleTap() {
@@ -1612,8 +1648,9 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   @override
   Widget build(BuildContext context) {
     final d = widget.design;
+    final displayBytes = _hdBytes ?? d.previewJpeg!;
     final imageWidget = Image.memory(
-      d.previewJpeg!,
+      displayBytes,
       fit: BoxFit.contain,
       filterQuality: FilterQuality.high,
       isAntiAlias: true,
@@ -1626,6 +1663,17 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
         foregroundColor: Colors.white,
         title: Directionality(textDirection: TextDirection.ltr, child: Text(d.fileName, style: const TextStyle(fontSize: 14))),
         actions: [
+          if (_loadingHd)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 10),
+              child: Center(
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)),
+                ),
+              ),
+            ),
           IconButton(onPressed: () => _transformController.value = Matrix4.identity(), icon: const Icon(Icons.fit_screen)),
         ],
       ),
