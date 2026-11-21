@@ -1364,19 +1364,108 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
     Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenDesignViewer(design: widget.design)));
   }
 
-  Future<void> _exportAndShareDst() async {
+  Future<void> _showFormatPickerAndExport({required bool shareAfter}) async {
     if (_isExportingDst) return;
+    final currentExt = widget.design.filePath.split('.').last.toUpperCase();
+    final formats = UniversalExporter.supportedFormats
+        .where((f) => f['ext'] != currentExt)
+        .toList();
+    final listToShow = formats.isNotEmpty ? formats : UniversalExporter.supportedFormats;
+
+    final String? chosenExt = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF18202E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4)),
+              ),
+              Text(
+                shareAfter
+                    ? tr('اختر الصيغة للتصدير والمشاركة', 'Choose format to Export & Share')
+                    : tr('اختر الصيغة للتحويل والحفظ', 'Choose format to Convert & Save'),
+                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const SizedBox(height: 12),
+              ...listToShow.map((fmt) {
+                final ext = fmt['ext']!;
+                final label = fmt['name']!;
+                return ListTile(
+                  leading: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD4AF37).withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '.$ext',
+                      style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  title: Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                  ),
+                  trailing: Icon(
+                    shareAfter ? Icons.share : Icons.save_alt,
+                    color: Colors.white60,
+                    size: 20,
+                  ),
+                  onTap: () => Navigator.pop(ctx, ext),
+                );
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (chosenExt == null || !mounted) return;
     setState(() => _isExportingDst = true);
     try {
-      final tempDir = await getTemporaryDirectory();
       final baseName = widget.design.fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
-      final outPath = '${tempDir.path}/$baseName.DST';
-      final resultPath = await DstExporter.exportToDstFile(widget.design.filePath, outPath);
+      String outPath;
+      if (shareAfter) {
+        final tempDir = await getTemporaryDirectory();
+        outPath = '${tempDir.path}/$baseName.$chosenExt';
+      } else {
+        final parentDir = File(widget.design.filePath).parent.path;
+        outPath = '$parentDir/$baseName.$chosenExt';
+      }
+
+      String? resultPath = await UniversalExporter.exportToFormat(widget.design.filePath, outPath, chosenExt);
+      if (resultPath == null && !shareAfter) {
+        // احتياطياً الحفظ في مجلد Download إذا لم يسمح المجلد الأصلي بالكتابة
+        final fallbackPath = '/storage/emulated/0/Download/$baseName.$chosenExt';
+        resultPath = await UniversalExporter.exportToFormat(widget.design.filePath, fallbackPath, chosenExt);
+      }
+
       if (resultPath != null && await File(resultPath).exists()) {
-        await Share.shareXFiles([XFile(resultPath)], text: '$baseName.DST');
+        if (shareAfter) {
+          await Share.shareXFiles([XFile(resultPath)], text: '$baseName.$chosenExt');
+        } else if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${tr('تم الحفظ بنجاح في:', 'Saved successfully to:')}
+$resultPath'),
+              backgroundColor: const Color(0xFF2E7D32),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(tr('تعذر تصدير هذا الملف إلى DST', 'Failed to export to DST'))),
+          SnackBar(content: Text(tr('تعذر التحويل إلى هذه الصيغة', 'Failed to convert to this format'))),
         );
       }
     } catch (e) {
@@ -1593,32 +1682,55 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                               _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
                             ],
                           ),
-                          if (DstExporter.canExportToDst(d.filePath)) ...[
+                          if (UniversalExporter.canExport(d.filePath)) ...[
                             const SizedBox(height: 14),
-                            SizedBox(
-                              width: double.infinity,
-                              child: ElevatedButton.icon(
-                                onPressed: _isExportingDst ? null : _exportAndShareDst,
-                                icon: _isExportingDst
-                                    ? const SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
-                                      )
-                                    : const Icon(Icons.file_download_outlined, size: 20),
-                                label: Text(
-                                  _isExportingDst
-                                      ? tr('جاري التحويل إلى DST...', 'Converting to DST...')
-                                      : tr('تصدير ومشاركة بصيغة DST', 'Export & Share as DST'),
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: _isExportingDst ? null : () => _showFormatPickerAndExport(shareAfter: false),
+                                    icon: _isExportingDst
+                                        ? const SizedBox(
+                                            width: 15,
+                                            height: 15,
+                                            child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)),
+                                          )
+                                        : const Icon(Icons.save_alt, size: 18, color: Color(0xFFD4AF37)),
+                                    label: Text(
+                                      tr('تصدير وحفظ', 'Export Only'),
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFFD4AF37)),
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      side: const BorderSide(color: Color(0xFFD4AF37), width: 1.3),
+                                      padding: const EdgeInsets.symmetric(vertical: 11),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    ),
+                                  ),
                                 ),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFFD4AF37),
-                                  foregroundColor: Colors.black,
-                                  padding: const EdgeInsets.symmetric(vertical: 11),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: ElevatedButton.icon(
+                                    onPressed: _isExportingDst ? null : () => _showFormatPickerAndExport(shareAfter: true),
+                                    icon: _isExportingDst
+                                        ? const SizedBox(
+                                            width: 15,
+                                            height: 15,
+                                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                                          )
+                                        : const Icon(Icons.ios_share, size: 18),
+                                    label: Text(
+                                      tr('تصدير ومشاركة', 'Export & Share'),
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFFD4AF37),
+                                      foregroundColor: Colors.black,
+                                      padding: const EdgeInsets.symmetric(vertical: 11),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    ),
+                                  ),
                                 ),
-                              ),
+                              ],
                             ),
                           ],
                         ],
@@ -1647,6 +1759,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   TapDownDetails? _doubleTapDetails;
   Color _canvasBg = Colors.white;
   bool _enhanceClarity = true;
+  bool _is3D = false;
   double _currentScale = 1.0;
   Uint8List? _hdBytes;
   bool _loadingHd = false;
@@ -1678,11 +1791,11 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
     Uint8List? hd;
     try {
       if (isDst) {
-        hd = await DstParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
+        hd = await DstParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
       } else if (isDahao) {
-        hd = await DahaoParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
+        hd = await DahaoParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
       } else {
-        hd = await UniversalFormatParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
+        hd = await UniversalFormatParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
       }
     } catch (_) {}
 
@@ -1787,16 +1900,46 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                       _BgColorDot(color: Colors.black, isSelected: _canvasBg == Colors.black, onTap: () => setState(() => _canvasBg = Colors.black)),
                     ],
                   ),
-                  TextButton.icon(
-                    onPressed: () => setState(() => _enhanceClarity = !_enhanceClarity),
-                    style: TextButton.styleFrom(
-                      backgroundColor: _enhanceClarity ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
-                    ),
-                    icon: Icon(Icons.auto_fix_high, size: 15, color: _enhanceClarity ? const Color(0xFFD4AF37) : Colors.white60),
-                    label: Text(
-                      tr('وضوح عالٍ', 'HD Clarity'),
-                      style: TextStyle(color: _enhanceClarity ? const Color(0xFFD4AF37) : Colors.white60, fontSize: 12),
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (VectorDesignLoader.supportsVectorView(d.filePath)) ...[
+                        TextButton.icon(
+                          onPressed: _loadingHd
+                              ? null
+                              : () {
+                                  setState(() => _is3D = !_is3D);
+                                  _loadHdIfSupported();
+                                },
+                          style: TextButton.styleFrom(
+                            backgroundColor: _is3D ? const Color(0xFFD4AF37).withOpacity(0.26) : Colors.white10,
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          ),
+                          icon: Icon(Icons.view_in_ar, size: 15, color: _is3D ? const Color(0xFFD4AF37) : Colors.white60),
+                          label: Text(
+                            '3D',
+                            style: TextStyle(
+                              color: _is3D ? const Color(0xFFD4AF37) : Colors.white60,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      TextButton.icon(
+                        onPressed: () => setState(() => _enhanceClarity = !_enhanceClarity),
+                        style: TextButton.styleFrom(
+                          backgroundColor: _enhanceClarity ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        ),
+                        icon: Icon(Icons.auto_fix_high, size: 15, color: _enhanceClarity ? const Color(0xFFD4AF37) : Colors.white60),
+                        label: Text(
+                          tr('وضوح عالٍ', 'HD'),
+                          style: TextStyle(color: _enhanceClarity ? const Color(0xFFD4AF37) : Colors.white60, fontSize: 12),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
