@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -560,37 +561,16 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
 
   void _showSignatureDialog() {
     if (!mounted) return;
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF18202E),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
-        ),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(height: 8),
-            Text(
-              'By Tarik Habrosh',
-              style: TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 18, letterSpacing: 1.2),
-            ),
-            SizedBox(height: 8),
-          ],
-        ),
-        actions: [
-          Center(
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF3E522B), foregroundColor: Colors.white),
-              onPressed: () => Navigator.pop(ctx),
-              child: Text(tr('موافق', 'OK')),
-            ),
-          ),
-        ],
+    final overlay = Overlay.of(context);
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (ctx) => _AutoFadeWelcomeBanner(
+        onFinished: () {
+          if (entry.mounted) entry.remove();
+        },
       ),
     );
+    overlay.insert(entry);
   }
 
   Future<List<String>> _readSavedFolders() async {
@@ -894,6 +874,16 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                 },
                 icon: const Icon(Icons.language, color: Color(0xFFD4AF37), size: 18),
                 label: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+              ),
+              IconButton(
+                icon: const Icon(Icons.text_fields, color: Color(0xFFD4AF37)),
+                tooltip: tr('كتابة وتحويل لغرز', 'Text to Stitches'),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const TextToEmbroideryScreen()),
+                  );
+                },
               ),
               IconButton(
                 icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
@@ -1710,8 +1700,61 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                               _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
                             ],
                           ),
-                          if (UniversalExporter.canExport(d.filePath)) ...[
+                          if (VectorDesignLoader.supportsVectorView(d.filePath)) ...[
                             const SizedBox(height: 14),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: ElevatedButton.icon(
+                                    onPressed: () {
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(builder: (_) => StitchSimulatorScreen(design: d)),
+                                      );
+                                    },
+                                    icon: const Icon(Icons.play_circle_outline, size: 19),
+                                    label: Text(
+                                      tr('محاكاة الغرز', 'Simulate'),
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF283852),
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(vertical: 11),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: ElevatedButton.icon(
+                                    onPressed: () async {
+                                      final editedPath = await Navigator.push<String>(
+                                        context,
+                                        MaterialPageRoute(builder: (_) => DesignEditorScreen(design: d)),
+                                      );
+                                      if (editedPath != null && editedPath.isNotEmpty) {
+                                        _lastExportedPath = editedPath;
+                                      }
+                                    },
+                                    icon: const Icon(Icons.tune, size: 19),
+                                    label: Text(
+                                      tr('تعديل التصميم', 'Edit Design'),
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF3E522B),
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(vertical: 11),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                          if (UniversalExporter.canExport(d.filePath)) ...[
+                            const SizedBox(height: 10),
                             Row(
                               children: [
                                 Expanded(
@@ -2018,6 +2061,880 @@ class _StatBadge extends StatelessWidget {
         const SizedBox(height: 2),
         Text(label, style: const TextStyle(fontSize: 12, color: Colors.white60)),
       ],
+    );
+  }
+}
+
+
+class _AutoFadeWelcomeBanner extends StatefulWidget {
+  final VoidCallback onFinished;
+  const _AutoFadeWelcomeBanner({required this.onFinished});
+  @override
+  State<_AutoFadeWelcomeBanner> createState() => _AutoFadeWelcomeBannerState();
+}
+
+class _AutoFadeWelcomeBannerState extends State<_AutoFadeWelcomeBanner> {
+  double _opacity = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+    Future.delayed(const Duration(milliseconds: 50), () {
+      if (mounted) setState(() => _opacity = 1.0);
+    });
+    Future.delayed(const Duration(milliseconds: 2100), () {
+      if (mounted) setState(() => _opacity = 0.0);
+    });
+    Future.delayed(const Duration(milliseconds: 2700), () {
+      widget.onFinished();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Material(
+        color: Colors.transparent,
+        child: Center(
+          child: AnimatedOpacity(
+            opacity: _opacity,
+            duration: const Duration(milliseconds: 550),
+            curve: Curves.easeInOut,
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 28),
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 28),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0E131D).withOpacity(0.76),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.65), width: 1.6),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.45),
+                    blurRadius: 24,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Tarik emb',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 30,
+                      letterSpacing: 1.4,
+                    ),
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'By Tarik Habrosh',
+                    style: TextStyle(
+                      color: Color(0xFFD4AF37),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 20,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// شاشة محاكاة سير الغرز (Stitch Player) مع تحكم بالسرعة وشريط التمرير
+class StitchSimulatorScreen extends StatefulWidget {
+  final EmbDesignInfo design;
+  const StitchSimulatorScreen({super.key, required this.design});
+  @override
+  State<StitchSimulatorScreen> createState() => _StitchSimulatorScreenState();
+}
+
+class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
+  VectorDesignData? _vec;
+  bool _loading = true;
+  bool _playing = false;
+  int _currentStitch = 0;
+  int _speedIndex = 1; // 0=1x, 1=3x, 2=8x, 3=20x
+  static const List<int> _speedSteps = [8, 28, 90, 260];
+  static const List<String> _speedLabels = ['1x', '3x', '8x', '20x'];
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadVector();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadVector() async {
+    final v = await VectorDesignLoader.load(widget.design.filePath);
+    if (!mounted) return;
+    setState(() {
+      _vec = v;
+      _loading = false;
+      _currentStitch = 0;
+    });
+    if (v != null && v.stX.length > 2) {
+      _startPlayback();
+    }
+  }
+
+  void _startPlayback() {
+    if (_vec == null) return;
+    final total = _vec!.stX.length;
+    if (_currentStitch >= total - 1) {
+      _currentStitch = 0;
+    }
+    _timer?.cancel();
+    setState(() => _playing = true);
+    _timer = Timer.periodic(const Duration(milliseconds: 30), (_) {
+      if (!mounted || _vec == null) return;
+      final step = _speedSteps[_speedIndex];
+      final next = _currentStitch + step;
+      if (next >= total) {
+        setState(() {
+          _currentStitch = total;
+          _playing = false;
+        });
+        _timer?.cancel();
+      } else {
+        setState(() => _currentStitch = next);
+      }
+    });
+  }
+
+  void _pausePlayback() {
+    _timer?.cancel();
+    setState(() => _playing = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _vec?.stX.length ?? 0;
+    final numFmt = intl.NumberFormat('#,###');
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E131D),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E131D),
+        title: Text(tr('محاكاة سير الغرز', 'Stitch Simulator'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
+          : (_vec == null || total < 2)
+              ? Center(child: Text(tr('لا يمكن محاكاة هذا الملف', 'Cannot simulate this file'), style: const TextStyle(color: Colors.white70)))
+              : Column(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        margin: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: InteractiveViewer(
+                          minScale: 0.8,
+                          maxScale: 8.0,
+                          child: CustomPaint(
+                            painter: _VectorStitchPainter(data: _vec!, limit: _currentStitch, showNeedle: true),
+                            size: Size.infinite,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Container(
+                      padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 14),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF18202E),
+                        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '${tr('الغرزة', 'Stitch')}: ${numFmt.format(_currentStitch)} / ${numFmt.format(total)}',
+                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 13),
+                              ),
+                              Text(
+                                '${((_currentStitch / max(1, total)) * 100).toStringAsFixed(0)}%',
+                                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 13),
+                              ),
+                            ],
+                          ),
+                          Slider(
+                            value: _currentStitch.toDouble().clamp(0, total.toDouble()),
+                            min: 0,
+                            max: total.toDouble(),
+                            activeColor: const Color(0xFFD4AF37),
+                            inactiveColor: Colors.white24,
+                            onChanged: (v) {
+                              setState(() => _currentStitch = v.round());
+                            },
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              IconButton(
+                                onPressed: () {
+                                  _pausePlayback();
+                                  setState(() => _currentStitch = 0);
+                                },
+                                icon: const Icon(Icons.replay, color: Colors.white70),
+                                tooltip: tr('إعادة', 'Reset'),
+                              ),
+                              ElevatedButton.icon(
+                                onPressed: _playing ? _pausePlayback : _startPlayback,
+                                icon: Icon(_playing ? Icons.pause : Icons.play_arrow, size: 24),
+                                label: Text(_playing ? tr('إيقاف', 'Pause') : tr('تشغيل', 'Play')),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFFD4AF37),
+                                  foregroundColor: Colors.black,
+                                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () {
+                                  setState(() => _speedIndex = (_speedIndex + 1) % _speedSteps.length);
+                                },
+                                style: TextButton.styleFrom(
+                                  backgroundColor: Colors.white10,
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                ),
+                                child: Text(
+                                  '${tr('السرعة', 'Speed')}: ${_speedLabels[_speedIndex]}',
+                                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+    );
+  }
+}
+
+/// شاشة تعديل التصميم (تكبير/تصغير، دوران، قلب، حذف لون، حذف غرز، وحفظ)
+class DesignEditorScreen extends StatefulWidget {
+  final EmbDesignInfo design;
+  const DesignEditorScreen({super.key, required this.design});
+  @override
+  State<DesignEditorScreen> createState() => _DesignEditorScreenState();
+}
+
+class _DesignEditorScreenState extends State<DesignEditorScreen> {
+  VectorDesignData? _original;
+  VectorDesignData? _edited;
+  bool _loading = true;
+  bool _saving = false;
+
+  double _scale = 1.0;
+  double _rotationDeg = 0.0;
+  bool _flipH = false;
+  bool _flipV = false;
+  final Set<int> _deletedColors = {};
+  List<int> _availableColors = [];
+  int _trimStart = 0;
+  int _trimEnd = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final v = await VectorDesignLoader.load(widget.design.filePath);
+    if (!mounted) return;
+    if (v != null) {
+      final Set<int> cols = {};
+      for (int i = 0; i < v.stColor.length; i++) {
+        cols.add(v.stColor[i]);
+      }
+      final sortedCols = cols.toList()..sort();
+      setState(() {
+        _original = v;
+        _edited = v;
+        _availableColors = sortedCols;
+        _trimStart = 0;
+        _trimEnd = v.stX.length;
+        _loading = false;
+      });
+    } else {
+      setState(() => _loading = false);
+    }
+  }
+
+  void _rebuildEdited() {
+    if (_original == null) return;
+    final next = VectorDesignEditor.transform(
+      _original!,
+      scale: _scale,
+      rotationDeg: _rotationDeg,
+      flipH: _flipH,
+      flipV: _flipV,
+      deletedColors: _deletedColors,
+      trimStart: _trimStart,
+      trimEnd: _trimEnd,
+    );
+    setState(() => _edited = next);
+  }
+
+  Future<void> _saveEdited() async {
+    if (_edited == null || _saving) return;
+    final origExt = widget.design.filePath.split('.').last.toUpperCase();
+    final targetExt = UniversalExporter.supportedFormats.any((f) => f['ext'] == origExt) ? origExt : 'DST';
+
+    setState(() => _saving = true);
+    try {
+      final baseName = '${widget.design.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_edit';
+      final parentDir = File(widget.design.filePath).parent.path;
+      String outPath = '$parentDir/$baseName.$targetExt';
+      String? res = await VectorDesignEditor.exportVectorToFile(_edited!, outPath, targetExt, baseName: baseName);
+      res ??= await VectorDesignEditor.exportVectorToFile(
+        _edited!,
+        '/storage/emulated/0/Download/$baseName.$targetExt',
+        targetExt,
+        baseName: baseName,
+      );
+      if (res != null && await File(res).exists()) {
+        await DesignCacheManager.getOrParse(res);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${tr('تم حفظ التصميم المعدّل:', 'Edited design saved:')}\n$res'),
+              backgroundColor: const Color(0xFF2E7D32),
+            ),
+          );
+          Navigator.of(context).pop(res);
+        }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr('تعذر حفظ التصميم المعدّل', 'Failed to save edited design'))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _original?.stX.length ?? 0;
+    final dimText = formatDimensionsCm(_edited?.widthMm, _edited?.heightMm);
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E131D),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E131D),
+        title: Text(tr('تعديل التصميم', 'Edit Design'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        actions: [
+          TextButton.icon(
+            onPressed: _saving || _edited == null ? null : _saveEdited,
+            icon: _saving
+                ? const SizedBox(width: 15, height: 15, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)))
+                : const Icon(Icons.save, color: Color(0xFFD4AF37), size: 19),
+            label: Text(tr('حفظ', 'Save'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
+          : (_edited == null || total < 2)
+              ? Center(child: Text(tr('تعذر تحميل التصميم للتعديل', 'Cannot edit this file'), style: const TextStyle(color: Colors.white70)))
+              : Column(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        margin: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+                        clipBehavior: Clip.antiAlias,
+                        child: InteractiveViewer(
+                          minScale: 0.8,
+                          maxScale: 8.0,
+                          child: CustomPaint(
+                            painter: _VectorStitchPainter(data: _edited!, limit: _edited!.stX.length, showNeedle: false),
+                            size: Size.infinite,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Container(
+                      padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF18202E),
+                        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '${tr('الحجم', 'Scale')}: ${(_scale * 100).round()}%${dimText != null ? '  ($dimText)' : ''}',
+                                style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                              Text(
+                                '${tr('الغرز', 'Stitches')}: ${_edited!.stitches}',
+                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                            ],
+                          ),
+                          Slider(
+                            value: _scale,
+                            min: 0.5,
+                            max: 2.0,
+                            divisions: 30,
+                            activeColor: const Color(0xFFD4AF37),
+                            onChanged: (v) {
+                              _scale = v;
+                              _rebuildEdited();
+                            },
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              OutlinedButton.icon(
+                                onPressed: () {
+                                  _rotationDeg = (_rotationDeg + 90) % 360;
+                                  _rebuildEdited();
+                                },
+                                icon: const Icon(Icons.rotate_right, size: 17, color: Color(0xFFD4AF37)),
+                                label: Text('${_rotationDeg.round()}°', style: const TextStyle(color: Colors.white, fontSize: 12)),
+                                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: () {
+                                  _flipH = !_flipH;
+                                  _rebuildEdited();
+                                },
+                                icon: Icon(Icons.flip, size: 17, color: _flipH ? const Color(0xFFD4AF37) : Colors.white70),
+                                label: Text(tr('قلب أفقي', 'Flip H'), style: const TextStyle(color: Colors.white, fontSize: 12)),
+                                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: () {
+                                  _flipV = !_flipV;
+                                  _rebuildEdited();
+                                },
+                                icon: Icon(Icons.swap_vert, size: 17, color: _flipV ? const Color(0xFFD4AF37) : Colors.white70),
+                                label: Text(tr('قلب عمودي', 'Flip V'), style: const TextStyle(color: Colors.white, fontSize: 12)),
+                                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
+                              ),
+                            ],
+                          ),
+                          if (_availableColors.length > 1) ...[
+                            const SizedBox(height: 8),
+                            Align(
+                              alignment: AlignmentDirectional.centerStart,
+                              child: Text(
+                                tr('اضغط على أي لون لحذفه أو إرجاعه:', 'Tap any color to delete/restore:'),
+                                style: const TextStyle(color: Colors.white70, fontSize: 11),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            SizedBox(
+                              height: 32,
+                              child: ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: _availableColors.length,
+                                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                                itemBuilder: (_, idx) {
+                                  final cIdx = _availableColors[idx];
+                                  final isDeleted = _deletedColors.contains(cIdx);
+                                  final col = Color(_original!.paletteArgb[cIdx % _original!.paletteArgb.length]);
+                                  return GestureDetector(
+                                    onTap: () {
+                                      if (isDeleted) {
+                                        _deletedColors.remove(cIdx);
+                                      } else if (_availableColors.length - _deletedColors.length > 1) {
+                                        _deletedColors.add(cIdx);
+                                      }
+                                      _rebuildEdited();
+                                    },
+                                    child: Container(
+                                      width: 32,
+                                      height: 32,
+                                      decoration: BoxDecoration(
+                                        color: isDeleted ? Colors.black38 : col,
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: isDeleted ? Colors.redAccent : Colors.white,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: isDeleted ? const Icon(Icons.close, size: 16, color: Colors.redAccent) : null,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 6),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(tr('قص الغرز (بداية / نهاية):', 'Trim Stitches (Start / End):'), style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                              Text('$_trimStart - $_trimEnd', style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                            ],
+                          ),
+                          RangeSlider(
+                            values: RangeValues(_trimStart.toDouble(), _trimEnd.toDouble()),
+                            min: 0,
+                            max: total.toDouble(),
+                            activeColor: const Color(0xFF56CCF2),
+                            onChanged: (rv) {
+                              if (rv.end - rv.start >= 2) {
+                                _trimStart = rv.start.round();
+                                _trimEnd = rv.end.round();
+                                _rebuildEdited();
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+    );
+  }
+}
+
+class _VectorStitchPainter extends CustomPainter {
+  final VectorDesignData data;
+  final int limit;
+  final bool showNeedle;
+
+  _VectorStitchPainter({required this.data, required this.limit, required this.showNeedle});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (!data.hasBounds || data.stX.length < 2) return;
+    final double rawW = data.maxX - data.minX;
+    final double rawH = data.maxY - data.minY;
+    if (rawW <= 0 || rawH <= 0) return;
+
+    const double pad = 18.0;
+    final double scale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
+    final double offX = (size.width - rawW * scale) * 0.5 - data.minX * scale;
+    final double offY = (size.height - rawH * scale) * 0.5 - data.minY * scale;
+
+    final int count = limit.clamp(0, data.stX.length);
+    final int palLen = data.paletteArgb.length;
+    Path path = Path();
+    int activeColor = -1;
+    bool hasMove = false;
+    double lastX = 0, lastY = 0;
+
+    void flush() {
+      if (!hasMove || activeColor < 0) return;
+      final paint = Paint()
+        ..color = Color(data.paletteArgb[activeColor % palLen])
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.15
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      canvas.drawPath(path, paint);
+      path = Path();
+      hasMove = false;
+    }
+
+    for (int i = 0; i < count; i++) {
+      final int c = data.stColor[i];
+      if (c != activeColor) {
+        flush();
+        activeColor = c;
+      }
+      final double sx = data.stX[i] * scale + offX;
+      final double sy = data.stY[i] * scale + offY;
+      lastX = sx;
+      lastY = sy;
+      if (data.stMove[i] != 0 || !hasMove) {
+        path.moveTo(sx, sy);
+        hasMove = true;
+      } else {
+        path.lineTo(sx, sy);
+      }
+    }
+    flush();
+
+    if (showNeedle && count > 0) {
+      canvas.drawCircle(Offset(lastX, lastY), 7.5, Paint()..color = const Color(0xFFD4AF37).withOpacity(0.35));
+      canvas.drawCircle(Offset(lastX, lastY), 3.8, Paint()..color = Colors.redAccent);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _VectorStitchPainter oldDelegate) {
+    return oldDelegate.limit != limit || oldDelegate.data != data;
+  }
+}
+
+
+/// شاشة الكتابة بالعربي والإنجليزي وتحويلها مباشرة إلى غرز تطريز (.DST / .EXP / .XXX ...)
+class TextToEmbroideryScreen extends StatefulWidget {
+  const TextToEmbroideryScreen({super.key});
+  @override
+  State<TextToEmbroideryScreen> createState() => _TextToEmbroideryScreenState();
+}
+
+class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
+  final TextEditingController _textCtrl = TextEditingController(text: 'Tarik emb');
+  VectorDesignData? _vec;
+  bool _generating = false;
+  bool _saving = false;
+  double _widthCm = 12.0;
+  double _densityMm = 0.45;
+  int _selectedColor = 0xFFFF1744;
+
+  static const List<int> _threadColors = [
+    0xFFFF1744,
+    0xFF007BFF,
+    0xFF00C853,
+    0xFFFFB300,
+    0xFFD500F9,
+    0xFF000000,
+    0xFFD4AF37,
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _generate();
+  }
+
+  @override
+  void dispose() {
+    _textCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _generate() async {
+    if (_textCtrl.text.trim().isEmpty) return;
+    setState(() => _generating = true);
+    try {
+      final v = await TextToStitchEngine.generateFromText(
+        text: _textCtrl.text,
+        widthCm: _widthCm,
+        densityMm: _densityMm,
+        colorArgb: _selectedColor,
+      );
+      if (mounted) {
+        setState(() {
+          _vec = v;
+          _generating = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _generating = false);
+    }
+  }
+
+  Future<void> _exportText({required bool shareAfter}) async {
+    if (_vec == null || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final safeName = 'text_${DateTime.now().millisecondsSinceEpoch}';
+      final String outPath = shareAfter
+          ? '${(await getTemporaryDirectory()).path}/$safeName.DST'
+          : '/storage/emulated/0/Download/$safeName.DST';
+
+      final res = await VectorDesignEditor.exportVectorToFile(
+        _vec!,
+        outPath,
+        'DST',
+        baseName: safeName,
+      );
+      if (res != null && await File(res).exists()) {
+        if (shareAfter) {
+          await Share.shareXFiles([XFile(res)], text: '$safeName.DST');
+        } else if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${tr('تم حفظ ملف التطريز في:', 'Saved embroidery file to:')}\n$res'),
+              backgroundColor: const Color(0xFF2E7D32),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dimText = formatDimensionsCm(_vec?.widthMm, _vec?.heightMm);
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E131D),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E131D),
+        title: Text(tr('الكتابة وتحويلها لغرز', 'Text to Stitches'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _textCtrl,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    decoration: InputDecoration(
+                      hintText: tr('اكتب نصاً بالعربي أو الإنجليزي...', 'Type Arabic or English text...'),
+                      filled: true,
+                      fillColor: const Color(0xFF18202E),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                    ),
+                    onSubmitted: (_) => _generate(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _generating ? null : _generate,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFD4AF37),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: Text(tr('توليد', 'Create'), style: const TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Container(
+              margin: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+              clipBehavior: Clip.antiAlias,
+              child: _generating
+                  ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
+                  : (_vec == null
+                      ? Center(child: Text(tr('اكتب نصاً واضغط توليد', 'Enter text and tap Create'), style: const TextStyle(color: Colors.black54)))
+                      : InteractiveViewer(
+                          minScale: 0.8,
+                          maxScale: 8.0,
+                          child: CustomPaint(
+                            painter: _VectorStitchPainter(data: _vec!, limit: _vec!.stX.length, showNeedle: false),
+                            size: Size.infinite,
+                          ),
+                        )),
+            ),
+          ),
+          Container(
+            padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
+            decoration: const BoxDecoration(
+              color: Color(0xFF18202E),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      '${tr('العرض', 'Width')}: ${_widthCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? '  ($dimText)' : ''}',
+                      style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                    ),
+                    Text(
+                      '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
+                      style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                    ),
+                  ],
+                ),
+                Slider(
+                  value: _widthCm,
+                  min: 4.0,
+                  max: 30.0,
+                  divisions: 26,
+                  activeColor: const Color(0xFFD4AF37),
+                  onChanged: (v) => setState(() => _widthCm = v),
+                  onChangeEnd: (_) => _generate(),
+                ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(tr('لون الخيط:', 'Thread:'), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    Row(
+                      children: _threadColors.map((c) {
+                        final sel = c == _selectedColor;
+                        return GestureDetector(
+                          onTap: () {
+                            setState(() => _selectedColor = c);
+                            _generate();
+                          },
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 4),
+                            width: 26,
+                            height: 26,
+                            decoration: BoxDecoration(
+                              color: Color(c),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: sel ? const Color(0xFFD4AF37) : Colors.white38, width: sel ? 2.5 : 1),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: false),
+                        icon: const Icon(Icons.save_alt, size: 18, color: Color(0xFFD4AF37)),
+                        label: Text(tr('حفظ DST', 'Save DST'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Color(0xFFD4AF37)),
+                          padding: const EdgeInsets.symmetric(vertical: 11),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: true),
+                        icon: const Icon(Icons.ios_share, size: 18),
+                        label: Text(tr('مشاركة DST', 'Share DST'), style: const TextStyle(fontWeight: FontWeight.bold)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFD4AF37),
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 11),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
