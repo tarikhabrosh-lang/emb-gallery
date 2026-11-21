@@ -187,7 +187,7 @@ String? formatDimensionsCm(double? widthMm, double? heightMm, {bool includeMm = 
 }
 
 class LicenseManager {
-  static Future> checkLicense() async {
+  static Future<Map<String, dynamic>> checkLicense() async {
     try {
       final dir = await getApplicationSupportDirectory();
       final file = File('${dir.path}/tarik_license.txt');
@@ -1786,4 +1786,4 @@ class _StatBadge extends StatelessWidget {
       ],
     );
   }
-} 
+}
