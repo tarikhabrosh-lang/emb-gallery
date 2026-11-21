@@ -72,7 +72,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v3');
+    final dir = Directory('${supportDir.path}/design_cache_v4');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -1256,8 +1256,24 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                           return _DesignGridCard(
                             design: item,
                             formattedStitches: numFmt.format(item.stitches),
-                            onTap: () {
-                              Navigator.push(context, MaterialPageRoute(builder: (_) => DesignDetailScreen(design: item)));
+                            onTap: () async {
+                              final exportedPath = await Navigator.push<String>(
+                                context,
+                                MaterialPageRoute(builder: (_) => DesignDetailScreen(design: item)),
+                              );
+                              if (exportedPath != null && exportedPath.isNotEmpty && mounted) {
+                                final newInfo = await DesignCacheManager.getOrParse(exportedPath);
+                                if (newInfo != null && mounted) {
+                                  setState(() {
+                                    if (!widget.folderGroup.filePaths.contains(exportedPath)) {
+                                      widget.folderGroup.filePaths.insert(0, exportedPath);
+                                    }
+                                    _designs.removeWhere((d) => d.filePath == exportedPath);
+                                    _designs.insert(0, newInfo);
+                                  });
+                                  _applyFilterAndSort();
+                                }
+                              }
                             },
                           );
                         },
@@ -1358,6 +1374,7 @@ class DesignDetailScreen extends StatefulWidget {
 class _DesignDetailScreenState extends State<DesignDetailScreen> {
   bool _isSharing = false;
   bool _isExportingDst = false;
+  String? _lastExportedPath;
 
   void _openFullScreenViewer() {
     if (widget.design.previewJpeg == null) return;
@@ -1453,14 +1470,19 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
       if (resultPath != null && await File(resultPath).exists()) {
         if (shareAfter) {
           await Share.shareXFiles([XFile(resultPath)], text: '$baseName.$chosenExt');
-        } else if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('${tr('تم الحفظ بنجاح في:', 'Saved successfully to:')}\n$resultPath'),
-              backgroundColor: const Color(0xFF2E7D32),
-              duration: const Duration(seconds: 4),
-            ),
-          );
+        } else {
+          _lastExportedPath = resultPath;
+          // توليد معاينة التصميم للملف المُصدَّر فوراً ليظهر بصورته مباشرة في المجلد
+          await DesignCacheManager.getOrParse(resultPath);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('${tr('تم الحفظ في نفس المجلد:', 'Saved in same folder:')}\n$resultPath'),
+                backgroundColor: const Color(0xFF2E7D32),
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
         }
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1515,7 +1537,14 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
         final fullDimText = formatDimensionsCm(d.widthMm, d.heightMm, includeMm: true);
         final shortCmText = formatDimensionsCm(d.widthMm, d.heightMm, includeMm: false);
 
-        return Scaffold(
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, result) {
+            if (!didPop) {
+              Navigator.of(context).pop(_lastExportedPath);
+            }
+          },
+          child: Scaffold(
           appBar: AppBar(
             backgroundColor: const Color(0xFF0E131D),
             title: Directionality(textDirection: TextDirection.ltr, child: Text(d.fileName, style: const TextStyle(fontSize: 15))),
@@ -1740,6 +1769,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
               ),
             ],
           ),
+        ),
         );
       },
     );
@@ -1766,6 +1796,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   @override
   void initState() {
     super.initState();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _transformController.addListener(() {
       final scale = _transformController.value.getMaxScaleOnAxis();
       if ((scale - _currentScale).abs() > 0.05) setState(() => _currentScale = scale);
@@ -1775,6 +1806,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
 
   @override
   void dispose() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _transformController.dispose();
     super.dispose();
   }
@@ -1877,7 +1909,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
             ),
           ),
           Positioned(
-            bottom: 18,
+            bottom: MediaQuery.of(context).padding.bottom + 14,
             left: 14,
             right: 14,
             child: Container(
