@@ -1456,8 +1456,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
         } else if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('${tr('تم الحفظ بنجاح في:', 'Saved successfully to:')}
-$resultPath'),
+              content: Text('${tr('تم الحفظ بنجاح في:', 'Saved successfully to:')}\n$resultPath'),
               backgroundColor: const Color(0xFF2E7D32),
               duration: const Duration(seconds: 4),
             ),
