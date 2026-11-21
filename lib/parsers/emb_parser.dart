@@ -2290,3 +2290,799 @@ class DahaoParser {
     return (fitSingle(histS0), fitSingle(histS1));
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// محرك الصيغ القياسية الإضافية (.EXP, .DSB, .JEF, .PES, .PEC, .TBF) + التصدير إلى .DST
+// ---------------------------------------------------------------------------
+
+class UniversalFormatParser {
+  static bool isSupported(String path) {
+    final lower = path.toLowerCase();
+    return lower.endsWith('.exp') ||
+        lower.endsWith('.dsb') ||
+        lower.endsWith('.jef') ||
+        lower.endsWith('.pes') ||
+        lower.endsWith('.pec') ||
+        lower.endsWith('.tbf');
+  }
+
+  static Future<EmbDesignInfo?> parseFile(String filePath, {double maxCanvas = 1200.0}) async {
+    try {
+      final file = File(filePath);
+      if (!await file.exists()) return null;
+
+      final _VectorDesignData? vec = await Isolate.run(() => _decodeAnySync(filePath));
+      if (vec == null) return null;
+
+      Uint8List? previewPng;
+      if (vec.stX.length > 2) {
+        previewPng = await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas);
+      }
+
+      final fileName = filePath.split(Platform.pathSeparator).last;
+      return EmbDesignInfo(
+        filePath: filePath,
+        fileName: fileName,
+        previewJpeg: previewPng,
+        stitches: vec.stitches,
+        colorCount: vec.colorCount,
+        stopsCount: vec.stopsCount,
+        jumpsCount: vec.jumpsCount,
+        sequinsCount: vec.sequinsCount,
+        beadsCount: vec.beadsCount,
+        trimsCount: vec.trimsCount,
+        machineType: vec.machineType,
+        colorSequence: [],
+        widthMm: vec.widthMm,
+        heightMm: vec.heightMm,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<Uint8List?> renderHighResPreview(String filePath, {double maxCanvas = 2200.0}) async {
+    try {
+      final _VectorDesignData? vec = await Isolate.run(() => _decodeAnySync(filePath));
+      if (vec == null || vec.stX.length <= 2) return null;
+      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static _VectorDesignData? _decodeAnySync(String filePath) {
+    final file = File(filePath);
+    if (!file.existsSync()) return null;
+    final bytes = file.readAsBytesSync();
+    final lower = filePath.toLowerCase();
+
+    if (lower.endsWith('.exp')) return _decodeExpSync(bytes);
+    if (lower.endsWith('.dsb')) return _decodeDsbSync(bytes);
+    if (lower.endsWith('.jef')) return _decodeJefSync(bytes);
+    if (lower.endsWith('.pes')) return _decodePesSync(bytes);
+    if (lower.endsWith('.pec')) return _decodePecSync(bytes, 0, 'Brother (PEC)');
+    if (lower.endsWith('.tbf')) return _decodeTbfSync(bytes);
+    return null;
+  }
+
+  static int _s8(int b) => b >= 128 ? b - 256 : b;
+
+  static final Int32List _defaultPalette = Int32List.fromList(const [
+    0xFF1E88E5, 0xFFE53935, 0xFF43A047, 0xFFFDD835, 0xFF8E24AA,
+    0xFFF4511E, 0xFF00ACC1, 0xFFD81B60, 0xFF7CB342, 0xFF3949AB,
+    0xFF00897B, 0xFF6D4C41, 0xFF5C6BC0, 0xFFFB8C00,
+  ]);
+
+  static final Int32List _pecPalette = Int32List.fromList(const [
+    0xFF000000, 0xFF0E1F7C, 0xFF0A55A3, 0xFF008777, 0xFF4B6BAF, 0xFFED171F,
+    0xFFD15C00, 0xFF913697, 0xFFE4995A, 0xFF915C96, 0xFF9ED67D, 0xFF77431E,
+    0xFF000000, 0xFFFFF000, 0xFF009900, 0xFF0000FF, 0xFFFF0000, 0xFFFF7F00,
+    0xFF800080, 0xFF00FFFF, 0xFFFF00FF, 0xFF808080, 0xFF336699, 0xFFCC3366,
+    0xFF669933, 0xFFCC9900, 0xFF993333, 0xFF339966, 0xFF663399, 0xFFCC6633,
+    0xFF3366CC, 0xFF996633, 0xFF3399CC, 0xFFCC3399, 0xFF66CC33, 0xFFCC3333,
+    0xFF33CC99, 0xFF9933CC, 0xFFCCCC33, 0xFF3333CC, 0xFFCC9966, 0xFF6699CC,
+    0xFF99CC66, 0xFFCC6699, 0xFF66CC99, 0xFF9966CC, 0xFFCC9933, 0xFF339999,
+    0xFF993399, 0xFF999933, 0xFF666699, 0xFF996666, 0xFF669966, 0xFF333366,
+    0xFF663333, 0xFF336633, 0xFF999999, 0xFF666666, 0xFF333333, 0xFFCCCCCC,
+    0xFFFF9999, 0xFF99FF99, 0xFF9999FF, 0xFFFFFF99, 0xFFFF99FF,
+  ]);
+
+  /// Melco / Bernina (.EXP)
+  static _VectorDesignData? _decodeExpSync(Uint8List bytes) {
+    if (bytes.length < 4) return null;
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    int x = 0, y = 0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int colorIdx = 0;
+    int colorCount = 1;
+    int stitchCount = 0;
+    int jumpCount = 0;
+    bool needMove = true;
+
+    int i = 0;
+    while (i + 1 < bytes.length) {
+      final int b0 = bytes[i];
+      final int b1 = bytes[i + 1];
+      i += 2;
+
+      if (b0 == 0x80) {
+        if (b1 == 0x01) {
+          colorIdx = (colorIdx + 1) % _defaultPalette.length;
+          colorCount++;
+          needMove = true;
+          if (i + 1 < bytes.length) i += 2;
+        } else if (b1 == 0x04) {
+          if (i + 1 < bytes.length) {
+            x += _s8(bytes[i]);
+            y += _s8(bytes[i + 1]);
+            i += 2;
+          }
+          jumpCount++;
+          needMove = true;
+        } else if (b1 == 0x80 || b1 == 0x00) {
+          break;
+        } else {
+          needMove = true;
+        }
+      } else {
+        x += _s8(b0);
+        y += _s8(b1);
+        final double px = x.toDouble();
+        final double py = -y.toDouble();
+        stX.add(px);
+        stY.add(py);
+        stMove.add(needMove ? 1 : 0);
+        stColor.add(colorIdx);
+        needMove = false;
+        stitchCount++;
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+
+    return _VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: _defaultPalette,
+      stitches: stitchCount,
+      colorCount: colorCount,
+      stopsCount: colorCount > 1 ? colorCount - 1 : 0,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: 'Melco (EXP)',
+    );
+  }
+
+  /// Barudan (.DSB)
+  static _VectorDesignData? _decodeDsbSync(Uint8List bytes) {
+    if (bytes.length < 515) return null;
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    int x = 0, y = 0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int colorIdx = 0;
+    int colorCount = 1;
+    int stitchCount = 0;
+    int jumpCount = 0;
+    bool needMove = true;
+
+    for (int i = 512; i + 2 < bytes.length; i += 3) {
+      final int ctrl = bytes[i];
+      int dy = bytes[i + 1];
+      int dx = bytes[i + 2];
+
+      if (ctrl == 0xF8) break;
+      if ((ctrl & 0x40) != 0) dy = -dy;
+      if ((ctrl & 0x20) != 0) dx = -dx;
+
+      x += dx;
+      y += dy;
+
+      final int cmd = ctrl & 0x1F;
+      if (cmd == 0x08 || cmd == 0x09 || cmd == 0x0A) {
+        colorIdx = (colorIdx + 1) % _defaultPalette.length;
+        colorCount++;
+        needMove = true;
+      } else if (cmd == 0x01 || cmd == 0x04) {
+        jumpCount++;
+        needMove = true;
+      } else {
+        final double px = x.toDouble();
+        final double py = -y.toDouble();
+        stX.add(px);
+        stY.add(py);
+        stMove.add(needMove ? 1 : 0);
+        stColor.add(colorIdx);
+        needMove = false;
+        stitchCount++;
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+
+    return _VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: _defaultPalette,
+      stitches: stitchCount,
+      colorCount: colorCount,
+      stopsCount: colorCount > 1 ? colorCount - 1 : 0,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: 'Barudan (DSB)',
+    );
+  }
+
+  /// Janome (.JEF)
+  static _VectorDesignData? _decodeJefSync(Uint8List bytes) {
+    if (bytes.length < 120) return null;
+    final bd = ByteData.sublistView(bytes);
+    final int stitchOffset = bd.getUint32(0, Endian.little);
+    final int rawColors = bd.getUint32(24, Endian.little);
+    if (stitchOffset < 116 || stitchOffset >= bytes.length) return null;
+
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    int x = 0, y = 0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int colorIdx = 0;
+    int colorCount = 1;
+    int stitchCount = 0;
+    int jumpCount = 0;
+    bool needMove = true;
+
+    int i = stitchOffset;
+    while (i + 1 < bytes.length) {
+      final int b0 = bytes[i];
+      final int b1 = bytes[i + 1];
+      i += 2;
+
+      if (b0 == 0x80) {
+        if (b1 == 0x01) {
+          colorIdx = (colorIdx + 1) % _defaultPalette.length;
+          colorCount++;
+          needMove = true;
+        } else if (b1 == 0x02 || b1 == 0x04) {
+          if (i + 1 < bytes.length) {
+            x += _s8(bytes[i]);
+            y += _s8(bytes[i + 1]);
+            i += 2;
+          }
+          jumpCount++;
+          needMove = true;
+        } else if (b1 == 0x10) {
+          break;
+        } else {
+          needMove = true;
+        }
+      } else {
+        x += _s8(b0);
+        y += _s8(b1);
+        final double px = x.toDouble();
+        final double py = -y.toDouble();
+        stX.add(px);
+        stY.add(py);
+        stMove.add(needMove ? 1 : 0);
+        stColor.add(colorIdx);
+        needMove = false;
+        stitchCount++;
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+
+    final int validColors = (rawColors > 0 && rawColors < 128) ? rawColors : colorCount;
+    return _VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: _defaultPalette,
+      stitches: stitchCount,
+      colorCount: validColors,
+      stopsCount: validColors > 1 ? validColors - 1 : 0,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: 'Janome (JEF)',
+    );
+  }
+
+  /// Brother (.PES -> يستخرج قسم PEC المدمج)
+  static _VectorDesignData? _decodePesSync(Uint8List bytes) {
+    if (bytes.length < 32) return null;
+    final bd = ByteData.sublistView(bytes);
+    int pecStart = -1;
+    if (bytes[0] == 0x23 && bytes[1] == 0x50 && bytes[2] == 0x45 && bytes[3] == 0x53) {
+      final int off = bd.getUint32(8, Endian.little);
+      if (off > 0 && off + 512 < bytes.length) {
+        pecStart = off;
+      }
+    }
+    if (pecStart == -1) {
+      // بحث عن علامة #PEC0001
+      for (int i = 0; i + 8 < bytes.length; i++) {
+        if (bytes[i] == 0x23 && bytes[i + 1] == 0x50 && bytes[i + 2] == 0x45 && bytes[i + 3] == 0x43) {
+          pecStart = i + 8;
+          break;
+        }
+      }
+    }
+    if (pecStart == -1) return null;
+    return _decodePecSync(bytes, pecStart, 'Brother (PES)');
+  }
+
+  /// Brother (.PEC)
+  static _VectorDesignData? _decodePecSync(Uint8List bytes, int baseOff, String machineLabel) {
+    if (baseOff + 532 >= bytes.length) return null;
+    final int colorChanges = bytes[baseOff + 48];
+    final int numColors = colorChanges + 1;
+
+    final List<int> paletteList = [];
+    for (int c = 0; c < numColors && (baseOff + 49 + c) < bytes.length; c++) {
+      final int idx = bytes[baseOff + 49 + c];
+      paletteList.add(_pecPalette[idx % _pecPalette.length]);
+    }
+    final Int32List palette = paletteList.isNotEmpty ? Int32List.fromList(paletteList) : _defaultPalette;
+
+    int i = baseOff + 532;
+    // تجاوز ترويسة PEC الفرعية (0x00, 0x00, ... حتى بداية الغرز)
+    if (baseOff + 512 + 2 < bytes.length) {
+      final int graphicOff = bytes[baseOff + 514] | (bytes[baseOff + 515] << 8) | (bytes[baseOff + 516] << 16);
+      if (graphicOff <= 0) {
+        i = baseOff + 532;
+      }
+    }
+
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    int x = 0, y = 0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int colorIdx = 0;
+    int stitchCount = 0;
+    int jumpCount = 0;
+    bool needMove = true;
+
+    while (i + 1 < bytes.length) {
+      final int b0 = bytes[i];
+      if (b0 == 0xFF) break;
+      if (b0 == 0xFE && bytes[i + 1] == 0xB0) {
+        i += 3;
+        colorIdx = (colorIdx + 1) % palette.length;
+        needMove = true;
+        continue;
+      }
+
+      bool isJump = false;
+      int dx;
+      if ((b0 & 0x80) != 0) {
+        if ((b0 & 0x20) != 0 || (b0 & 0x10) != 0) isJump = true;
+        if (i + 1 >= bytes.length) break;
+        int val = ((b0 & 0x0F) << 8) | bytes[i + 1];
+        if (val >= 2048) val -= 4096;
+        dx = val;
+        i += 2;
+      } else {
+        dx = b0 >= 64 ? b0 - 128 : b0;
+        i += 1;
+      }
+
+      if (i >= bytes.length) break;
+      final int b1 = bytes[i];
+      int dy;
+      if ((b1 & 0x80) != 0) {
+        if ((b1 & 0x20) != 0 || (b1 & 0x10) != 0) isJump = true;
+        if (i + 1 >= bytes.length) break;
+        int val = ((b1 & 0x0F) << 8) | bytes[i + 1];
+        if (val >= 2048) val -= 4096;
+        dy = val;
+        i += 2;
+      } else {
+        dy = b1 >= 64 ? b1 - 128 : b1;
+        i += 1;
+      }
+
+      x += dx;
+      y += dy;
+      final double px = x.toDouble();
+      final double py = y.toDouble(); // PEC Y لأسفل بالفعل
+
+      if (isJump) {
+        jumpCount++;
+        needMove = true;
+      } else {
+        stX.add(px);
+        stY.add(py);
+        stMove.add(needMove ? 1 : 0);
+        stColor.add(colorIdx);
+        needMove = false;
+        stitchCount++;
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+
+    return _VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: palette,
+      stitches: stitchCount,
+      colorCount: numColors,
+      stopsCount: colorChanges,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: machineLabel,
+    );
+  }
+
+  /// Tajima Modern (.TBF)
+  static _VectorDesignData? _decodeTbfSync(Uint8List bytes) {
+    if (bytes.length < 0x603) return null;
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    int x = 0, y = 0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int colorIdx = 0;
+    int colorCount = 1;
+    int stitchCount = 0;
+    int jumpCount = 0;
+    bool needMove = true;
+
+    for (int i = 0x600; i + 2 < bytes.length; i += 3) {
+      final int dx = _s8(bytes[i]);
+      final int dy = _s8(bytes[i + 1]);
+      final int ctrl = bytes[i + 2];
+
+      if (ctrl == 0x8F) break;
+      x += dx;
+      y += dy;
+
+      if (ctrl == 0x40 || ctrl == 0x86 || ctrl == 0x87) {
+        colorIdx = (colorIdx + 1) % _defaultPalette.length;
+        colorCount++;
+        needMove = true;
+      } else if (ctrl == 0x81 || ctrl == 0x82 || ctrl == 0x84) {
+        jumpCount++;
+        needMove = true;
+      } else {
+        final double px = x.toDouble();
+        final double py = -y.toDouble();
+        stX.add(px);
+        stY.add(py);
+        stMove.add(needMove ? 1 : 0);
+        stColor.add(colorIdx);
+        needMove = false;
+        stitchCount++;
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+
+    return _VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: _defaultPalette,
+      stitches: stitchCount,
+      colorCount: colorCount,
+      stopsCount: colorCount > 1 ? colorCount - 1 : 0,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: 'Tajima (TBF)',
+    );
+  }
+}
+
+/// محرك التصدير إلى صيغة تاجيما القياسية (.DST) من أي ملف داهوا أو صيغة متجهية
+class DstExporter {
+  static bool canExportToDst(String filePath) {
+    final lower = filePath.toLowerCase();
+    return lower.endsWith('.dhp') ||
+        lower.endsWith('.dha') ||
+        lower.endsWith('.dhe') ||
+        lower.endsWith('.dst') ||
+        UniversalFormatParser.isSupported(lower);
+  }
+
+  static Future<String?> exportToDstFile(String sourcePath, String outputPath) async {
+    try {
+      final Uint8List? dstBytes = await Isolate.run(() => _convertFileToDstSync(sourcePath));
+      if (dstBytes == null || dstBytes.isEmpty) return null;
+      final outFile = File(outputPath);
+      await outFile.writeAsBytes(dstBytes, flush: true);
+      return outFile.path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Uint8List? _convertFileToDstSync(String sourcePath) {
+    final lower = sourcePath.toLowerCase();
+    _VectorDesignData? vec;
+    if (lower.endsWith('.dhp')) {
+      vec = DahaoParser._decodeDhpSync(sourcePath);
+    } else if (lower.endsWith('.dhe') || lower.endsWith('.dha')) {
+      vec = DahaoParser._decodeDheDhaSync(sourcePath, lower.endsWith('.dhe'));
+    } else if (lower.endsWith('.dst')) {
+      vec = DstParser._decodeDstSync(sourcePath)?.$1;
+    } else {
+      vec = UniversalFormatParser._decodeAnySync(sourcePath);
+    }
+    if (vec == null || vec.stX.length < 2) return null;
+
+    final String baseName = sourcePath
+        .split(Platform.pathSeparator)
+        .last
+        .replaceAll(RegExp(r'\.[^.]+$'), '')
+        .replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+    final String label = (baseName.isEmpty ? 'TARIK_EMB' : baseName).padRight(16).substring(0, 16);
+
+    final body = BytesBuilder(copy: false);
+    final Float32List stX = vec.stX;
+    final Float32List stY = vec.stY;
+    final Uint8List stMove = vec.stMove;
+    final Uint8List stColor = vec.stColor;
+    final int n = stX.length;
+
+    int curX = 0;
+    int curY = 0;
+    int minX = 0, maxX = 0, minY = 0, maxY = 0;
+    int totalRecords = 0;
+    int colorChanges = 0;
+    int activeColor = stColor[0];
+
+    void emitDelta(int dx, int dy, bool isJump, bool isStop) {
+      // تقسيم القفزات أو الغرز الطويلة (> 121 وحدة = 12.1 مم) تلقائياً وفق معيار تاجيما
+      int remX = dx;
+      int remY = dy;
+      while (remX.abs() > 121 || remY.abs() > 121) {
+        final int stepX = remX.clamp(-121, 121);
+        final int stepY = remY.clamp(-121, 121);
+        _writeDstTriplet(body, stepX, stepY, true, false);
+        curX += stepX;
+        curY += stepY;
+        if (curX < minX) minX = curX;
+        if (curX > maxX) maxX = curX;
+        if (curY < minY) minY = curY;
+        if (curY > maxY) maxY = curY;
+        totalRecords++;
+        remX -= stepX;
+        remY -= stepY;
+      }
+      _writeDstTriplet(body, remX, remY, isJump, isStop);
+      curX += remX;
+      curY += remY;
+      if (curX < minX) minX = curX;
+      if (curX > maxX) maxX = curX;
+      if (curY < minY) minY = curY;
+      if (curY > maxY) maxY = curY;
+      totalRecords++;
+    }
+
+    for (int i = 0; i < n; i++) {
+      final int tx = stX[i].round();
+      final int ty = (-stY[i]).round(); // عكس Y لنظام تاجيما القياسي (أعلى موجب)
+      final int c = stColor[i];
+
+      if (i > 0 && c != activeColor) {
+        emitDelta(0, 0, false, true);
+        colorChanges++;
+        activeColor = c;
+      }
+
+      final int dx = tx - curX;
+      final int dy = ty - curY;
+      final bool isJump = (stMove[i] != 0) && (dx.abs() > 0 || dy.abs() > 0);
+      if (isJump) {
+        emitDelta(dx, dy, true, false);
+        emitDelta(0, 0, false, false);
+      } else {
+        emitDelta(dx, dy, false, false);
+      }
+    }
+
+    // علامة نهاية ملف DST
+    body.add(const [0x00, 0x00, 0xF3]);
+
+    final int px = maxX.abs().clamp(0, 99999);
+    final int mx = minX.abs().clamp(0, 99999);
+    final int py = maxY.abs().clamp(0, 99999);
+    final int my = minY.abs().clamp(0, 99999);
+
+    final String headerStr = 'LA:$label\r'
+        'ST:${totalRecords.toString().padLeft(7)}\r'
+        'CO:${colorChanges.toString().padLeft(3)}\r'
+        '+X:${px.toString().padLeft(5)}\r'
+        '-X:${mx.toString().padLeft(5)}\r'
+        '+Y:${py.toString().padLeft(5)}\r'
+        '-Y:${my.toString().padLeft(5)}\r'
+        'AX:+    0\r'
+        'AY:+    0\r'
+        'MX:+    0\r'
+        'MY:+    0\r'
+        'PD:******\r'
+        '\x1A';
+
+    final Uint8List header = Uint8List(512)..fillRange(0, 512, 0x20);
+    final List<int> hBytes = latin1.encode(headerStr);
+    header.setRange(0, math.min(512, hBytes.length), hBytes);
+
+    final out = BytesBuilder(copy: false);
+    out.add(header);
+    out.add(body.takeBytes());
+    return out.takeBytes();
+  }
+
+  static void _writeDstTriplet(BytesBuilder out, int dx, int dy, bool isJump, bool isStop) {
+    int b0 = 0, b1 = 0, b2 = 0x03;
+    int x = dx, y = dy;
+
+    if (x >= 41) { b2 |= 0x04; x -= 81; }
+    if (x <= -41) { b2 |= 0x08; x += 81; }
+    if (x >= 14) { b1 |= 0x04; x -= 27; }
+    if (x <= -14) { b1 |= 0x08; x += 27; }
+    if (x >= 5) { b0 |= 0x04; x -= 9; }
+    if (x <= -5) { b0 |= 0x08; x += 9; }
+    if (x >= 2) { b1 |= 0x01; x -= 3; }
+    if (x <= -2) { b1 |= 0x02; x += 3; }
+    if (x >= 1) { b0 |= 0x01; x -= 1; }
+    if (x <= -1) { b0 |= 0x02; x += 1; }
+
+    if (y >= 41) { b2 |= 0x20; y -= 81; }
+    if (y <= -41) { b2 |= 0x10; y += 81; }
+    if (y >= 14) { b1 |= 0x20; y -= 27; }
+    if (y <= -14) { b1 |= 0x10; y += 27; }
+    if (y >= 5) { b0 |= 0x20; y -= 9; }
+    if (y <= -5) { b0 |= 0x10; y += 9; }
+    if (y >= 2) { b1 |= 0x80; y -= 3; }
+    if (y <= -2) { b1 |= 0x40; y += 3; }
+    if (y >= 1) { b0 |= 0x80; y -= 1; }
+    if (y <= -1) { b0 |= 0x40; y += 1; }
+
+    if (isJump) b2 |= 0x80;
+    if (isStop) b2 |= 0xC0;
+
+    out.addByte(b0);
+    out.addByte(b1);
+    out.addByte(b2);
+  }
+}
