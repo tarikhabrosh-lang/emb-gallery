@@ -642,7 +642,7 @@ class _BufferedFileReader {
 }
 
 /// محرك رسم موحّد ومُسرّع بالـ GPU (تجميع الخرز عبر drawRawPoints والترتر عبر 4 مسارات Path)
-Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double maxCanvas = 1200.0, bool is3D = false}) async {
+Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double maxCanvas = 1200.0, bool is3D = false, bool transparentBg = false}) async {
   if (!data.hasBounds || data.stX.length < 2) return null;
   final double rawW = data.maxX - data.minX;
   final double rawH = data.maxY - data.minY;
@@ -655,10 +655,12 @@ Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double max
 
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()));
-  canvas.drawRect(
-    Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()),
-    Paint()..color = Colors.white,
-  );
+  if (!transparentBg) {
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()),
+      Paint()..color = Colors.white,
+    );
+  }
 
   final int palLen = data.paletteArgb.length;
   final double strokeW = maxCanvas >= 1800.0 ? 0.75 : 0.72;
@@ -899,7 +901,7 @@ class DstParser {
     try {
       final decoded = await Isolate.run(() => _decodeDstSync(filePath));
       if (decoded == null) return null;
-      return await _renderVectorDesignToImage(decoded.$1, maxCanvas: maxCanvas, is3D: is3D);
+      return await _renderVectorDesignToImage(decoded.$1, maxCanvas: maxCanvas, is3D: is3D, transparentBg: true);
     } catch (_) {
       return null;
     }
@@ -1118,7 +1120,7 @@ class DahaoParser {
         return _decodeDheDhaSync(filePath, lower.endsWith('.dhe'));
       });
       if (vec == null || vec.stX.length <= 2) return null;
-      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas, is3D: is3D);
+      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas, is3D: is3D, transparentBg: true);
     } catch (_) {
       return null;
     }
@@ -2347,7 +2349,8 @@ class UniversalFormatParser {
         lower.endsWith('.jef') ||
         lower.endsWith('.pes') ||
         lower.endsWith('.pec') ||
-        lower.endsWith('.tbf');
+        lower.endsWith('.tbf') ||
+        lower.endsWith('.xxx');
   }
 
   static Future<EmbDesignInfo?> parseFile(String filePath, {double maxCanvas = 1200.0}) async {
@@ -2389,7 +2392,7 @@ class UniversalFormatParser {
     try {
       final VectorDesignData? vec = await Isolate.run(() => _decodeAnySync(filePath));
       if (vec == null || vec.stX.length <= 2) return null;
-      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas, is3D: is3D);
+      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas, is3D: is3D, transparentBg: true);
     } catch (_) {
       return null;
     }
@@ -2407,6 +2410,7 @@ class UniversalFormatParser {
     if (lower.endsWith('.pes')) return _decodePesSync(bytes);
     if (lower.endsWith('.pec')) return _decodePecSync(bytes, 0, 'Brother (PEC)');
     if (lower.endsWith('.tbf')) return _decodeTbfSync(bytes);
+    if (lower.endsWith('.xxx')) return _decodeXxxSync(bytes);
     return null;
   }
 
@@ -2953,6 +2957,111 @@ class UniversalFormatParser {
       machineType: 'Tajima (TBF)',
     );
   }
+
+  /// Singer (.XXX)
+  static VectorDesignData? _decodeXxxSync(Uint8List bytes) {
+    if (bytes.length < 260) return null;
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    int x = 0, y = 0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int colorIdx = 0;
+    int colorCount = 1;
+    int stitchCount = 0;
+    int jumpCount = 0;
+    bool needMove = true;
+
+    int i = 256;
+    while (i + 1 < bytes.length) {
+      final int b0 = bytes[i];
+      final int b1 = bytes[i + 1];
+      i += 2;
+
+      if (b0 == 0x7F) {
+        if (b1 == 0x7F) {
+          break;
+        } else if (b1 == 0x08) {
+          colorIdx = (colorIdx + 1) % _defaultPalette.length;
+          colorCount++;
+          needMove = true;
+          if (i + 1 < bytes.length && bytes[i] == 0x00 && bytes[i + 1] == 0x00) {
+            i += 2;
+          }
+        } else if (b1 == 0x01 || b1 == 0x03) {
+          if (i + 1 < bytes.length) {
+            x += _s8(bytes[i]);
+            y += _s8(bytes[i + 1]);
+            i += 2;
+          }
+          jumpCount++;
+          needMove = true;
+        } else {
+          needMove = true;
+        }
+      } else if (b0 == 0x7D || b0 == 0x7E) {
+        if (i + 1 < bytes.length) {
+          x += _s8(bytes[i]);
+          y += _s8(bytes[i + 1]);
+          i += 2;
+        }
+        jumpCount++;
+        needMove = true;
+      } else {
+        x += _s8(b0);
+        y += _s8(b1);
+        final double px = x.toDouble();
+        final double py = -y.toDouble();
+        stX.add(px);
+        stY.add(py);
+        stMove.add(needMove ? 1 : 0);
+        stColor.add(colorIdx);
+        needMove = false;
+        stitchCount++;
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+
+    return VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: _defaultPalette,
+      stitches: stitchCount,
+      colorCount: colorCount,
+      stopsCount: colorCount > 1 ? colorCount - 1 : 0,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: 'Singer (XXX)',
+    );
+  }
 }
 
 /// محرك التصدير إلى صيغة تاجيما القياسية (.DST) من أي ملف داهوا أو صيغة متجهية
@@ -3172,6 +3281,7 @@ class UniversalExporter {
     {'ext': 'DSB', 'name': 'Barudan (.DSB)'},
     {'ext': 'JEF', 'name': 'Janome (.JEF)'},
     {'ext': 'TBF', 'name': 'Tajima Modern (.TBF)'},
+    {'ext': 'XXX', 'name': 'Singer (.XXX)'},
   ];
 
   static bool canExport(String filePath) => DstExporter.canExportToDst(filePath);
@@ -3214,6 +3324,8 @@ class UniversalExporter {
         return _encodeJef(vec);
       case 'TBF':
         return _encodeTbf(vec);
+      case 'XXX':
+        return _encodeXxx(vec);
       default:
         return DstExporter._convertFileToDstSync(sourcePath);
     }
@@ -3432,6 +3544,66 @@ class UniversalExporter {
     body.add(const [0x00, 0x00, 0x8F]);
 
     final Uint8List header = Uint8List(0x600);
+    final out = BytesBuilder(copy: false);
+    out.add(header);
+    out.add(body.takeBytes());
+    return out.takeBytes();
+  }
+
+
+  static Uint8List _encodeXxx(VectorDesignData vec) {
+    final body = BytesBuilder(copy: false);
+    final stX = vec.stX, stY = vec.stY, stMove = vec.stMove, stColor = vec.stColor;
+    int curX = 0, curY = 0;
+    int activeColor = stColor[0];
+    int colorChanges = 0;
+
+    void emitStep(int dx, int dy, bool isJump) {
+      int rx = dx, ry = dy;
+      while (rx.abs() > 120 || ry.abs() > 120) {
+        final int sx = rx.clamp(-120, 120);
+        final int sy = ry.clamp(-120, 120);
+        body.add([0x7F, 0x01, sx & 0xFF, sy & 0xFF]);
+        curX += sx;
+        curY += sy;
+        rx -= sx;
+        ry -= sy;
+      }
+      if (isJump) {
+        body.add([0x7F, 0x01, rx & 0xFF, ry & 0xFF]);
+      } else {
+        body.add([rx & 0xFF, ry & 0xFF]);
+      }
+      curX += rx;
+      curY += ry;
+    }
+
+    for (int i = 0; i < stX.length; i++) {
+      final int tx = stX[i].round();
+      final int ty = (-stY[i]).round();
+      final int c = stColor[i];
+      if (i > 0 && c != activeColor) {
+        body.add(const [0x7F, 0x08, 0x00, 0x00]);
+        colorChanges++;
+        activeColor = c;
+      }
+      final int dx = tx - curX;
+      final int dy = ty - curY;
+      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
+      if (isJump) {
+        emitStep(dx, dy, true);
+        emitStep(0, 0, false);
+      } else {
+        emitStep(dx, dy, false);
+      }
+    }
+    body.add(const [0x7F, 0x7F]);
+
+    final Uint8List header = Uint8List(256);
+    final bd = ByteData.sublistView(header);
+    bd.setUint32(0x1B, stX.length, Endian.little);
+    bd.setUint16(0x27, math.max(1, colorChanges + 1), Endian.little);
+
     final out = BytesBuilder(copy: false);
     out.add(header);
     out.add(body.takeBytes());
