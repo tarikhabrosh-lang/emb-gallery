@@ -17,7 +17,7 @@ import 'parsers/emb_parser.dart';
 final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
 
 String tr(String ar, String en) => isArabicNotifier.value ? ar : en;
-final validExtensions = ['.emb', '.dst', '.dhp', '.dha', '.dhe', '.pes', '.pec', '.exp', '.ef', '.vp3', '.xxx', '.u01'];
+final validExtensions = ['.emb', '.dst', '.dhp', '.dha', '.dhe', '.tbf', '.dsb', '.exp', '.pes', '.pec', '.jef', '.ef', '.vp3', '.xxx', '.u01'];
 
 int compareNatural(String a, String b) {
   final reg = RegExp(r'(\d+|\D+)');
@@ -47,6 +47,8 @@ Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
     return await EmbParser.parseFile(path);
   } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
     return await DahaoParser.parseFile(path, maxCanvas: 640.0);
+  } else if (UniversalFormatParser.isSupported(lower)) {
+    return await UniversalFormatParser.parseFile(path, maxCanvas: 640.0);
   } else {
     final name = path.split(Platform.pathSeparator).last;
     return EmbDesignInfo(
@@ -1355,10 +1357,37 @@ class DesignDetailScreen extends StatefulWidget {
 
 class _DesignDetailScreenState extends State<DesignDetailScreen> {
   bool _isSharing = false;
+  bool _isExportingDst = false;
 
   void _openFullScreenViewer() {
     if (widget.design.previewJpeg == null) return;
     Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenDesignViewer(design: widget.design)));
+  }
+
+  Future<void> _exportAndShareDst() async {
+    if (_isExportingDst) return;
+    setState(() => _isExportingDst = true);
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final baseName = widget.design.fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
+      final outPath = '${tempDir.path}/$baseName.DST';
+      final resultPath = await DstExporter.exportToDstFile(widget.design.filePath, outPath);
+      if (resultPath != null && await File(resultPath).exists()) {
+        await Share.shareXFiles([XFile(resultPath)], text: '$baseName.DST');
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr('تعذر تصدير هذا الملف إلى DST', 'Failed to export to DST'))),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${tr('خطأ في التصدير', 'Export error')}: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExportingDst = false);
+    }
   }
 
   Future<void> _shareOriginalFileOnly() async {
@@ -1564,6 +1593,34 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                               _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
                             ],
                           ),
+                          if (DstExporter.canExportToDst(d.filePath)) ...[
+                            const SizedBox(height: 14),
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton.icon(
+                                onPressed: _isExportingDst ? null : _exportAndShareDst,
+                                icon: _isExportingDst
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                                      )
+                                    : const Icon(Icons.file_download_outlined, size: 20),
+                                label: Text(
+                                  _isExportingDst
+                                      ? tr('جاري التحويل إلى DST...', 'Converting to DST...')
+                                      : tr('تصدير ومشاركة بصيغة DST', 'Export & Share as DST'),
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFFD4AF37),
+                                  foregroundColor: Colors.black,
+                                  padding: const EdgeInsets.symmetric(vertical: 11),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -1614,15 +1671,18 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
     final lower = widget.design.filePath.toLowerCase();
     final isDst = lower.endsWith('.dst');
     final isDahao = lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe');
-    if (!isDst && !isDahao) return;
+    final isUniversal = UniversalFormatParser.isSupported(lower);
+    if (!isDst && !isDahao && !isUniversal) return;
 
     if (mounted) setState(() => _loadingHd = true);
     Uint8List? hd;
     try {
       if (isDst) {
         hd = await DstParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
-      } else {
+      } else if (isDahao) {
         hd = await DahaoParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
+      } else {
+        hd = await UniversalFormatParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0);
       }
     } catch (_) {}
 
