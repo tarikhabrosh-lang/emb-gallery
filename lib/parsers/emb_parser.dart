@@ -663,7 +663,7 @@ Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double max
   }
 
   final int palLen = data.paletteArgb.length;
-  final double strokeW = maxCanvas >= 1800.0 ? 0.75 : 0.72;
+  final double strokeW = maxCanvas >= 1800.0 ? 0.95 : 0.88;
   final double minX = data.minX;
   final double minY = data.minY;
 
@@ -682,40 +682,50 @@ Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double max
     if (!hasMove || activeColorIdx < 0) return;
     final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
     if (is3D) {
-      final double threadW = (strokeW * 2.1).clamp(1.2, 3.2);
-      final double shOff = threadW * 0.42;
-      final double hiOff = threadW * 0.22;
+      final double threadW = (strokeW * 3.6).clamp(2.4, 5.6);
+      final double shOff = threadW * 0.44;
+      final double hiOff = threadW * 0.24;
 
-      // طبقة الظل السفلية لإبراز سماكة الخيط
+      // 1) ظل ناعم أوسع لإبراز ارتفاع الخيط فوق القماش
       canvas.save();
       canvas.translate(shOff, shOff);
       final shadowPaint = Paint()
-        ..color = Colors.black.withOpacity(0.28)
+        ..color = Colors.black.withOpacity(0.32)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = threadW * 1.15
+        ..strokeWidth = threadW * 1.28
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
       canvas.drawPath(currentPath, shadowPaint);
       canvas.restore();
 
-      // جسم الخيط الأساسي
-      final bodyPaint = Paint()
-        ..color = Color.lerp(baseColor, Colors.black, 0.14) ?? baseColor
+      // 2) حافة الخيط السفلية الداكنة (العمق ثلاثي الأبعاد)
+      final edgePaint = Paint()
+        ..color = Color.lerp(baseColor, Colors.black, 0.24) ?? baseColor
         ..style = PaintingStyle.stroke
         ..strokeWidth = threadW
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
-      canvas.drawPath(currentPath, bodyPaint);
+      canvas.drawPath(currentPath, edgePaint);
 
-      // لمعة الحرير العلوية (TrueView 3D Sheen)
+      // 3) قلب الخيط الغني باللون
+      final corePaint = Paint()
+        ..color = baseColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = threadW * 0.74
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      canvas.drawPath(currentPath, corePaint);
+
+      // 4) لمعة الحرير العلوية (TrueView 3D Silk Sheen)
       canvas.save();
       canvas.translate(-hiOff, -hiOff);
       final hiPaint = Paint()
-        ..color = (Color.lerp(baseColor, Colors.white, 0.48) ?? Colors.white).withOpacity(0.75)
+        ..color = (Color.lerp(baseColor, Colors.white, 0.56) ?? Colors.white).withOpacity(0.84)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = threadW * 0.38
+        ..strokeWidth = threadW * 0.30
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
@@ -996,8 +1006,8 @@ class DstParser {
     }
 
     final palette = Int32List.fromList(const [
-      0xFF1E88E5, 0xFFE53935, 0xFF43A047, 0xFFFDD835, 0xFF8E24AA,
-      0xFFF4511E, 0xFF00ACC1, 0xFFD81B60, 0xFF7CB342, 0xFF3949AB,
+      0xFF007BFF, 0xFFFF1744, 0xFF00C853, 0xFFFFB300, 0xFFD500F9,
+      0xFFFF5722, 0xFF00E5FF, 0xFFFF007F, 0xFF76FF03, 0xFF3D5AFE,
     ]);
 
     final vec = VectorDesignData(
@@ -2417,9 +2427,9 @@ class UniversalFormatParser {
   static int _s8(int b) => b >= 128 ? b - 256 : b;
 
   static final Int32List _defaultPalette = Int32List.fromList(const [
-    0xFF1E88E5, 0xFFE53935, 0xFF43A047, 0xFFFDD835, 0xFF8E24AA,
-    0xFFF4511E, 0xFF00ACC1, 0xFFD81B60, 0xFF7CB342, 0xFF3949AB,
-    0xFF00897B, 0xFF6D4C41, 0xFF5C6BC0, 0xFFFB8C00,
+    0xFF007BFF, 0xFFFF1744, 0xFF00C853, 0xFFFFB300, 0xFFD500F9,
+    0xFFFF5722, 0xFF00E5FF, 0xFFFF007F, 0xFF76FF03, 0xFF3D5AFE,
+    0xFF00BFA5, 0xFFFF6D00, 0xFF651FFF, 0xFFFFD600,
   ]);
 
   static final Int32List _pecPalette = Int32List.fromList(const [
@@ -3106,6 +3116,11 @@ class DstExporter {
         .last
         .replaceAll(RegExp(r'\.[^.]+$'), '')
         .replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+    return _encodeDstFromVector(vec, baseName);
+  }
+
+  static Uint8List _encodeDstFromVector(VectorDesignData vec, String rawBaseName) {
+    final String baseName = rawBaseName.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
     final String label = (baseName.isEmpty ? 'TARIK_EMB' : baseName).padRight(16).substring(0, 16);
 
     final body = BytesBuilder(copy: false);
@@ -3608,5 +3623,307 @@ class UniversalExporter {
     out.add(header);
     out.add(body.takeBytes());
     return out.takeBytes();
+  }
+}
+
+
+/// محرك تعديل التصاميم المتجهية (تكبير/تصغير، دوران، قلب، حذف لون، حذف غرز)
+class VectorDesignEditor {
+  static VectorDesignData transform(
+    VectorDesignData src, {
+    double scale = 1.0,
+    double rotationDeg = 0.0,
+    bool flipH = false,
+    bool flipV = false,
+    Set<int> deletedColors = const {},
+    int? trimStart,
+    int? trimEnd,
+  }) {
+    final int total = src.stX.length;
+    if (total == 0) return src;
+
+    final int startIdx = (trimStart ?? 0).clamp(0, total);
+    final int endIdx = (trimEnd ?? total).clamp(startIdx, total);
+
+    final double cx = src.hasBounds ? (src.minX + src.maxX) * 0.5 : 0.0;
+    final double cy = src.hasBounds ? (src.minY + src.maxY) * 0.5 : 0.0;
+    final double rad = rotationDeg * math.pi / 180.0;
+    final double cosA = math.cos(rad);
+    final double sinA = math.sin(rad);
+
+    (double, double) xform(double x, double y) {
+      double dx = (x - cx) * scale * (flipH ? -1.0 : 1.0);
+      double dy = (y - cy) * scale * (flipV ? -1.0 : 1.0);
+      final double rx = dx * cosA - dy * sinA + cx;
+      final double ry = dx * sinA + dy * cosA + cy;
+      return (rx, ry);
+    }
+
+    final stX = _Float32Buf(math.max(64, endIdx - startIdx));
+    final stY = _Float32Buf(math.max(64, endIdx - startIdx));
+    final stMove = _Uint8Buf(math.max(64, endIdx - startIdx));
+    final stColor = _Uint8Buf(math.max(64, endIdx - startIdx));
+
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    bool forceMove = true;
+    final Set<int> usedColors = {};
+
+    for (int i = startIdx; i < endIdx; i++) {
+      final int c = src.stColor[i];
+      if (deletedColors.contains(c)) {
+        forceMove = true;
+        continue;
+      }
+      final pt = xform(src.stX[i], src.stY[i]);
+      final double px = pt.$1;
+      final double py = pt.$2;
+      stX.add(px);
+      stY.add(py);
+      stMove.add((forceMove || src.stMove[i] != 0) ? 1 : 0);
+      stColor.add(c);
+      usedColors.add(c);
+      forceMove = false;
+
+      if (!hasBounds) {
+        minX = maxX = px;
+        minY = maxY = py;
+        hasBounds = true;
+      } else {
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+      }
+    }
+
+    final seqX = _Float32Buf(math.max(16, src.seqX.length));
+    final seqY = _Float32Buf(math.max(16, src.seqY.length));
+    for (int i = 0; i < src.seqX.length; i++) {
+      final pt = xform(src.seqX[i], src.seqY[i]);
+      seqX.add(pt.$1);
+      seqY.add(pt.$2);
+    }
+
+    final beadX = _Float32Buf(math.max(16, src.beadX.length));
+    final beadY = _Float32Buf(math.max(16, src.beadY.length));
+    for (int i = 0; i < src.beadX.length; i++) {
+      final pt = xform(src.beadX[i], src.beadY[i]);
+      beadX.add(pt.$1);
+      beadY.add(pt.$2);
+    }
+
+    return VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: seqX.finish(),
+      seqY: seqY.finish(),
+      seqCode: src.seqCode,
+      beadX: beadX.finish(),
+      beadY: beadY.finish(),
+      beadCode: src.beadCode,
+      paletteArgb: src.paletteArgb,
+      stitches: stX.length,
+      colorCount: math.max(1, usedColors.length),
+      stopsCount: usedColors.length > 1 ? usedColors.length - 1 : 0,
+      jumpsCount: src.jumpsCount,
+      sequinsCount: src.sequinsCount,
+      beadsCount: src.beadsCount,
+      trimsCount: src.trimsCount,
+      minX: hasBounds ? minX : 0,
+      maxX: hasBounds ? maxX : 0,
+      minY: hasBounds ? minY : 0,
+      maxY: hasBounds ? maxY : 0,
+      hasBounds: hasBounds,
+      machineType: src.machineType,
+    );
+  }
+
+  static Future<String?> exportVectorToFile(
+    VectorDesignData vec,
+    String outputPath,
+    String targetExt, {
+    String baseName = 'TARIK_EMB',
+  }) async {
+    try {
+      final String ext = targetExt.toUpperCase().replaceAll('.', '');
+      final Uint8List? bytes = await Isolate.run(() {
+        if (vec.stX.length < 2) return null;
+        switch (ext) {
+          case 'EXP':
+            return UniversalExporter._encodeExp(vec);
+          case 'DSB':
+            return UniversalExporter._encodeDsb(vec);
+          case 'JEF':
+            return UniversalExporter._encodeJef(vec);
+          case 'TBF':
+            return UniversalExporter._encodeTbf(vec);
+          case 'XXX':
+            return UniversalExporter._encodeXxx(vec);
+          case 'DST':
+          default:
+            return DstExporter._encodeDstFromVector(vec, baseName);
+        }
+      });
+      if (bytes == null || bytes.isEmpty) return null;
+      final outFile = File(outputPath);
+      await outFile.writeAsBytes(bytes, flush: true);
+      return outFile.path;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+
+/// محرك تحويل الكتابة العربية والإنجليزية إلى غرز تطريز حقيقية (Tatami Fill)
+class TextToStitchEngine {
+  static Future<VectorDesignData?> generateFromText({
+    required String text,
+    double widthCm = 12.0,
+    double densityMm = 0.45,
+    int colorArgb = 0xFFFF1744,
+    bool isBold = true,
+  }) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
+
+    // 1) رسم النص بدقة عالية على لوحة شفافة (يدعم تشكيل واتصال الحروف العربية بالكامل)
+    const double fontSize = 140.0;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: trimmed,
+        style: TextStyle(
+          color: const Color(0xFFFFFFFF),
+          fontSize: fontSize,
+          fontWeight: isBold ? FontWeight.w800 : FontWeight.w500,
+          height: 1.2,
+        ),
+      ),
+      textDirection: RegExp(r'[\u0600-\u06FF]').hasMatch(trimmed)
+          ? TextDirection.rtl
+          : TextDirection.ltr,
+      textAlign: TextAlign.center,
+    )..layout(maxWidth: 1600);
+
+    final int w = math.max(16, tp.width.ceil() + 24);
+    final int h = math.max(16, tp.height.ceil() + 24);
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()));
+    tp.paint(canvas, const Offset(12, 12));
+    final picture = recorder.endRecording();
+    final ui.Image img = await picture.toImage(w, h);
+    final ByteData? rgba = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+    img.dispose();
+    picture.dispose();
+    if (rgba == null) return null;
+
+    final Uint8List pixels = rgba.buffer.asUint8List();
+
+    // 2) تحويل البكسلات المرسومة إلى غرز تطريز تاتامي (وحدة الغرزة = 0.1 مم)
+    final double targetWidthUnits = (widthCm * 100.0).clamp(200.0, 4500.0);
+    final double pxToUnits = targetWidthUnits / w;
+    final int rowStepPx = math.max(1, ((densityMm * 10.0) / pxToUnits).round());
+    final int stitchStepPx = math.max(2, (32.0 / pxToUnits).round()); // ~3.2 مم طول الغرزة
+
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    bool leftToRight = true;
+    int jumpCount = 0;
+
+    void addPt(double px, double py, bool isMove) {
+      stX.add(px);
+      stY.add(py);
+      stMove.add(isMove ? 1 : 0);
+      stColor.add(0);
+      if (isMove) jumpCount++;
+      if (!hasBounds) {
+        minX = maxX = px;
+        minY = maxY = py;
+        hasBounds = true;
+      } else {
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+      }
+    }
+
+    for (int y = 0; y < h; y += rowStepPx) {
+      // استخراج المقاطع الأفقية الممتلئة في هذا السطر
+      final List<(int, int)> runs = [];
+      int x = 0;
+      while (x < w) {
+        while (x < w && pixels[(y * w + x) * 4 + 3] < 96) {
+          x++;
+        }
+        if (x >= w) break;
+        final int startX = x;
+        while (x < w && pixels[(y * w + x) * 4 + 3] >= 96) {
+          x++;
+        }
+        if (x - startX >= 2) {
+          runs.add((startX, x - 1));
+        }
+      }
+      if (runs.isEmpty) continue;
+
+      final orderedRuns = leftToRight ? runs : runs.reversed.toList();
+      for (final run in orderedRuns) {
+        final int a = leftToRight ? run.$1 : run.$2;
+        final int b = leftToRight ? run.$2 : run.$1;
+        final double py = y * pxToUnits;
+
+        addPt(a * pxToUnits, py, true);
+        final int dist = (b - a).abs();
+        if (dist > stitchStepPx) {
+          final int dir = b > a ? 1 : -1;
+          for (int cx = a + dir * stitchStepPx; dir > 0 ? cx < b : cx > b; cx += dir * stitchStepPx) {
+            addPt(cx * pxToUnits, py, false);
+          }
+        }
+        addPt(b * pxToUnits, py, false);
+      }
+      leftToRight = !leftToRight;
+    }
+
+    if (stX.length < 2) return null;
+
+    return VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: Int32List.fromList([colorArgb]),
+      stitches: stX.length,
+      colorCount: 1,
+      stopsCount: 0,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: 'Tarik Lettering',
+    );
   }
 }
