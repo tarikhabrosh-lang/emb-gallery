@@ -535,7 +535,7 @@ class _Uint8Buf {
 }
 
 /// حزمة متجهية نقية (Pure Dart TypedData) تُجهّز في الخيط الخلفي وتُسلَّم جاهزة للرسم السريع
-class _VectorDesignData {
+class VectorDesignData {
   final Float32List stX;
   final Float32List stY;
   final Uint8List stMove; // 1 = moveTo (بعد قفزة أو تغيير لون), 0 = lineTo
@@ -555,7 +555,7 @@ class _VectorDesignData {
   final bool hasBounds;
   final String machineType;
 
-  _VectorDesignData({
+  VectorDesignData({
     required this.stX,
     required this.stY,
     required this.stMove,
@@ -642,7 +642,7 @@ class _BufferedFileReader {
 }
 
 /// محرك رسم موحّد ومُسرّع بالـ GPU (تجميع الخرز عبر drawRawPoints والترتر عبر 4 مسارات Path)
-Future<Uint8List?> _renderVectorDesignToImage(_VectorDesignData data, {double maxCanvas = 1200.0}) async {
+Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double maxCanvas = 1200.0, bool is3D = false}) async {
   if (!data.hasBounds || data.stX.length < 2) return null;
   final double rawW = data.maxX - data.minX;
   final double rawH = data.maxY - data.minY;
@@ -678,14 +678,57 @@ Future<Uint8List?> _renderVectorDesignToImage(_VectorDesignData data, {double ma
 
   void flushPath() {
     if (!hasMove || activeColorIdx < 0) return;
-    final paint = Paint()
-      ..color = Color(data.paletteArgb[activeColorIdx % palLen])
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeW
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..isAntiAlias = true;
-    canvas.drawPath(currentPath, paint);
+    final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
+    if (is3D) {
+      final double threadW = (strokeW * 2.1).clamp(1.2, 3.2);
+      final double shOff = threadW * 0.42;
+      final double hiOff = threadW * 0.22;
+
+      // طبقة الظل السفلية لإبراز سماكة الخيط
+      canvas.save();
+      canvas.translate(shOff, shOff);
+      final shadowPaint = Paint()
+        ..color = Colors.black.withOpacity(0.28)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = threadW * 1.15
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      canvas.drawPath(currentPath, shadowPaint);
+      canvas.restore();
+
+      // جسم الخيط الأساسي
+      final bodyPaint = Paint()
+        ..color = Color.lerp(baseColor, Colors.black, 0.14) ?? baseColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = threadW
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      canvas.drawPath(currentPath, bodyPaint);
+
+      // لمعة الحرير العلوية (TrueView 3D Sheen)
+      canvas.save();
+      canvas.translate(-hiOff, -hiOff);
+      final hiPaint = Paint()
+        ..color = (Color.lerp(baseColor, Colors.white, 0.48) ?? Colors.white).withOpacity(0.75)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = threadW * 0.38
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      canvas.drawPath(currentPath, hiPaint);
+      canvas.restore();
+    } else {
+      final paint = Paint()
+        ..color = baseColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeW
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      canvas.drawPath(currentPath, paint);
+    }
     currentPath = Path();
     hasMove = false;
   }
@@ -852,17 +895,17 @@ class DstParser {
   }
 
   /// توليد معاينة فائقة الدقة (2200 بكسل) عند فتح شاشة التكبير
-  static Future<Uint8List?> renderHighResPreview(String filePath, {double maxCanvas = 2200.0}) async {
+  static Future<Uint8List?> renderHighResPreview(String filePath, {double maxCanvas = 2200.0, bool is3D = false}) async {
     try {
       final decoded = await Isolate.run(() => _decodeDstSync(filePath));
       if (decoded == null) return null;
-      return await _renderVectorDesignToImage(decoded.$1, maxCanvas: maxCanvas);
+      return await _renderVectorDesignToImage(decoded.$1, maxCanvas: maxCanvas, is3D: is3D);
     } catch (_) {
       return null;
     }
   }
 
-  static (_VectorDesignData, int, int, double, double)? _decodeDstSync(String filePath) {
+  static (VectorDesignData, int, int, double, double)? _decodeDstSync(String filePath) {
     final file = File(filePath);
     if (!file.existsSync()) return null;
     final bytes = file.readAsBytesSync();
@@ -955,7 +998,7 @@ class DstParser {
       0xFFF4511E, 0xFF00ACC1, 0xFFD81B60, 0xFF7CB342, 0xFF3949AB,
     ]);
 
-    final vec = _VectorDesignData(
+    final vec = VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
       stMove: stMove.finish(),
@@ -1029,7 +1072,7 @@ class DahaoParser {
       final lower = filePath.toLowerCase();
       final fileName = filePath.split(Platform.pathSeparator).last;
 
-      final _VectorDesignData? vec = await Isolate.run(() {
+      final VectorDesignData? vec = await Isolate.run(() {
         if (lower.endsWith('.dhp')) {
           return _decodeDhpSync(filePath);
         }
@@ -1065,17 +1108,17 @@ class DahaoParser {
   }
 
   /// توليد معاينة فائقة الدقة (2200 بكسل) عند فتح شاشة التكبير للتفاصيل الدقيقة
-  static Future<Uint8List?> renderHighResPreview(String filePath, {double maxCanvas = 2200.0}) async {
+  static Future<Uint8List?> renderHighResPreview(String filePath, {double maxCanvas = 2200.0, bool is3D = false}) async {
     try {
       final lower = filePath.toLowerCase();
-      final _VectorDesignData? vec = await Isolate.run(() {
+      final VectorDesignData? vec = await Isolate.run(() {
         if (lower.endsWith('.dhp')) {
           return _decodeDhpSync(filePath);
         }
         return _decodeDheDhaSync(filePath, lower.endsWith('.dhe'));
       });
       if (vec == null || vec.stX.length <= 2) return null;
-      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas);
+      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas, is3D: is3D);
     } catch (_) {
       return null;
     }
@@ -1149,7 +1192,7 @@ class DahaoParser {
   }
 
   /// قارئ .DHP أحادي المرور بذاكرة صفحات 4×1 ميجا (أسرع بأكثر من 1500 ضعف من القراءة الفردية)
-  static _VectorDesignData? _decodeDhpSync(String filePath) {
+  static VectorDesignData? _decodeDhpSync(String filePath) {
     RandomAccessFile? raf;
     try {
       final file = File(filePath);
@@ -1182,7 +1225,7 @@ class DahaoParser {
 
       final int tailOffset = _findDhpChainTailSync(reader, fileLen);
       if (tailOffset == -1) {
-        return _VectorDesignData(
+        return VectorDesignData(
           stX: Float32List(0),
           stY: Float32List(0),
           stMove: Uint8List(0),
@@ -1358,7 +1401,7 @@ class DahaoParser {
         }
       }
 
-      return _VectorDesignData(
+      return VectorDesignData(
         stX: stX.finish(),
         stY: stY.finish(),
         stMove: stMove.finish(),
@@ -1440,7 +1483,7 @@ class DahaoParser {
   }
 
   /// فك تشفير .DHE / .DHA بالكامل داخل الخيط الخلفي (Isolate)
-  static _VectorDesignData? _decodeDheDhaSync(String filePath, bool isDhe) {
+  static VectorDesignData? _decodeDheDhaSync(String filePath, bool isDhe) {
     final file = File(filePath);
     if (!file.existsSync()) return null;
     final bytes = file.readAsBytesSync();
@@ -1470,7 +1513,7 @@ class DahaoParser {
     final seqCode = _Uint8Buf(2048);
 
     if (startPos >= endPos - 3) {
-      return _VectorDesignData(
+      return VectorDesignData(
         stX: Float32List(0),
         stY: Float32List(0),
         stMove: Uint8List(0),
@@ -1683,7 +1726,7 @@ class DahaoParser {
       }
     }
 
-    return _VectorDesignData(
+    return VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
       stMove: stMove.finish(),
@@ -2312,7 +2355,7 @@ class UniversalFormatParser {
       final file = File(filePath);
       if (!await file.exists()) return null;
 
-      final _VectorDesignData? vec = await Isolate.run(() => _decodeAnySync(filePath));
+      final VectorDesignData? vec = await Isolate.run(() => _decodeAnySync(filePath));
       if (vec == null) return null;
 
       Uint8List? previewPng;
@@ -2342,17 +2385,17 @@ class UniversalFormatParser {
     }
   }
 
-  static Future<Uint8List?> renderHighResPreview(String filePath, {double maxCanvas = 2200.0}) async {
+  static Future<Uint8List?> renderHighResPreview(String filePath, {double maxCanvas = 2200.0, bool is3D = false}) async {
     try {
-      final _VectorDesignData? vec = await Isolate.run(() => _decodeAnySync(filePath));
+      final VectorDesignData? vec = await Isolate.run(() => _decodeAnySync(filePath));
       if (vec == null || vec.stX.length <= 2) return null;
-      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas);
+      return await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas, is3D: is3D);
     } catch (_) {
       return null;
     }
   }
 
-  static _VectorDesignData? _decodeAnySync(String filePath) {
+  static VectorDesignData? _decodeAnySync(String filePath) {
     final file = File(filePath);
     if (!file.existsSync()) return null;
     final bytes = file.readAsBytesSync();
@@ -2390,7 +2433,7 @@ class UniversalFormatParser {
   ]);
 
   /// Melco / Bernina (.EXP)
-  static _VectorDesignData? _decodeExpSync(Uint8List bytes) {
+  static VectorDesignData? _decodeExpSync(Uint8List bytes) {
     if (bytes.length < 4) return null;
     final stX = _Float32Buf(8192);
     final stY = _Float32Buf(8192);
@@ -2456,7 +2499,7 @@ class UniversalFormatParser {
       }
     }
 
-    return _VectorDesignData(
+    return VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
       stMove: stMove.finish(),
@@ -2485,7 +2528,7 @@ class UniversalFormatParser {
   }
 
   /// Barudan (.DSB)
-  static _VectorDesignData? _decodeDsbSync(Uint8List bytes) {
+  static VectorDesignData? _decodeDsbSync(Uint8List bytes) {
     if (bytes.length < 515) return null;
     final stX = _Float32Buf(8192);
     final stY = _Float32Buf(8192);
@@ -2544,7 +2587,7 @@ class UniversalFormatParser {
       }
     }
 
-    return _VectorDesignData(
+    return VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
       stMove: stMove.finish(),
@@ -2573,7 +2616,7 @@ class UniversalFormatParser {
   }
 
   /// Janome (.JEF)
-  static _VectorDesignData? _decodeJefSync(Uint8List bytes) {
+  static VectorDesignData? _decodeJefSync(Uint8List bytes) {
     if (bytes.length < 120) return null;
     final bd = ByteData.sublistView(bytes);
     final int stitchOffset = bd.getUint32(0, Endian.little);
@@ -2644,7 +2687,7 @@ class UniversalFormatParser {
     }
 
     final int validColors = (rawColors > 0 && rawColors < 128) ? rawColors : colorCount;
-    return _VectorDesignData(
+    return VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
       stMove: stMove.finish(),
@@ -2673,7 +2716,7 @@ class UniversalFormatParser {
   }
 
   /// Brother (.PES -> يستخرج قسم PEC المدمج)
-  static _VectorDesignData? _decodePesSync(Uint8List bytes) {
+  static VectorDesignData? _decodePesSync(Uint8List bytes) {
     if (bytes.length < 32) return null;
     final bd = ByteData.sublistView(bytes);
     int pecStart = -1;
@@ -2697,7 +2740,7 @@ class UniversalFormatParser {
   }
 
   /// Brother (.PEC)
-  static _VectorDesignData? _decodePecSync(Uint8List bytes, int baseOff, String machineLabel) {
+  static VectorDesignData? _decodePecSync(Uint8List bytes, int baseOff, String machineLabel) {
     if (baseOff + 532 >= bytes.length) return null;
     final int colorChanges = bytes[baseOff + 48];
     final int numColors = colorChanges + 1;
@@ -2799,7 +2842,7 @@ class UniversalFormatParser {
       }
     }
 
-    return _VectorDesignData(
+    return VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
       stMove: stMove.finish(),
@@ -2828,7 +2871,7 @@ class UniversalFormatParser {
   }
 
   /// Tajima Modern (.TBF)
-  static _VectorDesignData? _decodeTbfSync(Uint8List bytes) {
+  static VectorDesignData? _decodeTbfSync(Uint8List bytes) {
     if (bytes.length < 0x603) return null;
     final stX = _Float32Buf(8192);
     final stY = _Float32Buf(8192);
@@ -2883,7 +2926,7 @@ class UniversalFormatParser {
       }
     }
 
-    return _VectorDesignData(
+    return VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
       stMove: stMove.finish(),
@@ -2937,7 +2980,7 @@ class DstExporter {
 
   static Uint8List? _convertFileToDstSync(String sourcePath) {
     final lower = sourcePath.toLowerCase();
-    _VectorDesignData? vec;
+    VectorDesignData? vec;
     if (lower.endsWith('.dhp')) {
       vec = DahaoParser._decodeDhpSync(sourcePath);
     } else if (lower.endsWith('.dhe') || lower.endsWith('.dha')) {
@@ -3084,5 +3127,314 @@ class DstExporter {
     out.addByte(b0);
     out.addByte(b1);
     out.addByte(b2);
+  }
+}
+
+
+/// محمّل بيانات المتجهات لمحاكي التطريز (Stitch Player) والعرض ثلاثي الأبعاد (3D)
+class VectorDesignLoader {
+  static bool supportsVectorView(String filePath) {
+    final lower = filePath.toLowerCase();
+    return lower.endsWith('.dhp') ||
+        lower.endsWith('.dha') ||
+        lower.endsWith('.dhe') ||
+        lower.endsWith('.dst') ||
+        UniversalFormatParser.isSupported(lower);
+  }
+
+  static Future<VectorDesignData?> load(String filePath) async {
+    try {
+      return await Isolate.run(() {
+        final lower = filePath.toLowerCase();
+        if (lower.endsWith('.dhp')) {
+          return DahaoParser._decodeDhpSync(filePath);
+        } else if (lower.endsWith('.dhe') || lower.endsWith('.dha')) {
+          return DahaoParser._decodeDheDhaSync(filePath, lower.endsWith('.dhe'));
+        } else if (lower.endsWith('.dst')) {
+          return DstParser._decodeDstSync(filePath)?.$1;
+        } else if (UniversalFormatParser.isSupported(lower)) {
+          return UniversalFormatParser._decodeAnySync(filePath);
+        }
+        return null;
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+
+/// محرك التصدير متعدد الصيغ (.DST, .EXP, .DSB, .JEF, .TBF)
+class UniversalExporter {
+  static const List<Map<String, String>> supportedFormats = [
+    {'ext': 'DST', 'name': 'Tajima (.DST)'},
+    {'ext': 'EXP', 'name': 'Melco / Bernina (.EXP)'},
+    {'ext': 'DSB', 'name': 'Barudan (.DSB)'},
+    {'ext': 'JEF', 'name': 'Janome (.JEF)'},
+    {'ext': 'TBF', 'name': 'Tajima Modern (.TBF)'},
+  ];
+
+  static bool canExport(String filePath) => DstExporter.canExportToDst(filePath);
+
+  static Future<String?> exportToFormat(String sourcePath, String outputPath, String targetExt) async {
+    try {
+      final String ext = targetExt.toUpperCase().replaceAll('.', '');
+      final Uint8List? outBytes = await Isolate.run(() => _convertSync(sourcePath, ext));
+      if (outBytes == null || outBytes.isEmpty) return null;
+      final outFile = File(outputPath);
+      await outFile.writeAsBytes(outBytes, flush: true);
+      return outFile.path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Uint8List? _convertSync(String sourcePath, String ext) {
+    if (ext == 'DST') return DstExporter._convertFileToDstSync(sourcePath);
+
+    final lower = sourcePath.toLowerCase();
+    VectorDesignData? vec;
+    if (lower.endsWith('.dhp')) {
+      vec = DahaoParser._decodeDhpSync(sourcePath);
+    } else if (lower.endsWith('.dhe') || lower.endsWith('.dha')) {
+      vec = DahaoParser._decodeDheDhaSync(sourcePath, lower.endsWith('.dhe'));
+    } else if (lower.endsWith('.dst')) {
+      vec = DstParser._decodeDstSync(sourcePath)?.$1;
+    } else {
+      vec = UniversalFormatParser._decodeAnySync(sourcePath);
+    }
+    if (vec == null || vec.stX.length < 2) return null;
+
+    switch (ext) {
+      case 'EXP':
+        return _encodeExp(vec);
+      case 'DSB':
+        return _encodeDsb(vec);
+      case 'JEF':
+        return _encodeJef(vec);
+      case 'TBF':
+        return _encodeTbf(vec);
+      default:
+        return DstExporter._convertFileToDstSync(sourcePath);
+    }
+  }
+
+  static Uint8List _encodeExp(VectorDesignData vec) {
+    final out = BytesBuilder(copy: false);
+    final stX = vec.stX, stY = vec.stY, stMove = vec.stMove, stColor = vec.stColor;
+    int curX = 0, curY = 0;
+    int activeColor = stColor[0];
+
+    void emitStep(int dx, int dy, bool isJump) {
+      int rx = dx, ry = dy;
+      while (rx.abs() > 127 || ry.abs() > 127) {
+        final int sx = rx.clamp(-127, 127);
+        final int sy = ry.clamp(-127, 127);
+        out.add([0x80, 0x04, sx & 0xFF, sy & 0xFF]);
+        curX += sx;
+        curY += sy;
+        rx -= sx;
+        ry -= sy;
+      }
+      if (isJump) {
+        out.add([0x80, 0x04, rx & 0xFF, ry & 0xFF]);
+      } else {
+        out.add([rx & 0xFF, ry & 0xFF]);
+      }
+      curX += rx;
+      curY += ry;
+    }
+
+    for (int i = 0; i < stX.length; i++) {
+      final int tx = stX[i].round();
+      final int ty = (-stY[i]).round();
+      final int c = stColor[i];
+      if (i > 0 && c != activeColor) {
+        out.add(const [0x80, 0x01, 0x00, 0x00]);
+        activeColor = c;
+      }
+      final int dx = tx - curX;
+      final int dy = ty - curY;
+      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
+      if (isJump) {
+        emitStep(dx, dy, true);
+        emitStep(0, 0, false);
+      } else {
+        emitStep(dx, dy, false);
+      }
+    }
+    out.add(const [0x80, 0x80]);
+    return out.takeBytes();
+  }
+
+  static Uint8List _encodeDsb(VectorDesignData vec) {
+    final body = BytesBuilder(copy: false);
+    final stX = vec.stX, stY = vec.stY, stMove = vec.stMove, stColor = vec.stColor;
+    int curX = 0, curY = 0;
+    int activeColor = stColor[0];
+
+    void emitStep(int dx, int dy, int cmd) {
+      int rx = dx, ry = dy;
+      while (rx.abs() > 127 || ry.abs() > 127) {
+        final int sx = rx.clamp(-127, 127);
+        final int sy = ry.clamp(-127, 127);
+        int ctrl = 0x81; // jump
+        if (sy < 0) ctrl |= 0x40;
+        if (sx < 0) ctrl |= 0x20;
+        body.add([ctrl, sy.abs(), sx.abs()]);
+        curX += sx;
+        curY += sy;
+        rx -= sx;
+        ry -= sy;
+      }
+      int ctrl = 0x80 | cmd;
+      if (ry < 0) ctrl |= 0x40;
+      if (rx < 0) ctrl |= 0x20;
+      body.add([ctrl, ry.abs(), rx.abs()]);
+      curX += rx;
+      curY += ry;
+    }
+
+    for (int i = 0; i < stX.length; i++) {
+      final int tx = stX[i].round();
+      final int ty = (-stY[i]).round();
+      final int c = stColor[i];
+      if (i > 0 && c != activeColor) {
+        emitStep(0, 0, 0x08); // color change
+        activeColor = c;
+      }
+      final int dx = tx - curX;
+      final int dy = ty - curY;
+      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
+      if (isJump) {
+        emitStep(dx, dy, 0x01);
+        emitStep(0, 0, 0x00);
+      } else {
+        emitStep(dx, dy, 0x00);
+      }
+    }
+    body.add(const [0xF8, 0x00, 0x00]);
+
+    final Uint8List header = Uint8List(512)..fillRange(0, 512, 0x20);
+    final out = BytesBuilder(copy: false);
+    out.add(header);
+    out.add(body.takeBytes());
+    return out.takeBytes();
+  }
+
+  static Uint8List _encodeJef(VectorDesignData vec) {
+    final body = BytesBuilder(copy: false);
+    final stX = vec.stX, stY = vec.stY, stMove = vec.stMove, stColor = vec.stColor;
+    int curX = 0, curY = 0;
+    int activeColor = stColor[0];
+    int colorChanges = 0;
+
+    void emitStep(int dx, int dy, bool isJump) {
+      int rx = dx, ry = dy;
+      while (rx.abs() > 127 || ry.abs() > 127) {
+        final int sx = rx.clamp(-127, 127);
+        final int sy = ry.clamp(-127, 127);
+        body.add([0x80, 0x02, sx & 0xFF, sy & 0xFF]);
+        curX += sx;
+        curY += sy;
+        rx -= sx;
+        ry -= sy;
+      }
+      if (isJump) {
+        body.add([0x80, 0x02, rx & 0xFF, ry & 0xFF]);
+      } else {
+        body.add([rx & 0xFF, ry & 0xFF]);
+      }
+      curX += rx;
+      curY += ry;
+    }
+
+    for (int i = 0; i < stX.length; i++) {
+      final int tx = stX[i].round();
+      final int ty = (-stY[i]).round();
+      final int c = stColor[i];
+      if (i > 0 && c != activeColor) {
+        body.add(const [0x80, 0x01]);
+        colorChanges++;
+        activeColor = c;
+      }
+      final int dx = tx - curX;
+      final int dy = ty - curY;
+      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
+      if (isJump) {
+        emitStep(dx, dy, true);
+        emitStep(0, 0, false);
+      } else {
+        emitStep(dx, dy, false);
+      }
+    }
+    body.add(const [0x80, 0x10]);
+
+    final int numColors = math.max(1, colorChanges + 1);
+    final int stitchOffset = 116 + numColors * 8;
+    final Uint8List header = Uint8List(stitchOffset);
+    final bd = ByteData.sublistView(header);
+    bd.setUint32(0, stitchOffset, Endian.little);
+    bd.setUint32(4, 0x0A, Endian.little);
+    bd.setUint32(24, numColors, Endian.little);
+    bd.setUint32(28, stX.length, Endian.little);
+    for (int i = 0; i < numColors; i++) {
+      bd.setUint32(116 + i * 4, (i % 78) + 1, Endian.little);
+      bd.setUint32(116 + numColors * 4 + i * 4, 0x0D, Endian.little);
+    }
+
+    final out = BytesBuilder(copy: false);
+    out.add(header);
+    out.add(body.takeBytes());
+    return out.takeBytes();
+  }
+
+  static Uint8List _encodeTbf(VectorDesignData vec) {
+    final body = BytesBuilder(copy: false);
+    final stX = vec.stX, stY = vec.stY, stMove = vec.stMove, stColor = vec.stColor;
+    int curX = 0, curY = 0;
+    int activeColor = stColor[0];
+
+    void emitStep(int dx, int dy, int ctrl) {
+      int rx = dx, ry = dy;
+      while (rx.abs() > 127 || ry.abs() > 127) {
+        final int sx = rx.clamp(-127, 127);
+        final int sy = ry.clamp(-127, 127);
+        body.add([sx & 0xFF, sy & 0xFF, 0x81]);
+        curX += sx;
+        curY += sy;
+        rx -= sx;
+        ry -= sy;
+      }
+      body.add([rx & 0xFF, ry & 0xFF, ctrl]);
+      curX += rx;
+      curY += ry;
+    }
+
+    for (int i = 0; i < stX.length; i++) {
+      final int tx = stX[i].round();
+      final int ty = (-stY[i]).round();
+      final int c = stColor[i];
+      if (i > 0 && c != activeColor) {
+        emitStep(0, 0, 0x86);
+        activeColor = c;
+      }
+      final int dx = tx - curX;
+      final int dy = ty - curY;
+      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
+      if (isJump) {
+        emitStep(dx, dy, 0x81);
+        emitStep(0, 0, 0x80);
+      } else {
+        emitStep(dx, dy, 0x80);
+      }
+    }
+    body.add(const [0x00, 0x00, 0x8F]);
+
+    final Uint8List header = Uint8List(0x600);
+    final out = BytesBuilder(copy: false);
+    out.add(header);
+    out.add(body.takeBytes());
+    return out.takeBytes();
   }
 }
