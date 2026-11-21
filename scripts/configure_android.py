@@ -121,8 +121,13 @@ class MainActivity : FlutterActivity() {
                     if (!name.isNullOrBlank()) displayName = name
                 }
             }
+            displayName = displayName.substringAfterLast('/').substringAfterLast('\\\\')
             val lowerName = displayName.lowercase()
-            val validExts = listOf(".emb", ".dst", ".pes", ".pec", ".exp", ".ef", ".vp3", ".xxx", ".u01")
+            val validExts = listOf(
+                ".emb", ".dst", ".dhp", ".dha", ".dhe",
+                ".tbf", ".dsb", ".exp", ".pes", ".pec",
+                ".jef", ".ef", ".vp3", ".xxx", ".u01"
+            )
             if (validExts.none { lowerName.endsWith(it) }) displayName = "$displayName.emb"
 
             val outDir = File(cacheDir, "incoming_emb")
