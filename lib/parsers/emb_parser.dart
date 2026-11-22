@@ -3725,6 +3725,7 @@ class VectorDesignEditor {
     int? trimStart,
     int? trimEnd,
     double densityFactor = 1.0,
+    double minStitchFilterMm = 0.0,
   }) {
     final int total = src.stX.length;
     if (total == 0) return src;
@@ -3746,36 +3747,14 @@ class VectorDesignEditor {
       return (rx, ry);
     }
 
-    final stX = _Float32Buf(math.max(64, endIdx - startIdx));
-    final stY = _Float32Buf(math.max(64, endIdx - startIdx));
-    final stMove = _Uint8Buf(math.max(64, endIdx - startIdx));
-    final stColor = _Uint8Buf(math.max(64, endIdx - startIdx));
+    // المرحلة 1: التحويل الهندسي + حذف الألوان + التكثيف/التخفيف مع حماية الزوايا
+    final rawX = _Float32Buf(math.max(64, endIdx - startIdx));
+    final rawY = _Float32Buf(math.max(64, endIdx - startIdx));
+    final rawMove = _Uint8Buf(math.max(64, endIdx - startIdx));
+    final rawColor = _Uint8Buf(math.max(64, endIdx - startIdx));
 
-    double minX = double.infinity, maxX = -double.infinity;
-    double minY = double.infinity, maxY = -double.infinity;
-    bool hasBounds = false;
     bool forceMove = true;
-    final Set<int> usedColors = {};
-
-    void pushStitch(double px, double py, int mv, int c) {
-      stX.add(px);
-      stY.add(py);
-      stMove.add(mv);
-      stColor.add(c);
-      usedColors.add(c);
-      if (!hasBounds) {
-        minX = maxX = px;
-        minY = maxY = py;
-        hasBounds = true;
-      } else {
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
-      }
-    }
-
-    final double safeDensity = densityFactor.clamp(0.5, 1.8);
+    final double safeDensity = densityFactor.clamp(0.4, 2.2);
     double thinAcc = 0.0;
     double denseAcc = 0.0;
     double prevPx = 0.0, prevPy = 0.0;
@@ -3793,20 +3772,44 @@ class VectorDesignEditor {
       final double px = pt.$1;
       final double py = pt.$2;
       final bool isMove = forceMove || src.stMove[i] != 0 || (hasPrev && c != prevColor);
+      final bool hasNextSame = !isMove &&
+          hasPrev &&
+          i + 1 < endIdx &&
+          src.stMove[i + 1] == 0 &&
+          src.stColor[i + 1] == c &&
+          !deletedColors.contains(src.stColor[i + 1]);
 
-      if (safeDensity < 0.99 && !isMove && hasPrev && i + 1 < endIdx && src.stMove[i + 1] == 0 && src.stColor[i + 1] == c) {
-        // تخفيف الغرز مع الحفاظ على نقاط البداية والنهاية وتغييرات اللون
-        thinAcc += safeDensity;
-        if (thinAcc < 1.0) {
-          continue;
+      if (safeDensity < 0.99 && hasNextSame) {
+        // فحص ما إذا كانت الغرزة تقع على زاوية حادة حتى لا تُحذف أثناء التخفيف
+        final nextPt = xform(src.stX[i + 1], src.stY[i + 1]);
+        final double v1x = px - prevPx, v1y = py - prevPy;
+        final double v2x = nextPt.$1 - px, v2y = nextPt.$2 - py;
+        final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+        final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+        bool isSharpCorner = false;
+        if (l1 > 1.5 && l2 > 1.5) {
+          final double cosT = (v1x * v2x + v1y * v2y) / (l1 * l2);
+          // إذا كانت زاوية الانعطاف حادة (> 45 درجة) وليست رجوع فستون عادي، نحمي الزاوية
+          if (cosT < 0.70 && cosT > -0.82) {
+            isSharpCorner = true;
+          }
         }
-        thinAcc -= 1.0;
+        if (!isSharpCorner) {
+          thinAcc += safeDensity;
+          if (thinAcc < 1.0) {
+            continue;
+          }
+          thinAcc -= 1.0;
+        }
       }
 
-      pushStitch(px, py, isMove ? 1 : 0, c);
+      rawX.add(px);
+      rawY.add(py);
+      rawMove.add(isMove ? 1 : 0);
+      rawColor.add(c);
       forceMove = false;
 
-      if (safeDensity > 1.01 && !isMove && hasPrev && i + 1 < endIdx && src.stMove[i + 1] == 0 && src.stColor[i + 1] == c) {
+      if (safeDensity > 1.01 && hasNextSame) {
         // تكثيف الغرز بإضافة غرزة وسطية ناعمة بين الغرزتين المتتاليتين
         denseAcc += (safeDensity - 1.0);
         if (denseAcc >= 1.0) {
@@ -3816,7 +3819,10 @@ class VectorDesignEditor {
           final double my = (prevPy + nextPt.$2) * 0.5;
           final double d = math.sqrt((mx - px) * (mx - px) + (my - py) * (my - py));
           if (d >= 2.0) {
-            pushStitch(mx, my, 0, c);
+            rawX.add(mx);
+            rawY.add(my);
+            rawMove.add(0);
+            rawColor.add(c);
           }
         }
       }
@@ -3825,6 +3831,114 @@ class VectorDesignEditor {
       prevPy = py;
       prevColor = c;
       hasPrev = true;
+    }
+
+    // المرحلة 2: فلترة الغرز القصيرة (0.3 مم إلى 1.5 مم) مع الحفاظ الكامل على غرز الزوايا
+    final Float32List rX = rawX.finish();
+    final Float32List rY = rawY.finish();
+    final Uint8List rM = rawMove.finish();
+    final Uint8List rC = rawColor.finish();
+    final int rLen = rX.length;
+
+    final stX = _Float32Buf(math.max(64, rLen));
+    final stY = _Float32Buf(math.max(64, rLen));
+    final stMove = _Uint8Buf(math.max(64, rLen));
+    final stColor = _Uint8Buf(math.max(64, rLen));
+
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    final Set<int> usedColors = {};
+
+    void emitFinal(double px, double py, int mv, int c) {
+      stX.add(px);
+      stY.add(py);
+      stMove.add(mv);
+      stColor.add(c);
+      usedColors.add(c);
+      if (!hasBounds) {
+        minX = maxX = px;
+        minY = maxY = py;
+        hasBounds = true;
+      } else {
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+      }
+    }
+
+    final double filterUnits = minStitchFilterMm >= 0.25 ? (minStitchFilterMm.clamp(0.3, 1.5) * 10.0) : 0.0;
+
+    if (filterUnits <= 0.0) {
+      for (int i = 0; i < rLen; i++) {
+        emitFinal(rX[i], rY[i], rM[i], rC[i]);
+      }
+    } else {
+      double lastKeptX = 0.0, lastKeptY = 0.0;
+      int lastKeptColor = -1;
+      bool hasKept = false;
+
+      for (int i = 0; i < rLen; i++) {
+        final double px = rX[i];
+        final double py = rY[i];
+        final int mv = rM[i];
+        final int c = rC[i];
+
+        final bool isStartOfRun = !hasKept || mv != 0 || c != lastKeptColor;
+        final bool isEndOfRun = (i + 1 >= rLen) || rM[i + 1] != 0 || rC[i + 1] != c;
+
+        if (isStartOfRun || isEndOfRun) {
+          emitFinal(px, py, mv, c);
+          lastKeptX = px;
+          lastKeptY = py;
+          lastKeptColor = c;
+          hasKept = true;
+          continue;
+        }
+
+        final double v1x = px - lastKeptX;
+        final double v1y = py - lastKeptY;
+        final double d1 = math.sqrt(v1x * v1x + v1y * v1y);
+
+        if (d1 >= filterUnits) {
+          emitFinal(px, py, mv, c);
+          lastKeptX = px;
+          lastKeptY = py;
+          lastKeptColor = c;
+          continue;
+        }
+
+        // الغرزة أقصر من حد الفلترة — نفحص إن كانت غرزة زاوية / قمة / طرف فستون لحمايتها
+        final double nx = rX[i + 1];
+        final double ny = rY[i + 1];
+        final double v2x = nx - px;
+        final double v2y = ny - py;
+        final double d2 = math.sqrt(v2x * v2x + v2y * v2y);
+
+        bool keepCorner = false;
+        if (d1 >= 1.4 && d2 >= 1.4) {
+          final double cosTheta = (v1x * v2x + v1y * v2y) / (d1 * d2);
+          // حساب الانحراف العمودي عن الوتر (lastKept -> next)
+          final double chX = nx - lastKeptX;
+          final double chY = ny - lastKeptY;
+          final double chLen = math.sqrt(chX * chX + chY * chY);
+          final double perpErr = chLen > 1e-4 ? ((v1x * chY - v1y * chX).abs() / chLen) : d1;
+
+          // نحفظ الغرزة إذا كانت تشكل زاوية واضحة (> 48 درجة) أو قمة فستون حقيقية حتى لا يتشوه التصميم
+          if (cosTheta < 0.66 && (perpErr >= 2.0 || d2 >= filterUnits * 1.15)) {
+            keepCorner = true;
+          }
+        }
+
+        if (keepCorner) {
+          emitFinal(px, py, mv, c);
+          lastKeptX = px;
+          lastKeptY = py;
+          lastKeptColor = c;
+        }
+        // وإلا تُحذف الغرزة القصيرة الزائدة بسلاسة مع الحفاظ على مسار الزوايا
+      }
     }
 
     final seqX = _Float32Buf(math.max(16, src.seqX.length));
@@ -3908,9 +4022,15 @@ class VectorDesignEditor {
 }
 
 
-/// محرك تحويل الكتابة العربية والإنجليزية إلى غرز تطريز احترافية
-/// يدعم: التبديل بين فستون على خط الوسط (Centerline Satin) وتاتامي (Tatami)
-/// + التحكم بالكثافة + أقرب نقطة تلاقي + الدخول بدرز وسط والرجوع بفستون + تقصير الغرز الداخلية في اللفات
+/// محرك تحويل الكتابة العربية والإنجليزية إلى غرز تطريز احترافية (جيل 2 — مستوى Wilcom / Ink/Stitch)
+/// المراحل الـ 7:
+/// 1) تنظيف السلالم القطرية للهيكل (8-Connected Simple-Point Cleanup) لإلغاء التقاطعات الوهمية
+/// 2) تقليم الشوائب الزاوية (Iterative Corner Spur Pruning)
+/// 3) مدّ الأطراف حتى الحافة الحقيقية تحت البكسل (Subpixel Endpoint Extrapolation) لإصلاح قمة ألف «ط» والأطراف
+/// 4) دمج الفروع المستقيمة وتداخل الأعمدة عند التقاطعات لإغلاق أي فراغ مثلثي
+/// 5) إسقاط الأشعة تحت البكسل (Bilinear Ray-Casting) مع حماية «البوز» عند الزوايا وتنعيم الحواف
+/// 6) تقصير الغرز متعدد المستويات (Ink/Stitch Sawtooth Shortening) + التبطين العكسي + تعويض الشد + Auto-Split
+/// 7) فستون بيضوي نظيف (PCA Elliptical Satin) للنقط والتشكيل
 class TextToStitchEngine {
   static Future<VectorDesignData?> generateFromText({
     required String text,
@@ -3927,8 +4047,8 @@ class TextToStitchEngine {
 
     final bool isRtl = RegExp(r'[\u0600-\u06FF]').hasMatch(trimmed);
 
-    // 1) رسم النص بدقة عالية على لوحة شفافة (يدعم اتصال الحروف العربية بالكامل)
-    const double fontSize = 140.0;
+    // 1) رسم النص بدقة عالية (180px لوضوح أدق للحواف والزوايا) على لوحة شفافة
+    const double fontSize = 180.0;
     final tp = TextPainter(
       text: TextSpan(
         text: trimmed,
@@ -3943,14 +4063,14 @@ class TextToStitchEngine {
       ),
       textDirection: isRtl ? TextDirection.rtl : TextDirection.ltr,
       textAlign: TextAlign.center,
-    )..layout(maxWidth: 1600);
+    )..layout(maxWidth: 2000);
 
-    final int w = math.max(16, tp.width.ceil() + 24);
-    final int h = math.max(16, tp.height.ceil() + 24);
+    final int w = math.max(16, tp.width.ceil() + 32);
+    final int h = math.max(16, tp.height.ceil() + 32);
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()));
-    tp.paint(canvas, const Offset(12, 12));
+    tp.paint(canvas, const Offset(16, 16));
     final picture = recorder.endRecording();
     final ui.Image img = await picture.toImage(w, h);
     final ByteData? rgba = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
@@ -3960,7 +4080,7 @@ class TextToStitchEngine {
 
     final Uint8List pixels = rgba.buffer.asUint8List();
 
-    // 2) تنفيذ الحسابات الهندسية الثقيلة في الخيط الخلفي (Isolate) لعدم تجميد الواجهة
+    // 2) تنفيذ الحسابات الهندسية في الخيط الخلفي (Isolate)
     return await Isolate.run(() => _buildStitchesFromMask(
           pixels: pixels,
           w: w,
@@ -3992,7 +4112,7 @@ class TextToStitchEngine {
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
         final int idx = y * w + x;
-        if (labels[idx] != 0 || pixels[idx * 4 + 3] < 96) continue;
+        if (labels[idx] != 0 || pixels[idx * 4 + 3] < 110) continue;
 
         final int cid = nextLabel++;
         labels[idx] = cid;
@@ -4020,7 +4140,7 @@ class TextToStitchEngine {
               final int nx = cx + dx;
               if (nx < 0 || nx >= w) continue;
               final int nIdx = ny * w + nx;
-              if (labels[nIdx] == 0 && pixels[nIdx * 4 + 3] >= 96) {
+              if (labels[nIdx] == 0 && pixels[nIdx * 4 + 3] >= 110) {
                 labels[nIdx] = cid;
                 queue.add(nIdx);
               }
@@ -4028,7 +4148,7 @@ class TextToStitchEngine {
           }
         }
 
-        if (area >= 8) {
+        if (area >= 12) {
           comps.add(_TextComp(cid, minX, maxX, minY, maxY, area));
         }
       }
@@ -4036,18 +4156,21 @@ class TextToStitchEngine {
 
     if (comps.isEmpty) return null;
 
-    // 2) ترتيب الكائنات بترتيب القراءة الطبيعي مع إلحاق النقط مباشرة بعد الحرف التابع لها
+    // 2) فصل الأجسام عن النقط وترتيب القراءة
     int maxArea = 1;
     for (final c in comps) {
       if (c.area > maxArea) maxArea = c.area;
     }
     final List<_TextComp> bodies = [];
     final List<_TextComp> dots = [];
+    final Set<int> dotIds = {};
     for (final c in comps) {
       final int cw = c.maxX - c.minX + 1;
       final int ch = c.maxY - c.minY + 1;
-      if (c.area < maxArea * 0.14 && cw < 44 && ch < 44) {
+      final double aspect = math.max(cw, ch) / math.max(1.0, math.min(cw, ch).toDouble());
+      if (c.area < maxArea * 0.16 && cw < 56 && ch < 56 && aspect < 2.1) {
         dots.add(c);
+        dotIds.add(c.id);
       } else {
         bodies.add(c);
       }
@@ -4067,7 +4190,7 @@ class TextToStitchEngine {
       ordered.add(body);
       for (final dot in dots) {
         if (placedDots.contains(dot.id)) continue;
-        if (dot.centerX >= body.minX - 12 && dot.centerX <= body.maxX + 12) {
+        if (dot.centerX >= body.minX - 18 && dot.centerX <= body.maxX + 18) {
           ordered.add(dot);
           placedDots.add(dot.id);
         }
@@ -4080,7 +4203,8 @@ class TextToStitchEngine {
     final double targetWidthUnits = (widthCm * 100.0).clamp(200.0, 4500.0);
     final double pxToUnits = targetWidthUnits / w;
     final double safeDensityMm = densityMm.clamp(0.25, 1.2);
-    final double rowStepPx = math.max(1.05, (safeDensityMm * 10.0) / pxToUnits);
+    final double densityUnits = safeDensityMm * 10.0;
+    final double rowStepPx = math.max(1.15, densityUnits / pxToUnits);
     final double stitchStepPx = math.max(2.5, 30.0 / pxToUnits);
 
     final stX = _Float32Buf(8192);
@@ -4096,11 +4220,10 @@ class TextToStitchEngine {
     bool hasNeedlePos = false;
 
     void addPt(double ux, double uy, bool isMove) {
-      // إذا كانت المسافة قصيرة جداً (< 2.5 مم = 25 وحدة) نصلها بغرزة ناعمة بدون قفزة
       bool actualMove = isMove;
       if (isMove && hasNeedlePos) {
         final double d = math.sqrt((ux - curNeedleX) * (ux - curNeedleX) + (uy - curNeedleY) * (uy - curNeedleY));
-        if (d < 24.0) {
+        if (d < 22.0) {
           actualMove = false;
         }
       }
@@ -4125,66 +4248,100 @@ class TextToStitchEngine {
     }
 
     if (isSatin) {
-      // ====== وضع الفستون على خط الوسط (Centerline Satin + Underlay Return + Auto-Shortening) ======
+      // ====== وضع الفستون الاحترافي من الجيل الثاني (Subpixel Ray-Cast + Corner Beaks + Multi-Level Shortening) ======
       for (final comp in ordered) {
-        final int pad = 2;
+        final int pad = 6;
         final int bw = (comp.maxX - comp.minX + 1) + pad * 2;
         final int bh = (comp.maxY - comp.minY + 1) + pad * 2;
         final int ox = comp.minX - pad;
         final int oy = comp.minY - pad;
 
         final Uint8List bin = Uint8List(bw * bh);
-        for (int y = comp.minY; y <= comp.maxY; y++) {
-          for (int x = comp.minX; x <= comp.maxX; x++) {
-            if (labels[y * w + x] == comp.id) {
-              bin[(y - oy) * bw + (x - ox)] = 1;
+        final Uint8List alphaCrop = Uint8List(bw * bh);
+        for (int y = math.max(0, oy); y < math.min(h, oy + bh); y++) {
+          for (int x = math.max(0, ox); x < math.min(w, ox + bw); x++) {
+            final int gIdx = y * w + x;
+            final int lIdx = (y - oy) * bw + (x - ox);
+            if (labels[gIdx] == comp.id) {
+              bin[lIdx] = 1;
+              alphaCrop[lIdx] = pixels[gIdx * 4 + 3];
+            } else if (labels[gIdx] == 0) {
+              // الإبقاء على تدرج الحواف الناعمة (Anti-Aliasing) فقط حول نفس الكائن لدقة تحت البكسل
+              alphaCrop[lIdx] = pixels[gIdx * 4 + 3];
             }
           }
         }
 
-        // خريطة المسافة (Distance Transform) لمعرفة نصف عرض الحرف r_i عند كل نقطة
-        final Float32List distMap = _computeDistanceTransform(bin, bw, bh);
-
-        // استخراج خط الوسط (Zhang-Suen Skeleton)
-        final Uint8List skel = _zhangSuenThin(Uint8List.fromList(bin), bw, bh);
-        List<List<(double, double, double)>> chains = _extractSkeletonChains(skel, distMap, bw, bh, ox, oy);
-
-        // احتياطي للنقط الصغيرة جداً التي تتلاشى في الترقيق
-        if (chains.isEmpty) {
-          final double cx = (comp.minX + comp.maxX) * 0.5;
-          final double cy = (comp.minY + comp.maxY) * 0.5;
-          final double r = math.max(1.5, math.min(comp.maxX - comp.minX + 1, comp.maxY - comp.minY + 1) * 0.48);
-          final double halfLen = math.max(1.5, math.max(comp.maxX - comp.minX + 1, comp.maxY - comp.minY + 1) * 0.35);
-          chains = [
-            [
-              (cx - halfLen, cy, r),
-              (cx, cy, r),
-              (cx + halfLen, cy, r),
-            ]
-          ];
+        // المرحلة 7: إذا كان الكائن نقطة صغيرة (مثل نقط ق، ت، ث، ي) نطرزها بفستون بيضوي نظيف وممتلئ
+        if (dotIds.contains(comp.id)) {
+          _emitEllipticalDotSatin(
+            bin: bin,
+            bw: bw,
+            bh: bh,
+            ox: ox,
+            oy: oy,
+            pxToUnits: pxToUnits,
+            rowStepPx: rowStepPx,
+            addPt: addPt,
+          );
+          continue;
         }
 
-        // ترتيب الفروع حسب أقرب نقطة تلاقي مع موقع الإبرة الحالي
-        final List<List<(double, double, double)>> orderedChains = [];
-        final List<bool> used = List<bool>.filled(chains.length, false);
+        final Float32List distMap = _computeDistanceTransform(bin, bw, bh);
+
+        // المرحلة 1: ترقيق الهيكل + تنظيف السلالم القطرية بالاتصال الثماني
+        Uint8List skel = _zhangSuenThin(Uint8List.fromList(bin), bw, bh);
+        skel = _cleanSkeleton8Connected(skel, bw, bh);
+
+        // المرحلة 2: تقليم الشوائب الزاوية القصيرة (تنظيف أعلى الألف والزوايا الحادة)
+        _pruneCornerSpurs(skel, distMap, bw, bh);
+        skel = _cleanSkeleton8Connected(skel, bw, bh);
+
+        // المرحلة 3 + 4: استخراج أعمدة الهيكل كرسم بياني + دمج الفروع المستقيمة + مدّ الأطراف حتى الحافة الفعلية
+        List<_SkelColumn> columns = _extractAndMergeColumns(
+          skel: skel,
+          distMap: distMap,
+          alphaCrop: alphaCrop,
+          bw: bw,
+          bh: bh,
+          ox: ox,
+          oy: oy,
+        );
+
+        if (columns.isEmpty) {
+          _emitEllipticalDotSatin(
+            bin: bin,
+            bw: bw,
+            bh: bh,
+            ox: ox,
+            oy: oy,
+            pxToUnits: pxToUnits,
+            rowStepPx: rowStepPx,
+            addPt: addPt,
+          );
+          continue;
+        }
+
+        // ترتيب الأعمدة حسب أقرب نقطة تلاقي
+        final List<_SkelColumn> orderedCols = [];
+        final List<bool> used = List<bool>.filled(columns.length, false);
         double refX = hasNeedlePos ? (curNeedleX / pxToUnits) : (isRtl ? comp.maxX.toDouble() : comp.minX.toDouble());
         double refY = hasNeedlePos ? (curNeedleY / pxToUnits) : ((comp.minY + comp.maxY) * 0.5);
 
-        for (int k = 0; k < chains.length; k++) {
+        for (int k = 0; k < columns.length; k++) {
           int bestIdx = -1;
           bool bestRev = false;
           double bestD = 1e18;
-          for (int j = 0; j < chains.length; j++) {
-            if (used[j]) continue;
-            final ch = chains[j];
-            if (ch.isEmpty) continue;
-            final dStart = _dist2(refX, refY, ch.first.$1, ch.first.$2);
+          for (int j = 0; j < columns.length; j++) {
+            if (used[j] || columns[j].pts.length < 2) continue;
+            final pts = columns[j].pts;
+            final dStart = _dist2(refX, refY, pts.first.$1, pts.first.$2);
             if (dStart < bestD) {
               bestD = dStart;
               bestIdx = j;
               bestRev = false;
             }
-            final dEnd = _dist2(refX, refY, ch.last.$1, ch.last.$2);
+            final dEnd = _dist2(refX, refY, pts.last.$1, pts.last.$2);
             if (dEnd < bestD) {
               bestD = dEnd;
               bestIdx = j;
@@ -4193,80 +4350,26 @@ class TextToStitchEngine {
           }
           if (bestIdx == -1) break;
           used[bestIdx] = true;
-          final chosen = bestRev ? chains[bestIdx].reversed.toList() : chains[bestIdx];
-          orderedChains.add(chosen);
-          refX = chosen.first.$1; // لأننا نرجع بالفستون لنقطة الدخول أو ننهي قريباً منها
-          refY = chosen.first.$2;
+          final chosen = columns[bestIdx];
+          final orderedPts = bestRev ? chosen.pts.reversed.toList() : chosen.pts;
+          orderedCols.add(_SkelColumn(orderedPts, chosen.isLoop));
+          refX = orderedPts.first.$1;
+          refY = orderedPts.first.$2;
         }
 
-        // رسم كل فرع: دخول بدرز وسط (Underlay) ثم رجوع بفستون (Satin Return)
-        for (final rawChain in orderedChains) {
-          final smoothed = _smoothAndResampleChain(rawChain, rowStepPx);
-          if (smoothed.length < 2) continue;
-
-          // 1) الدخول بدرز وسط (Running Stitch Underlay) بخطوة ~2.4 مم
-          final double runStepUnits = 24.0;
-          addPt(smoothed.first.$1 * pxToUnits, smoothed.first.$2 * pxToUnits, true);
-          double acc = 0.0;
-          for (int i = 1; i < smoothed.length; i++) {
-            final double dx = (smoothed[i].$1 - smoothed[i - 1].$1) * pxToUnits;
-            final double dy = (smoothed[i].$2 - smoothed[i - 1].$2) * pxToUnits;
-            acc += math.sqrt(dx * dx + dy * dy);
-            if (acc >= runStepUnits || i == smoothed.length - 1) {
-              addPt(smoothed[i].$1 * pxToUnits, smoothed[i].$2 * pxToUnits, false);
-              acc = 0.0;
-            }
-          }
-
-          // 2) الرجوع بفستون (Satin Return) على طول خط الوسط مع دوران عمودي ناعم + تقصير اللفات الحادة
-          final rev = smoothed.reversed.toList();
-          double? prevLx, prevLy, prevRx, prevRy;
-          const double minInnerDistUnits = 3.6; // حد الأمان 0.36 مم لمنع تكتّل الخيط في اللفات
-
-          for (int i = 0; i < rev.length; i++) {
-            final int iPrev = math.max(0, i - 2);
-            final int iNext = math.min(rev.length - 1, i + 2);
-            double tx = rev[iNext].$1 - rev[iPrev].$1;
-            double ty = rev[iNext].$2 - rev[iPrev].$2;
-            final double tLen = math.sqrt(tx * tx + ty * ty);
-            double nx = 0.0, ny = 1.0;
-            if (tLen > 1e-4) {
-              nx = -ty / tLen;
-              ny = tx / tLen;
-            }
-
-            final double cx = rev[i].$1;
-            final double cy = rev[i].$2;
-            final double rPx = (rev[i].$3 * 1.08).clamp(1.6, 38.0);
-
-            double lx = (cx + nx * rPx) * pxToUnits;
-            double ly = (cy + ny * rPx) * pxToUnits;
-            double rx = (cx - nx * rPx) * pxToUnits;
-            double ry = (cy - ny * rPx) * pxToUnits;
-
-            // تقصير الغرز الداخلية في اللفات الحادة (Auto Shortening)
-            if (prevLx != null && prevLy != null) {
-              final double dl = math.sqrt((lx - prevLx) * (lx - prevLx) + (ly - prevLy) * (ly - prevLy));
-              if (dl < minInnerDistUnits) {
-                lx = (cx + nx * rPx * 0.72) * pxToUnits;
-                ly = (cy + ny * rPx * 0.72) * pxToUnits;
-              }
-            }
-            if (prevRx != null && prevRy != null) {
-              final double dr = math.sqrt((rx - prevRx) * (rx - prevRx) + (ry - prevRy) * (ry - prevRy));
-              if (dr < minInnerDistUnits) {
-                rx = (cx - nx * rPx * 0.72) * pxToUnits;
-                ry = (cy - ny * rPx * 0.72) * pxToUnits;
-              }
-            }
-
-            addPt(lx, ly, false);
-            addPt(rx, ry, false);
-            prevLx = lx;
-            prevLy = ly;
-            prevRx = rx;
-            prevRy = ry;
-          }
+        // المرحلة 5 + 6: استخراج الحافتين بإسقاط الأشعة تحت البكسل (مع حماية البوز) وتوليد الفستون النظيف
+        for (final col in orderedCols) {
+          _emitSmoothRayCastSatinColumn(
+            col: col,
+            alphaCrop: alphaCrop,
+            bw: bw,
+            bh: bh,
+            ox: ox,
+            oy: oy,
+            pxToUnits: pxToUnits,
+            rowStepPx: rowStepPx,
+            addPt: addPt,
+          );
         }
       }
     } else {
@@ -4341,7 +4444,6 @@ class TextToStitchEngine {
           }
         }
 
-        // ترتيب الفروع حسب أقرب نقطة تلاقي
         final List<bool> usedBr = List<bool>.filled(branches.length, false);
         for (int k = 0; k < branches.length; k++) {
           int bestIdx = -1;
@@ -4433,7 +4535,7 @@ class TextToStitchEngine {
       minY: minY,
       maxY: maxY,
       hasBounds: hasBounds,
-      machineType: isSatin ? 'Tarik Satin' : 'Tarik Tatami',
+      machineType: isSatin ? 'Tarik Pro Satin' : 'Tarik Tatami',
     );
   }
 
@@ -4441,6 +4543,121 @@ class TextToStitchEngine {
     final dx = x1 - x2;
     final dy = y1 - y2;
     return dx * dx + dy * dy;
+  }
+
+  static double _sampleAlphaBilinear(Uint8List alpha, int w, int h, double x, double y) {
+    if (x < 0.0 || y < 0.0 || x >= w - 1 || y >= h - 1) return 0.0;
+    final int ix = x.floor();
+    final int iy = y.floor();
+    final double fx = x - ix;
+    final double fy = y - iy;
+    final int row0 = iy * w + ix;
+    final int row1 = row0 + w;
+    final double v00 = alpha[row0].toDouble();
+    final double v10 = alpha[row0 + 1].toDouble();
+    final double v01 = alpha[row1].toDouble();
+    final double v11 = alpha[row1 + 1].toDouble();
+    return (v00 * (1.0 - fx) + v10 * fx) * (1.0 - fy) + (v01 * (1.0 - fx) + v11 * fx) * fy;
+  }
+
+  /// إسقاط شعاع من (cx, cy) بالاتجاه (dx, dy) لإيجاد المسافة الدقيقة تحت البكسل إلى حافة الحرف
+  static double _rayEdgeDist(Uint8List alpha, int w, int h, double cx, double cy, double dx, double dy, {double maxD = 42.0, double thresh = 115.0}) {
+    double prevT = 0.0;
+    double t = 0.5;
+    while (t <= maxD) {
+      if (_sampleAlphaBilinear(alpha, w, h, cx + dx * t, cy + dy * t) < thresh) {
+        double lo = prevT, hi = t;
+        for (int k = 0; k < 5; k++) {
+          final double mid = 0.5 * (lo + hi);
+          if (_sampleAlphaBilinear(alpha, w, h, cx + dx * mid, cy + dy * mid) >= thresh) {
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+        }
+        return 0.5 * (lo + hi);
+      }
+      prevT = t;
+      t += 0.5;
+    }
+    return maxD;
+  }
+
+  static void _emitEllipticalDotSatin({
+    required Uint8List bin,
+    required int bw,
+    required int bh,
+    required int ox,
+    required int oy,
+    required double pxToUnits,
+    required double rowStepPx,
+    required void Function(double, double, bool) addPt,
+  }) {
+    double sumX = 0, sumY = 0;
+    int cnt = 0;
+    for (int y = 0; y < bh; y++) {
+      for (int x = 0; x < bw; x++) {
+        if (bin[y * bw + x] != 0) {
+          sumX += x;
+          sumY += y;
+          cnt++;
+        }
+      }
+    }
+    if (cnt == 0) return;
+    final double cx = sumX / cnt;
+    final double cy = sumY / cnt;
+
+    // تحليل المحور الرئيسي (PCA) لزاوية النقطة
+    double sxx = 0, syy = 0, sxy = 0;
+    for (int y = 0; y < bh; y++) {
+      for (int x = 0; x < bw; x++) {
+        if (bin[y * bw + x] != 0) {
+          final dx = x - cx, dy = y - cy;
+          sxx += dx * dx;
+          syy += dy * dy;
+          sxy += dx * dy;
+        }
+      }
+    }
+    final double angle = 0.5 * math.atan2(2.0 * sxy, sxx - syy);
+    final double ca = math.cos(angle), sa = math.sin(angle);
+
+    double minU = 1e9, maxU = -1e9, minV = 1e9, maxV = -1e9;
+    for (int y = 0; y < bh; y++) {
+      for (int x = 0; x < bw; x++) {
+        if (bin[y * bw + x] != 0) {
+          final dx = x - cx, dy = y - cy;
+          final u = dx * ca + dy * sa;
+          final v = -dx * sa + dy * ca;
+          if (u < minU) minU = u;
+          if (u > maxU) maxU = u;
+          if (v < minV) minV = v;
+          if (v > maxV) maxV = v;
+        }
+      }
+    }
+
+    final double halfU = math.max(1.8, (maxU - minU) * 0.52);
+    final double halfV = math.max(1.8, (maxV - minV) * 0.52);
+    final int steps = math.max(4, ((halfU * 2.0) / math.max(1.0, rowStepPx)).ceil());
+
+    // درز تثبيت وسطي أولاً ثم فستون بيضوي منتظم
+    final double gx = cx + ox, gy = cy + oy;
+    addPt((gx - halfU * 0.7 * ca) * pxToUnits, (gy - halfU * 0.7 * sa) * pxToUnits, true);
+    addPt((gx + halfU * 0.7 * ca) * pxToUnits, (gy + halfU * 0.7 * sa) * pxToUnits, false);
+
+    for (int i = steps; i >= 0; i--) {
+      final double frac = -1.0 + 2.0 * (i / steps);
+      final double u = frac * halfU;
+      final double spanV = halfV * math.sqrt(math.max(0.08, 1.0 - frac * frac * 0.92));
+      final double lx = (gx + u * ca - spanV * sa) * pxToUnits;
+      final double ly = (gy + u * sa + spanV * ca) * pxToUnits;
+      final double rx = (gx + u * ca + spanV * sa) * pxToUnits;
+      final double ry = (gy + u * sa - spanV * ca) * pxToUnits;
+      addPt(lx, ly, false);
+      addPt(rx, ry, false);
+    }
   }
 
   static Float32List _computeDistanceTransform(Uint8List bin, int w, int h) {
@@ -4486,7 +4703,7 @@ class TextToStitchEngine {
 
   static Uint8List _zhangSuenThin(Uint8List img, int w, int h) {
     final List<int> toRemove = [];
-    for (int iter = 0; iter < 42; iter++) {
+    for (int iter = 0; iter < 54; iter++) {
       bool changed = false;
       for (int step = 0; step < 2; step++) {
         toRemove.clear();
@@ -4540,103 +4757,574 @@ class TextToStitchEngine {
     return img;
   }
 
-  static List<List<(double, double, double)>> _extractSkeletonChains(
-    Uint8List skel,
-    Float32List distMap,
-    int w,
-    int h,
-    int ox,
-    int oy,
-  ) {
-    final Uint8List visited = Uint8List(w * h);
-    final List<List<(double, double, double)>> chains = [];
-    const dirs = [
-      (1, 0), (-1, 0), (0, 1), (0, -1),
-      (1, 1), (-1, -1), (1, -1), (-1, 1),
-    ];
+  /// تنظيف السلالم القطرية الزائدة بشرط بقاء الجيران الثمانية في مكوّن متصل واحد
+  static Uint8List _cleanSkeleton8Connected(Uint8List img, int w, int h) {
+    const ring = [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)];
+    final List<(int, int)> nbs = [];
+    final List<bool> vis = List<bool>.filled(8, false);
+    final List<int> q = [];
 
-    int degree(int x, int y) {
-      int deg = 0;
-      for (final d in dirs) {
-        final nx = x + d.$1;
-        final ny = y + d.$2;
-        if (nx >= 0 && nx < w && ny >= 0 && ny < h && skel[ny * w + nx] != 0) deg++;
+    for (int y = 1; y < h - 1; y++) {
+      final int row = y * w;
+      for (int x = 1; x < w - 1; x++) {
+        final int idx = row + x;
+        if (img[idx] == 0) continue;
+        final int p2 = img[idx - w];
+        final int p4 = img[idx + 1];
+        final int p6 = img[idx + w];
+        final int p8 = img[idx - 1];
+        if (!((p2 != 0 && p4 != 0) || (p4 != 0 && p6 != 0) || (p6 != 0 && p8 != 0) || (p8 != 0 && p2 != 0))) {
+          continue;
+        }
+
+        nbs.clear();
+        for (int k = 0; k < 8; k++) {
+          final nx = x + ring[k].$1;
+          final ny = y + ring[k].$2;
+          if (img[ny * w + nx] != 0) nbs.add((nx, ny));
+        }
+        if (nbs.length <= 1) continue;
+
+        for (int k = 0; k < nbs.length; k++) {
+          vis[k] = false;
+        }
+        q.clear();
+        vis[0] = true;
+        q.add(0);
+        int reached = 1;
+        while (q.isNotEmpty) {
+          final int cur = q.removeLast();
+          final cx = nbs[cur].$1, cy = nbs[cur].$2;
+          for (int k = 0; k < nbs.length; k++) {
+            if (!vis[k] && (nbs[k].$1 - cx).abs() <= 1 && (nbs[k].$2 - cy).abs() <= 1) {
+              vis[k] = true;
+              q.add(k);
+              reached++;
+            }
+          }
+        }
+        if (reached == nbs.length) {
+          img[idx] = 0;
+        }
       }
-      return deg;
+    }
+    return img;
+  }
+
+  /// تقليم الشوائب الزاوية القصيرة التي تنتج عن الترقيق عند رؤوس الحروف المستقيمة (مثل أعلى ألف «ط»)
+  static void _pruneCornerSpurs(Uint8List skel, Float32List distMap, int w, int h) {
+    const dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)];
+
+    List<(int, int)> nbsOf(int x, int y) {
+      final List<(int, int)> res = [];
+      for (final d in dirs) {
+        final nx = x + d.$1, ny = y + d.$2;
+        if (nx >= 0 && nx < w && ny >= 0 && ny < h && skel[ny * w + nx] != 0) {
+          res.add((nx, ny));
+        }
+      }
+      return res;
     }
 
-    void walkFrom(int sx, int sy) {
-      final List<(double, double, double)> chain = [];
-      int cx = sx, cy = sy;
-      while (true) {
-        final int idx = cy * w + cx;
-        visited[idx] = 1;
-        chain.add(((cx + ox).toDouble(), (cy + oy).toDouble(), distMap[idx]));
+    for (int pass = 0; pass < 6; pass++) {
+      bool prunedAny = false;
+      final List<(int, int)> endpoints = [];
+      for (int y = 1; y < h - 1; y++) {
+        for (int x = 1; x < w - 1; x++) {
+          if (skel[y * w + x] != 0 && nbsOf(x, y).length == 1) {
+            endpoints.add((x, y));
+          }
+        }
+      }
 
-        int nextX = -1, nextY = -1;
-        for (final d in dirs) {
-          final nx = cx + d.$1;
-          final ny = cy + d.$2;
-          if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
-            final nIdx = ny * w + nx;
-            if (skel[nIdx] != 0 && visited[nIdx] == 0) {
-              nextX = nx;
-              nextY = ny;
+      for (final ep in endpoints) {
+        if (skel[ep.$2 * w + ep.$1] == 0) continue;
+        final List<(int, int)> branch = [ep];
+        (int, int)? prev;
+        int cx = ep.$1, cy = ep.$2;
+        double len = 0.0;
+        (int, int)? hitJunction;
+
+        while (true) {
+          final ns = nbsOf(cx, cy).where((p) => prev == null || p.$1 != prev.$1 || p.$2 != prev.$2).toList();
+          if (ns.isEmpty) break;
+          if (ns.length >= 2) {
+            hitJunction = (cx, cy);
+            break;
+          }
+          final nxt = ns.first;
+          len += math.sqrt(((nxt.$1 - cx) * (nxt.$1 - cx) + (nxt.$2 - cy) * (nxt.$2 - cy)).toDouble());
+          if (nbsOf(nxt.$1, nxt.$2).length >= 3) {
+            hitJunction = nxt;
+            break;
+          }
+          branch.add(nxt);
+          prev = (cx, cy);
+          cx = nxt.$1;
+          cy = nxt.$2;
+          if (len > 45.0) break;
+        }
+
+        if (hitJunction != null) {
+          final double jr = distMap[hitJunction.$2 * w + hitJunction.$1];
+          if (len <= math.max(jr * 1.58, 6.0)) {
+            for (final pt in branch) {
+              skel[pt.$2 * w + pt.$1] = 0;
+            }
+            prunedAny = true;
+          }
+        }
+      }
+      if (!prunedAny) break;
+    }
+  }
+
+  /// استخراج الأعمدة من الهيكل المنظف + دمج الفروع المستقيمة عبر التقاطعات + مدّ الأطراف حتى الحافة الفعلية
+  static List<_SkelColumn> _extractAndMergeColumns({
+    required Uint8List skel,
+    required Float32List distMap,
+    required Uint8List alphaCrop,
+    required int bw,
+    required int bh,
+    required int ox,
+    required int oy,
+  }) {
+    const dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)];
+    final Uint8List deg = Uint8List(bw * bh);
+    for (int y = 1; y < bh - 1; y++) {
+      for (int x = 1; x < bw - 1; x++) {
+        final int idx = y * bw + x;
+        if (skel[idx] == 0) continue;
+        int d = 0;
+        for (final dir in dirs) {
+          if (skel[(y + dir.$2) * bw + (x + dir.$1)] != 0) d++;
+        }
+        deg[idx] = d;
+      }
+    }
+
+    final Set<int> visitedEdges = {};
+    final List<_RawEdge> rawEdges = [];
+
+    int edgeKey(int a, int b) => a < b ? (a * 1000003 + b) : (b * 1000003 + a);
+
+    void traceFromNode(int startIdx) {
+      final int sx = startIdx % bw, sy = startIdx ~/ bw;
+      for (final dir in dirs) {
+        final int nx = sx + dir.$1, ny = sy + dir.$2;
+        if (nx < 0 || nx >= bw || ny < 0 || ny >= bh) continue;
+        final int nIdx = ny * bw + nx;
+        if (skel[nIdx] == 0) continue;
+        final int ek = edgeKey(startIdx, nIdx);
+        if (visitedEdges.contains(ek)) continue;
+
+        final List<(double, double, double)> pts = [
+          (sx.toDouble(), sy.toDouble(), distMap[startIdx]),
+        ];
+        int prev = startIdx;
+        int cur = nIdx;
+        visitedEdges.add(ek);
+
+        while (true) {
+          final int cx = cur % bw, cy = cur ~/ bw;
+          pts.add((cx.toDouble(), cy.toDouble(), distMap[cur]));
+          if (deg[cur] != 2 || cur == startIdx) break;
+
+          int nextIdx = -1;
+          for (final d2 in dirs) {
+            final int tx = cx + d2.$1, ty = cy + d2.$2;
+            if (tx < 0 || tx >= bw || ty < 0 || ty >= bh) continue;
+            final int cand = ty * bw + tx;
+            if (skel[cand] != 0 && cand != prev) {
+              nextIdx = cand;
+              break;
+            }
+          }
+          if (nextIdx == -1) break;
+          final int ek2 = edgeKey(cur, nextIdx);
+          if (visitedEdges.contains(ek2)) {
+            final int tx = nextIdx % bw, ty = nextIdx ~/ bw;
+            pts.add((tx.toDouble(), ty.toDouble(), distMap[nextIdx]));
+            break;
+          }
+          visitedEdges.add(ek2);
+          prev = cur;
+          cur = nextIdx;
+        }
+
+        if (pts.length >= 2) {
+          final int endIdx = cur;
+          final bool startFree = deg[startIdx] == 1;
+          final bool endFree = deg[endIdx] == 1;
+          rawEdges.add(_RawEdge(pts, startIdx, endIdx, startFree, endFree, startIdx == endIdx));
+        }
+      }
+    }
+
+    // 1) نبدأ من العقد (الأطراف والتقاطعات: deg != 2)
+    for (int i = 0; i < bw * bh; i++) {
+      if (skel[i] != 0 && deg[i] != 2) {
+        traceFromNode(i);
+      }
+    }
+    // 2) الحلقات المغلقة النقية (كل نقاطها deg == 2)
+    for (int i = 0; i < bw * bh; i++) {
+      if (skel[i] != 0 && deg[i] == 2) {
+        final int sx = i % bw, sy = i ~/ bw;
+        bool hasUnvisited = false;
+        for (final dir in dirs) {
+          final nx = sx + dir.$1, ny = sy + dir.$2;
+          if (nx >= 0 && nx < bw && ny >= 0 && ny < bh) {
+            final nIdx = ny * bw + nx;
+            if (skel[nIdx] != 0 && !visitedEdges.contains(edgeKey(i, nIdx))) {
+              hasUnvisited = true;
               break;
             }
           }
         }
-        if (nextX == -1) break;
-        cx = nextX;
-        cy = nextY;
-      }
-      if (chain.length >= 2) {
-        chains.add(chain);
+        if (hasUnvisited) traceFromNode(i);
       }
     }
 
-    // نبدأ أولاً من الأطراف الحرة (degree == 1) لتتبع المسارات الطويلة النظيفة
-    for (int y = 1; y < h - 1; y++) {
-      for (int x = 1; x < w - 1; x++) {
-        final int idx = y * w + x;
-        if (skel[idx] != 0 && visited[idx] == 0 && degree(x, y) == 1) {
-          walkFrom(x, y);
+    // دمج الفروع الأكثر استقامةً عند كل تقاطع (Collinear Merging) لتشكيل أعمدة متواصلة (مثل كامل ألف ط وكامل القاعدة)
+    final List<_RawEdge> merged = List.from(rawEdges);
+    bool didMerge = true;
+    while (didMerge) {
+      didMerge = false;
+      double bestDot = 0.55; // لا ندمج إلا الفروع المتقاربة في الاتجاه (زاوية انحراف < 56°)
+      int bestA = -1, bestB = -1;
+      bool flipA = false, flipB = false;
+
+      (double, double) endDir(List<(double, double, double)> pts, bool atStart) {
+        final int span = math.min(pts.length - 1, 6);
+        final a = atStart ? pts[span] : pts[pts.length - 1 - span];
+        final b = atStart ? pts.first : pts.last;
+        final dx = b.$1 - a.$1, dy = b.$2 - a.$2;
+        final l = math.sqrt(dx * dx + dy * dy);
+        return l > 1e-4 ? (dx / l, dy / l) : (0.0, 0.0);
+      }
+
+      for (int i = 0; i < merged.length; i++) {
+        if (merged[i].isLoop) continue;
+        for (int j = i + 1; j < merged.length; j++) {
+          if (merged[j].isLoop) continue;
+          // فحص الأطراف المشتركة عند نفس التقاطع
+          final pairs = [
+            (merged[i].endNode, merged[j].startNode, false, false),
+            (merged[i].endNode, merged[j].endNode, false, true),
+            (merged[i].startNode, merged[j].startNode, true, false),
+            (merged[i].startNode, merged[j].endNode, true, true),
+          ];
+          for (final pr in pairs) {
+            if (pr.$1 == pr.$2 && deg[pr.$1] >= 3) {
+              final dA = endDir(merged[i].pts, pr.$3);
+              final dB = endDir(merged[j].pts, pr.$4);
+              // استمرار مستقيم يعني المتجهين متعاكسين بالنسبة لنقطة الالتقاء (dA . (-dB) قريب من 1)
+              final double dot = -(dA.$1 * dB.$1 + dA.$2 * dB.$2);
+              if (dot > bestDot) {
+                bestDot = dot;
+                bestA = i;
+                bestB = j;
+                flipA = pr.$3;
+                flipB = pr.$4;
+              }
+            }
+          }
         }
       }
-    }
-    // ثم أي حلقات مغلقة متبقية (مثل حلقة حرف ط أو ق أو O)
-    for (int y = 1; y < h - 1; y++) {
-      for (int x = 1; x < w - 1; x++) {
-        final int idx = y * w + x;
-        if (skel[idx] != 0 && visited[idx] == 0) {
-          walkFrom(x, y);
-        }
+
+      if (bestA != -1 && bestB != -1) {
+        final eA = merged[bestA];
+        final eB = merged[bestB];
+        final ptsA = flipA ? eA.pts.reversed.toList() : List<(double, double, double)>.from(eA.pts);
+        final ptsB = flipB ? eB.pts.reversed.toList() : List<(double, double, double)>.from(eB.pts);
+        final combined = [...ptsA, ...ptsB.skip(1)];
+        final int newStart = flipA ? eA.endNode : eA.startNode;
+        final int newEnd = flipB ? eB.startNode : eB.endNode;
+        final bool newStartFree = flipA ? eA.endFree : eA.startFree;
+        final bool newEndFree = flipB ? eB.startFree : eB.endFree;
+        merged.removeAt(bestB);
+        merged[bestA] = _RawEdge(combined, newStart, newEnd, newStartFree, newEndFree, newStart == newEnd);
+        didMerge = true;
       }
     }
-    return chains;
+
+    // المرحلة 3: مدّ الأطراف الحرة بدقة تحت البكسل حتى الحافة الفعلية (إصلاح نقص أعلى ألف «ط» ونقص البوز)
+    // ومدّ الأطراف المتصلة بتقاطع مسافة 0.55*r داخل العمود الرئيسي لإغلاق أي فراغ مثلثي
+    final List<_SkelColumn> result = [];
+    for (final edge in merged) {
+      final pts = List<(double, double, double)>.from(edge.pts);
+      if (pts.length < 2) continue;
+
+      void extendEnd(bool atStart, bool isFreeTip) {
+        final int span = math.min(pts.length - 1, math.max(3, (pts.length * 0.2).round()));
+        final anchor = atStart ? pts[span] : pts[pts.length - 1 - span];
+        final tip = atStart ? pts.first : pts.last;
+        double dx = tip.$1 - anchor.$1;
+        double dy = tip.$2 - anchor.$2;
+        final double l = math.sqrt(dx * dx + dy * dy);
+        if (l < 1e-4) return;
+        dx /= l;
+        dy /= l;
+
+        final double rTip = math.max(1.8, tip.$3);
+        double extLen;
+        if (isFreeTip) {
+          // مدّ الطرف الحر حتى الحافة الحقيقية (alpha == 115) تماماً
+          final double hit = _rayEdgeDist(alphaCrop, bw, bh, tip.$1, tip.$2, dx, dy, maxD: rTip * 2.1 + 4.0);
+          extLen = math.max(0.0, hit - 0.35);
+        } else {
+          // تداخل نظيف داخل العمود الرئيسي عند التقاطع (0.55 * r)
+          final double hit = _rayEdgeDist(alphaCrop, bw, bh, tip.$1, tip.$2, dx, dy, maxD: rTip * 1.1);
+          extLen = math.min(rTip * 0.58, math.max(0.0, hit - 0.8));
+        }
+
+        if (extLen >= 0.8) {
+          final int steps = math.max(1, (extLen / 1.5).ceil());
+          final List<(double, double, double)> added = [];
+          for (int s = 1; s <= steps; s++) {
+            final double d = extLen * (s / steps);
+            added.add((tip.$1 + dx * d, tip.$2 + dy * d, rTip));
+          }
+          if (atStart) {
+            pts.insertAll(0, added.reversed);
+          } else {
+            pts.addAll(added);
+          }
+        }
+      }
+
+      if (!edge.isLoop) {
+        extendEnd(true, edge.startFree);
+        extendEnd(false, edge.endFree);
+      }
+
+      // تحويل الإحداثيات إلى نظام النص الكلي (+ox, +oy)
+      final globalPts = pts.map((p) => (p.$1 + ox, p.$2 + oy, p.$3)).toList();
+      result.add(_SkelColumn(globalPts, edge.isLoop));
+    }
+
+    return result;
   }
 
-  static List<(double, double, double)> _smoothAndResampleChain(
+  /// المرحلة 5 + 6: استخراج الحافتين بإسقاط الأشعة تحت البكسل (مع حماية البوز) + تنعيم الحواف + تقصير متعدد المستويات
+  static void _emitSmoothRayCastSatinColumn({
+    required _SkelColumn col,
+    required Uint8List alphaCrop,
+    required int bw,
+    required int bh,
+    required int ox,
+    required int oy,
+    required double pxToUnits,
+    required double rowStepPx,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final resampled = _cornerPreservingSmoothAndResample(col.pts, rowStepPx, col.isLoop);
+    if (resampled.length < 2) return;
+
+    // 1) الدخول بدرز وسط عكسي (Reverse Center-Walk Underlay) ليصل بالضبط لبداية الفستون بدون قفزة
+    final double runStepUnits = 22.0;
+    addPt(resampled.first.$1 * pxToUnits, resampled.first.$2 * pxToUnits, true);
+    double accRun = 0.0;
+    for (int i = 1; i < resampled.length; i++) {
+      final dx = (resampled[i].$1 - resampled[i - 1].$1) * pxToUnits;
+      final dy = (resampled[i].$2 - resampled[i - 1].$2) * pxToUnits;
+      accRun += math.sqrt(dx * dx + dy * dy);
+      if (accRun >= runStepUnits || i == resampled.length - 1) {
+        addPt(resampled[i].$1 * pxToUnits, resampled[i].$2 * pxToUnits, false);
+        accRun = 0.0;
+      }
+    }
+
+    // 2) بناء الحافة اليسرى والحافة اليمنى عبر إسقاط الأشعة تحت البكسل على مسار الرجوع
+    final rev = resampled.reversed.toList();
+    final int n = rev.length;
+    final List<double> lxArr = List<double>.filled(n, 0.0);
+    final List<double> lyArr = List<double>.filled(n, 0.0);
+    final List<double> rxArr = List<double>.filled(n, 0.0);
+    final List<double> ryArr = List<double>.filled(n, 0.0);
+
+    for (int i = 0; i < n; i++) {
+      final int iPrev = math.max(0, i - 2);
+      final int iNext = math.min(n - 1, i + 2);
+      final double tx = rev[iNext].$1 - rev[iPrev].$1;
+      final double ty = rev[iNext].$2 - rev[iPrev].$2;
+      final double tLen = math.sqrt(tx * tx + ty * ty);
+      double nx = 0.0, ny = 1.0;
+      if (tLen > 1e-4) {
+        nx = -ty / tLen;
+        ny = tx / tLen;
+      }
+
+      // فحص إن كانت النقطة عند زاوية حادة (بوز) لنسمح للشعاع الخارجي بالوصول لقمة البوز!
+      bool isBend = false;
+      if (i > 1 && i < n - 2) {
+        final double v1x = rev[i].$1 - rev[i - 2].$1, v1y = rev[i].$2 - rev[i - 2].$2;
+        final double v2x = rev[i + 2].$1 - rev[i].$1, v2y = rev[i + 2].$2 - rev[i].$2;
+        final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+        final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+        if (l1 > 1e-3 && l2 > 1e-3 && (v1x * v2x + v1y * v2y) / (l1 * l2) < 0.78) {
+          isBend = true;
+        }
+      }
+
+      final double cx = rev[i].$1 - ox;
+      final double cy = rev[i].$2 - oy;
+      final double rBase = rev[i].$3.clamp(1.6, 36.0);
+      final double maxAllowed = isBend ? (rBase * 2.25) : (rBase * 1.48);
+
+      double dLeft = _rayEdgeDist(alphaCrop, bw, bh, cx, cy, nx, ny, maxD: maxAllowed + 4.0);
+      double dRight = _rayEdgeDist(alphaCrop, bw, bh, cx, cy, -nx, -ny, maxD: maxAllowed + 4.0);
+
+      // كبح التمدد عند تقاطعات T (حيث يمتد الشعاع داخل العمود المتقاطع) مع الإبقاء على البوز الحقيقي
+      if (dLeft > maxAllowed) dLeft = rBase * 1.04;
+      if (dRight > maxAllowed) dRight = rBase * 1.04;
+      if (dLeft < 0.8 && dRight < 0.8) {
+        dLeft = rBase * 0.95;
+        dRight = rBase * 0.95;
+      }
+
+      // تعويض شد القماش (Pull Compensation ~0.12 مم لكل طرف)
+      final double pullPx = 1.2 / pxToUnits;
+      dLeft += pullPx;
+      dRight += pullPx;
+
+      lxArr[i] = rev[i].$1 + nx * dLeft;
+      lyArr[i] = rev[i].$2 + ny * dLeft;
+      rxArr[i] = rev[i].$1 - nx * dRight;
+      ryArr[i] = rev[i].$2 - ny * dRight;
+    }
+
+    // 3) تنعيم الحافتين مع حماية الزوايا الحادة (البوز لا يُقص ولا يُدوّر!)
+    _smoothRailPreserveCorners(lxArr, lyArr, passes: 3);
+    _smoothRailPreserveCorners(rxArr, ryArr, passes: 3);
+
+    // 4) توليد الغرز العلوية مع التقصير متعدد المستويات (Ink/Stitch #3987) وتقسيم الغرز العريضة جداً (> 8.5 مم)
+    double? lastFullLx, lastFullLy, lastFullRx, lastFullRy;
+    int shortStreakL = 0, shortStreakR = 0;
+
+    for (int i = 0; i < n; i++) {
+      final double lx = lxArr[i] * pxToUnits;
+      final double ly = lyArr[i] * pxToUnits;
+      final double rx = rxArr[i] * pxToUnits;
+      final double ry = ryArr[i] * pxToUnits;
+
+      final double dx = rx - lx, dy = ry - ly;
+      final double widthUnits = math.sqrt(dx * dx + dy * dy);
+
+      double emitLx = lx, emitLy = ly, emitRx = rx, emitRy = ry;
+      bool shortenedL = false, shortenedR = false;
+
+      if (lastFullLx != null && lastFullLy != null && lastFullRx != null && lastFullRy != null && widthUnits > 10.0) {
+        final double dL = math.sqrt((lx - lastFullLx) * (lx - lastFullLx) + (ly - lastFullLy) * (ly - lastFullLy));
+        final double dR = math.sqrt((rx - lastFullRx) * (rx - lastFullRx) + (ry - lastFullRy) * (ry - lastFullRy));
+
+        if (dL < 3.8 && dR > 4.2 && shortStreakL < 2) {
+          final double inset = shortStreakL == 0 ? 0.22 : 0.40;
+          emitLx = lx + dx * inset;
+          emitLy = ly + dy * inset;
+          shortenedL = true;
+          shortStreakL++;
+        } else {
+          shortStreakL = 0;
+        }
+
+        if (!shortenedL && dR < 3.8 && dL > 4.2 && shortStreakR < 2) {
+          final double inset = shortStreakR == 0 ? 0.22 : 0.40;
+          emitRx = rx - dx * inset;
+          emitRy = ry - dy * inset;
+          shortenedR = true;
+          shortStreakR++;
+        } else {
+          shortStreakR = 0;
+        }
+      }
+
+      if (widthUnits > 85.0) {
+        final double sp = (i % 3 == 0) ? 0.36 : ((i % 3 == 1) ? 0.54 : 0.44);
+        addPt(emitLx, emitLy, false);
+        addPt(emitLx + (emitRx - emitLx) * sp, emitLy + (emitRy - emitLy) * sp, false);
+        addPt(emitRx, emitRy, false);
+      } else {
+        addPt(emitLx, emitLy, false);
+        addPt(emitRx, emitRy, false);
+      }
+
+      if (!shortenedL) {
+        lastFullLx = lx;
+        lastFullLy = ly;
+      }
+      if (!shortenedR) {
+        lastFullRx = rx;
+        lastFullRy = ry;
+      }
+    }
+  }
+
+  /// تنعيم الحافة مع حماية النقاط الزاوية الحادة (البوز)
+  static void _smoothRailPreserveCorners(List<double> xs, List<double> ys, {int passes = 3}) {
+    final int n = xs.length;
+    if (n <= 3) return;
+    final nx = List<double>.filled(n, 0.0);
+    final ny = List<double>.filled(n, 0.0);
+    for (int p = 0; p < passes; p++) {
+      nx[0] = xs[0];
+      ny[0] = ys[0];
+      nx[n - 1] = xs[n - 1];
+      ny[n - 1] = ys[n - 1];
+      for (int i = 1; i < n - 1; i++) {
+        final double v1x = xs[i] - xs[i - 1], v1y = ys[i] - ys[i - 1];
+        final double v2x = xs[i + 1] - xs[i], v2y = ys[i + 1] - ys[i];
+        final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+        final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+        double w = 0.25;
+        if (l1 > 1e-4 && l2 > 1e-4) {
+          final double cosT = (v1x * v2x + v1y * v2y) / (l1 * l2);
+          if (cosT < 0.72) {
+            // زاوية حادة / بوز -> لا ننعّمها حتى تحافظ على حدّتها
+            w = 0.0;
+          }
+        }
+        nx[i] = xs[i] * (1.0 - 2.0 * w) + (xs[i - 1] + xs[i + 1]) * w;
+        ny[i] = ys[i] * (1.0 - 2.0 * w) + (ys[i - 1] + ys[i + 1]) * w;
+      }
+      for (int i = 0; i < n; i++) {
+        xs[i] = nx[i];
+        ys[i] = ny[i];
+      }
+    }
+  }
+
+  /// تنعيم خط الوسط مع حماية الزوايا الحادة وإعادة التوزيع حسب كثافة الغرز
+  static List<(double, double, double)> _cornerPreservingSmoothAndResample(
     List<(double, double, double)> raw,
     double stepPx,
+    bool isLoop,
   ) {
     if (raw.length <= 2) return raw;
 
-    // 1) تنعيم المسار مرتين
     List<(double, double, double)> pts = List.from(raw);
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
       final List<(double, double, double)> next = [pts.first];
       for (int i = 1; i < pts.length - 1; i++) {
-        final x = (pts[i - 1].$1 + pts[i].$1 * 2.0 + pts[i + 1].$1) * 0.25;
-        final y = (pts[i - 1].$2 + pts[i].$2 * 2.0 + pts[i + 1].$2) * 0.25;
-        final r = (pts[i - 1].$3 + pts[i].$3 * 2.0 + pts[i + 1].$3) * 0.25;
+        final double v1x = pts[i].$1 - pts[i - 1].$1, v1y = pts[i].$2 - pts[i - 1].$2;
+        final double v2x = pts[i + 1].$1 - pts[i].$1, v2y = pts[i + 1].$2 - pts[i].$2;
+        final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+        final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+        double w = 0.25;
+        if (l1 > 1e-4 && l2 > 1e-4) {
+          final double cosT = (v1x * v2x + v1y * v2y) / (l1 * l2);
+          if (cosT < 0.60) w = 0.05; // نحافظ على قمة الزاوية
+        }
+        final x = pts[i].$1 * (1.0 - 2.0 * w) + (pts[i - 1].$1 + pts[i + 1].$1) * w;
+        final y = pts[i].$2 * (1.0 - 2.0 * w) + (pts[i - 1].$2 + pts[i + 1].$2) * w;
+        final r = pts[i].$3 * 0.5 + (pts[i - 1].$3 + pts[i + 1].$3) * 0.25;
         next.add((x, y, r));
       }
       next.add(pts.last);
       pts = next;
     }
 
-    // 2) إعادة التوزيع بمسافات متساوية حسب الكثافة
     final List<(double, double, double)> out = [pts.first];
     double carry = 0.0;
     for (int i = 1; i < pts.length; i++) {
@@ -4652,11 +5340,24 @@ class TextToStitchEngine {
       }
       carry = segLen - (d - stepPx);
     }
-    if (out.length < 2) {
+    if (out.length < 2 || _dist2(out.last.$1, out.last.$2, pts.last.$1, pts.last.$2) > stepPx * stepPx * 0.25) {
       out.add(pts.last);
     }
     return out;
   }
+}
+
+class _RawEdge {
+  final List<(double, double, double)> pts;
+  final int startNode, endNode;
+  final bool startFree, endFree, isLoop;
+  _RawEdge(this.pts, this.startNode, this.endNode, this.startFree, this.endFree, this.isLoop);
+}
+
+class _SkelColumn {
+  final List<(double, double, double)> pts;
+  final bool isLoop;
+  _SkelColumn(this.pts, this.isLoop);
 }
 
 class _TextComp {
@@ -4664,8 +5365,7 @@ class _TextComp {
   _TextComp(this.id, this.minX, this.maxX, this.minY, this.maxY, this.area);
   double get centerX => (minX + maxX) * 0.5;
 }
-// Tarik emb - latest
-
+// Tarik emb - Pro Smooth Satin v3
 
 // === TARIK_INKSTITCH_FONT_ENGINE_START ===
 
@@ -4752,6 +5452,7 @@ class InkStitchFontCatalog {
 
 class _ShapedGlyphToken {
   final String shaped;
+  final String dotForm; // Ink/Stitch Arabic glyph name e.g. ط.init, ا.fina, لا.isol
   final String base;
   final bool connectsLeft;
   final bool connectsRight;
@@ -4759,6 +5460,7 @@ class _ShapedGlyphToken {
 
   const _ShapedGlyphToken({
     required this.shaped,
+    this.dotForm = '',
     required this.base,
     this.connectsLeft = false,
     this.connectsRight = false,
@@ -4855,13 +5557,16 @@ class ArabicShaper {
 
       final bool prevConn = i > 0 && _canConnectLeft(cps[i - 1]);
 
-      // Lam-Alef ligature check
+      // Lam-Alef ligature check (يدعم صيغة Ink/Stitch مثل لا.isol و لا.fina)
       if (cp == 0x0644 && i + 1 < cps.length && _lamAlef.containsKey(cps[i + 1])) {
         final lig = _lamAlef[cps[i + 1]]!;
         final String shaped = prevConn ? lig[1] : lig[0];
+        final String baseLig = 'ل${String.fromCharCode(cps[i + 1])}';
+        final String dotLig = '$baseLig.${prevConn ? 'fina' : 'isol'}';
         out.add(_ShapedGlyphToken(
           shaped: shaped,
-          base: shaped,
+          dotForm: dotLig,
+          base: baseLig,
           connectsLeft: false,
           connectsRight: prevConn,
         ));
@@ -4873,20 +5578,27 @@ class ArabicShaper {
       final bool leftConn = _canConnectLeft(cp) && nextConn;
       final bool rightConn = _canConnectRight(cp) && prevConn;
       final forms = _forms[cp]!;
+      final String baseChar = String.fromCharCode(cp);
 
       String shaped;
+      String suffix;
       if (rightConn && leftConn) {
-        shaped = forms[3]; // medial
+        shaped = forms[3];
+        suffix = 'medi';
       } else if (leftConn) {
-        shaped = forms[2]; // initial
+        shaped = forms[2];
+        suffix = 'init';
       } else if (rightConn) {
-        shaped = forms[1]; // final
+        shaped = forms[1];
+        suffix = 'fina';
       } else {
-        shaped = forms[0]; // isolated
+        shaped = forms[0];
+        suffix = 'isol';
       }
       out.add(_ShapedGlyphToken(
         shaped: shaped,
-        base: String.fromCharCode(cp),
+        dotForm: '$baseChar.$suffix',
+        base: baseChar,
         connectsLeft: leftConn,
         connectsRight: rightConn,
       ));
@@ -4982,7 +5694,11 @@ class InkStitchFontEngine {
     final double arabicJoinOverlap = (2.2 * scale).clamp(1.0, 4.5);
 
     Map<String, dynamic>? lookupGlyph(_ShapedGlyphToken tok) {
+      if (tok.dotForm.isNotEmpty && glyphs.containsKey(tok.dotForm)) {
+        return glyphs[tok.dotForm] as Map<String, dynamic>;
+      }
       if (glyphs.containsKey(tok.shaped)) return glyphs[tok.shaped] as Map<String, dynamic>;
+      if (glyphs.containsKey('${tok.base}.isol')) return glyphs['${tok.base}.isol'] as Map<String, dynamic>;
       if (glyphs.containsKey(tok.base)) return glyphs[tok.base] as Map<String, dynamic>;
       final up = tok.base.toUpperCase();
       if (glyphs.containsKey(up)) return glyphs[up] as Map<String, dynamic>;
@@ -5050,13 +5766,14 @@ class InkStitchFontEngine {
         final g = lookupGlyph(tok);
         if (g == null) continue;
         final double gw = ((g['w'] as num?)?.toDouble() ?? 50.0) * scale;
-        double adv = gw;
+        final double? metaAdv = g['a'] is num ? (g['a'] as num).toDouble() * scale : null;
+        double adv = metaAdv ?? gw;
         if (tIdx + 1 < tokens.length && !tokens[tIdx + 1].isSpace) {
           final nextTok = tokens[tIdx + 1];
           if (isRtl && tok.connectsLeft && nextTok.connectsRight) {
-            adv = math.max(gw * 0.4, gw - arabicJoinOverlap + (extraSpUnits * 0.35));
+            adv = math.max(gw * 0.4, (metaAdv ?? gw) - arabicJoinOverlap + (extraSpUnits * 0.35));
           } else {
-            adv = math.max(gw * 0.4, gw + baseLetterSp + extraSpUnits);
+            adv = math.max(gw * 0.4, (metaAdv ?? (gw + baseLetterSp)) + extraSpUnits);
           }
         }
         placed.add((g, tok, adv));
