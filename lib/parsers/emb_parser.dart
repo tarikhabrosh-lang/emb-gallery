@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class ThreadColorStep {
   final int stopNumber, colorIndex, stitches, colorValue;
@@ -4664,3 +4665,829 @@ class _TextComp {
   double get centerX => (minX + maxX) * 0.5;
 }
 // Tarik emb - latest
+
+
+// === TARIK_INKSTITCH_FONT_ENGINE_START ===
+
+class EmbFontMeta {
+  final String id;
+  final String nameAr;
+  final String nameEn;
+  final bool rtl;
+  final double capH;
+  final double spaceW;
+  final double letterSp;
+  final double lineH;
+  final double minScale;
+  final double maxScale;
+  final int glyphCount;
+  final String file;
+
+  const EmbFontMeta({
+    required this.id,
+    required this.nameAr,
+    required this.nameEn,
+    required this.rtl,
+    required this.capH,
+    required this.spaceW,
+    required this.letterSp,
+    required this.lineH,
+    required this.minScale,
+    required this.maxScale,
+    required this.glyphCount,
+    required this.file,
+  });
+
+  factory EmbFontMeta.fromJson(Map<String, dynamic> m) => EmbFontMeta(
+        id: (m['id'] ?? '').toString(),
+        nameAr: (m['nameAr'] ?? m['nameEn'] ?? '').toString(),
+        nameEn: (m['nameEn'] ?? m['id'] ?? '').toString(),
+        rtl: m['rtl'] == true,
+        capH: (m['capH'] as num?)?.toDouble() ?? 150.0,
+        spaceW: (m['spaceW'] as num?)?.toDouble() ?? 75.0,
+        letterSp: (m['letterSp'] as num?)?.toDouble() ?? 16.0,
+        lineH: (m['lineH'] as num?)?.toDouble() ?? 220.0,
+        minScale: (m['minScale'] as num?)?.toDouble() ?? 0.5,
+        maxScale: (m['maxScale'] as num?)?.toDouble() ?? 2.5,
+        glyphCount: (m['glyphCount'] as num?)?.toInt() ?? 0,
+        file: (m['file'] ?? '').toString(),
+      );
+}
+
+class InkStitchFontCatalog {
+  static List<EmbFontMeta>? _cachedIndex;
+  static final Map<String, String> _rawFontCache = {};
+
+  static Future<List<EmbFontMeta>> loadIndex() async {
+    if (_cachedIndex != null) return _cachedIndex!;
+    try {
+      final raw = await rootBundle.loadString('assets/emb_fonts/index.json');
+      final Map<String, dynamic> decoded = jsonDecode(raw);
+      final List<dynamic> list = (decoded['fonts'] as List<dynamic>?) ?? const [];
+      _cachedIndex = list
+          .whereType<Map<String, dynamic>>()
+          .map(EmbFontMeta.fromJson)
+          .where((f) => f.id.isNotEmpty && f.file.isNotEmpty)
+          .toList();
+      return _cachedIndex!;
+    } catch (_) {
+      _cachedIndex = const [];
+      return _cachedIndex!;
+    }
+  }
+
+  static Future<String?> loadRawFontJson(EmbFontMeta meta) async {
+    if (_rawFontCache.containsKey(meta.id)) {
+      return _rawFontCache[meta.id];
+    }
+    try {
+      final raw = await rootBundle.loadString(meta.file);
+      _rawFontCache[meta.id] = raw;
+      return raw;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+class _ShapedGlyphToken {
+  final String shaped;
+  final String base;
+  final bool connectsLeft;
+  final bool connectsRight;
+  final bool isSpace;
+
+  const _ShapedGlyphToken({
+    required this.shaped,
+    required this.base,
+    this.connectsLeft = false,
+    this.connectsRight = false,
+    this.isSpace = false,
+  });
+}
+
+/// مشكّل الحروف العربية السياقي (منفصل / أول / وسط / آخر + لام ألف المتصلة والمنفصلة)
+class ArabicShaper {
+  // [isolated, final, initial, medial] — empty string means cannot connect left
+  static const Map<int, List<String>> _forms = {
+    0x0621: ['\uFE80', '\uFE80', '', ''], // ء
+    0x0622: ['\uFE81', '\uFE82', '', ''], // آ
+    0x0623: ['\uFE83', '\uFE84', '', ''], // أ
+    0x0624: ['\uFE85', '\uFE86', '', ''], // ؤ
+    0x0625: ['\uFE87', '\uFE88', '', ''], // إ
+    0x0626: ['\uFE89', '\uFE8A', '\uFE8B', '\uFE8C'], // ئ
+    0x0627: ['\uFE8D', '\uFE8E', '', ''], // ا
+    0x0628: ['\uFE8F', '\uFE90', '\uFE91', '\uFE92'], // ب
+    0x0629: ['\uFE93', '\uFE94', '', ''], // ة
+    0x062A: ['\uFE95', '\uFE96', '\uFE97', '\uFE98'], // ت
+    0x062B: ['\uFE99', '\uFE9A', '\uFE9B', '\uFE9C'], // ث
+    0x062C: ['\uFE9D', '\uFE9E', '\uFE9F', '\uFEA0'], // ج
+    0x062D: ['\uFEA1', '\uFEA2', '\uFEA3', '\uFEA4'], // ح
+    0x062E: ['\uFEA5', '\uFEA6', '\uFEA7', '\uFEA8'], // خ
+    0x062F: ['\uFEA9', '\uFEAA', '', ''], // د
+    0x0630: ['\uFEAB', '\uFEAC', '', ''], // ذ
+    0x0631: ['\uFEAD', '\uFEAE', '', ''], // ر
+    0x0632: ['\uFEAF', '\uFEB0', '', ''], // ز
+    0x0633: ['\uFEB1', '\uFEB2', '\uFEB3', '\uFEB4'], // س
+    0x0634: ['\uFEB5', '\uFEB6', '\uFEB7', '\uFEB8'], // ش
+    0x0635: ['\uFEB9', '\uFEBA', '\uFEBB', '\uFEBC'], // ص
+    0x0636: ['\uFEBD', '\uFEBE', '\uFEBF', '\uFEC0'], // ض
+    0x0637: ['\uFEC1', '\uFEC2', '\uFEC3', '\uFEC4'], // ط
+    0x0638: ['\uFEC5', '\uFEC6', '\uFEC7', '\uFEC8'], // ظ
+    0x0639: ['\uFEC9', '\uFECA', '\uFECB', '\uFECC'], // ع
+    0x063A: ['\uFECD', '\uFECE', '\uFECF', '\uFED0'], // غ
+    0x0640: ['\u0640', '\u0640', '\u0640', '\u0640'], // ـ (تطويل)
+    0x0641: ['\uFED1', '\uFED2', '\uFED3', '\uFED4'], // ف
+    0x0642: ['\uFED5', '\uFED6', '\uFED7', '\uFED8'], // ق
+    0x0643: ['\uFED9', '\uFEDA', '\uFEDB', '\uFEDC'], // ك
+    0x0644: ['\uFEDD', '\uFEDE', '\uFEDF', '\uFEE0'], // ل
+    0x0645: ['\uFEE1', '\uFEE2', '\uFEE3', '\uFEE4'], // م
+    0x0646: ['\uFEE5', '\uFEE6', '\uFEE7', '\uFEE8'], // ن
+    0x0647: ['\uFEE9', '\uFEEA', '\uFEEB', '\uFEEC'], // ه
+    0x0648: ['\uFEED', '\uFEEE', '', ''], // و
+    0x0649: ['\uFEEF', '\uFEF0', '', ''], // ى
+    0x064A: ['\uFEF1', '\uFEF2', '\uFEF3', '\uFEF4'], // ي
+  };
+
+  static const Map<int, List<String>> _lamAlef = {
+    0x0622: ['\uFEF5', '\uFEF6'], // لآ
+    0x0623: ['\uFEF7', '\uFEF8'], // لأ
+    0x0625: ['\uFEF9', '\uFEFA'], // لإ
+    0x0627: ['\uFEFB', '\uFEFC'], // لا
+  };
+
+  static bool _isTashkeel(int cp) => (cp >= 0x064B && cp <= 0x065F) || cp == 0x0670;
+  static bool _isArabicLetter(int cp) => _forms.containsKey(cp);
+  static bool _canConnectLeft(int cp) {
+    final f = _forms[cp];
+    return f != null && f[2].isNotEmpty;
+  }
+
+  static bool _canConnectRight(int cp) => _forms.containsKey(cp) && cp != 0x0621;
+
+  static bool containsArabic(String s) {
+    for (int i = 0; i < s.length; i++) {
+      final cp = s.codeUnitAt(i);
+      if ((cp >= 0x0600 && cp <= 0x06FF) || (cp >= 0xFE70 && cp <= 0xFEFF)) return true;
+    }
+    return false;
+  }
+
+  static List<_ShapedGlyphToken> shapeLine(String line, {required bool isRtl}) {
+    final List<int> cps = line.runes.where((cp) => !_isTashkeel(cp)).toList();
+    final List<_ShapedGlyphToken> out = [];
+
+    int i = 0;
+    while (i < cps.length) {
+      final int cp = cps[i];
+      if (cp == 0x20 || cp == 0x09) {
+        out.add(const _ShapedGlyphToken(shaped: ' ', base: ' ', isSpace: true));
+        i++;
+        continue;
+      }
+
+      if (!_isArabicLetter(cp)) {
+        final s = String.fromCharCode(cp);
+        out.add(_ShapedGlyphToken(shaped: s, base: s));
+        i++;
+        continue;
+      }
+
+      final bool prevConn = i > 0 && _canConnectLeft(cps[i - 1]);
+
+      // Lam-Alef ligature check
+      if (cp == 0x0644 && i + 1 < cps.length && _lamAlef.containsKey(cps[i + 1])) {
+        final lig = _lamAlef[cps[i + 1]]!;
+        final String shaped = prevConn ? lig[1] : lig[0];
+        out.add(_ShapedGlyphToken(
+          shaped: shaped,
+          base: shaped,
+          connectsLeft: false,
+          connectsRight: prevConn,
+        ));
+        i += 2;
+        continue;
+      }
+
+      final bool nextConn = i + 1 < cps.length && _canConnectRight(cps[i + 1]);
+      final bool leftConn = _canConnectLeft(cp) && nextConn;
+      final bool rightConn = _canConnectRight(cp) && prevConn;
+      final forms = _forms[cp]!;
+
+      String shaped;
+      if (rightConn && leftConn) {
+        shaped = forms[3]; // medial
+      } else if (leftConn) {
+        shaped = forms[2]; // initial
+      } else if (rightConn) {
+        shaped = forms[1]; // final
+      } else {
+        shaped = forms[0]; // isolated
+      }
+      out.add(_ShapedGlyphToken(
+        shaped: shaped,
+        base: String.fromCharCode(cp),
+        connectsLeft: leftConn,
+        connectsRight: rightConn,
+      ));
+      i++;
+    }
+
+    // في الأسطر العربية، عكس المقاطع الإنجليزية أو الأرقام المدمجة لتُقرأ من اليسار لليمين بشكل صحيح
+    if (isRtl) {
+      int k = 0;
+      while (k < out.length) {
+        final cp = out[k].base.isNotEmpty ? out[k].base.codeUnitAt(0) : 0;
+        final bool isLtrRun = (cp >= 0x30 && cp <= 0x39) || (cp >= 0x41 && cp <= 0x5A) || (cp >= 0x61 && cp <= 0x7A);
+        if (!isLtrRun) {
+          k++;
+          continue;
+        }
+        int end = k + 1;
+        while (end < out.length) {
+          final ecp = out[end].base.isNotEmpty ? out[end].base.codeUnitAt(0) : 0;
+          final bool ok = (ecp >= 0x30 && ecp <= 0x39) ||
+              (ecp >= 0x41 && ecp <= 0x5A) ||
+              (ecp >= 0x61 && ecp <= 0x7A) ||
+              ecp == 0x2E ||
+              ecp == 0x2D;
+          if (!ok) break;
+          end++;
+        }
+        if (end - k > 1) {
+          final sub = out.sublist(k, end).reversed.toList();
+          out.replaceRange(k, end, sub);
+        }
+        k = end;
+      }
+    }
+
+    return out;
+  }
+}
+
+/// محرك توليد غرز تطريز حقيقية من مكتبات Ink/Stitch و StitchFoundry (فستون بأعمدة ورنجات + تبطين + تقصير تلقائي)
+class InkStitchFontEngine {
+  static Future<VectorDesignData?> generate({
+    required EmbFontMeta meta,
+    required String text,
+    double letterHeightCm = 2.5,
+    double densityMm = 0.42,
+    double extraSpacingMm = 0.0,
+    int underlayMode = 1, // 0 = بدون، 1 = درز وسط تلقائي، 2 = حواف + وسط
+    int colorArgb = 0xFFFF1744,
+  }) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
+    final rawJson = await InkStitchFontCatalog.loadRawFontJson(meta);
+    if (rawJson == null || rawJson.isEmpty) return null;
+
+    return await Isolate.run(() => _generateSync(
+          rawJson: rawJson,
+          text: trimmed,
+          letterHeightCm: letterHeightCm,
+          densityMm: densityMm,
+          extraSpacingMm: extraSpacingMm,
+          underlayMode: underlayMode,
+          colorArgb: colorArgb,
+        ));
+  }
+
+  static VectorDesignData? _generateSync({
+    required String rawJson,
+    required String text,
+    required double letterHeightCm,
+    required double densityMm,
+    required double extraSpacingMm,
+    required int underlayMode,
+    required int colorArgb,
+  }) {
+    final Map<String, dynamic> font = jsonDecode(rawJson);
+    final Map<String, dynamic> glyphs = (font['glyphs'] as Map<String, dynamic>?) ?? const {};
+    if (glyphs.isEmpty) return null;
+
+    final bool fontRtl = font['rtl'] == true;
+    final bool textHasAr = ArabicShaper.containsArabic(text);
+    final bool isRtl = fontRtl && textHasAr;
+
+    final double capH = ((font['capH'] as num?)?.toDouble() ?? 150.0).clamp(20.0, 2000.0);
+    final double targetCapUnits = (letterHeightCm * 100.0).clamp(40.0, 1200.0);
+    final double scale = targetCapUnits / capH;
+
+    final double spaceW = ((font['spaceW'] as num?)?.toDouble() ?? (capH * 0.65)) * scale;
+    final double baseLetterSp = ((font['letterSp'] as num?)?.toDouble() ?? (capH * 0.11)) * scale;
+    final double extraSpUnits = extraSpacingMm * 10.0;
+    final double lineH = ((font['lineH'] as num?)?.toDouble() ?? (capH * 1.45)) * scale;
+    final double densityUnits = (densityMm * 10.0).clamp(2.5, 10.0);
+    final double arabicJoinOverlap = (2.2 * scale).clamp(1.0, 4.5);
+
+    Map<String, dynamic>? lookupGlyph(_ShapedGlyphToken tok) {
+      if (glyphs.containsKey(tok.shaped)) return glyphs[tok.shaped] as Map<String, dynamic>;
+      if (glyphs.containsKey(tok.base)) return glyphs[tok.base] as Map<String, dynamic>;
+      final up = tok.base.toUpperCase();
+      if (glyphs.containsKey(up)) return glyphs[up] as Map<String, dynamic>;
+      final lo = tok.base.toLowerCase();
+      if (glyphs.containsKey(lo)) return glyphs[lo] as Map<String, dynamic>;
+      return null;
+    }
+
+    final stX = _Float32Buf(8192);
+    final stY = _Float32Buf(8192);
+    final stMove = _Uint8Buf(8192);
+    final stColor = _Uint8Buf(8192);
+
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int jumpCount = 0;
+    double curNeedleX = 0.0, curNeedleY = 0.0;
+    bool hasNeedle = false;
+
+    void addPt(double ux, double uy, bool isMove) {
+      bool actualMove = isMove;
+      if (isMove && hasNeedle) {
+        final double d = math.sqrt((ux - curNeedleX) * (ux - curNeedleX) + (uy - curNeedleY) * (uy - curNeedleY));
+        if (d < 22.0) {
+          actualMove = false;
+        }
+      }
+      stX.add(ux);
+      stY.add(uy);
+      stMove.add(actualMove ? 1 : 0);
+      stColor.add(0);
+      if (actualMove) jumpCount++;
+      curNeedleX = ux;
+      curNeedleY = uy;
+      hasNeedle = true;
+      if (!hasBounds) {
+        minX = maxX = ux;
+        minY = maxY = uy;
+        hasBounds = true;
+      } else {
+        if (ux < minX) minX = ux;
+        if (ux > maxX) maxX = ux;
+        if (uy < minY) minY = uy;
+        if (uy > maxY) maxY = uy;
+      }
+    }
+
+    final List<String> lines = text.split('\n');
+    for (int lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+      final lineStr = lines[lineIdx].trim();
+      if (lineStr.isEmpty) continue;
+
+      final tokens = ArabicShaper.shapeLine(lineStr, isRtl: isRtl);
+      final List<(Map<String, dynamic>?, _ShapedGlyphToken, double)> placed = [];
+
+      double totalW = 0.0;
+      for (int tIdx = 0; tIdx < tokens.length; tIdx++) {
+        final tok = tokens[tIdx];
+        if (tok.isSpace) {
+          placed.add((null, tok, spaceW));
+          totalW += spaceW;
+          continue;
+        }
+        final g = lookupGlyph(tok);
+        if (g == null) continue;
+        final double gw = ((g['w'] as num?)?.toDouble() ?? 50.0) * scale;
+        double adv = gw;
+        if (tIdx + 1 < tokens.length && !tokens[tIdx + 1].isSpace) {
+          final nextTok = tokens[tIdx + 1];
+          if (isRtl && tok.connectsLeft && nextTok.connectsRight) {
+            adv = math.max(gw * 0.4, gw - arabicJoinOverlap + (extraSpUnits * 0.35));
+          } else {
+            adv = math.max(gw * 0.4, gw + baseLetterSp + extraSpUnits);
+          }
+        }
+        placed.add((g, tok, adv));
+        totalW += adv;
+      }
+
+      if (placed.isEmpty) continue;
+
+      final double baselineY = lineIdx * lineH;
+      double cursorX = isRtl ? (totalW * 0.5) : (-totalW * 0.5);
+
+      for (int pIdx = 0; pIdx < placed.length; pIdx++) {
+        final (g, tok, adv) = placed[pIdx];
+        if (g == null) {
+          cursorX += isRtl ? -adv : adv;
+          continue;
+        }
+        final double gw = ((g['w'] as num?)?.toDouble() ?? 50.0) * scale;
+        final double ox = isRtl ? (cursorX - gw) : cursorX;
+        final double oy = baselineY;
+
+        final List<dynamic> elements = (g['e'] as List<dynamic>?) ?? const [];
+        for (int eIdx = 0; eIdx < elements.length; eIdx++) {
+          final el = elements[eIdx] as Map<String, dynamic>;
+          final String type = (el['t'] ?? '').toString();
+
+          // نقطة بداية العنصر التالي (لتحسين اتجاه التطريز وتقليل القفزات)
+          (double, double)? nextAnchor;
+          if (eIdx + 1 < elements.length) {
+            final nel = elements[eIdx + 1] as Map<String, dynamic>;
+            nextAnchor = _elementFirstPt(nel, ox, oy, scale);
+          }
+
+          if (type == 's') {
+            _emitSatinColumn(
+              el: el,
+              ox: ox,
+              oy: oy,
+              scale: scale,
+              densityUnits: densityUnits,
+              underlayMode: underlayMode,
+              curNeedleX: curNeedleX,
+              curNeedleY: curNeedleY,
+              hasNeedle: hasNeedle,
+              nextAnchor: nextAnchor,
+              addPt: addPt,
+            );
+          } else if (type == 'r') {
+            _emitRunningPath(
+              el: el,
+              ox: ox,
+              oy: oy,
+              scale: scale,
+              addPt: addPt,
+            );
+          } else if (type == 'f') {
+            _emitFillPolygon(
+              el: el,
+              ox: ox,
+              oy: oy,
+              scale: scale,
+              densityUnits: densityUnits,
+              addPt: addPt,
+            );
+          }
+        }
+
+        cursorX += isRtl ? -adv : adv;
+      }
+    }
+
+    if (stX.length < 2) return null;
+
+    final String fontName = (font['nameEn'] ?? 'Ink/Stitch Satin').toString();
+    return VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: Int32List.fromList([colorArgb]),
+      stitches: stX.length,
+      colorCount: 1,
+      stopsCount: 0,
+      jumpsCount: jumpCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: 0,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      hasBounds: hasBounds,
+      machineType: '$fontName (Satin)',
+    );
+  }
+
+  static (double, double)? _elementFirstPt(Map<String, dynamic> el, double ox, double oy, double scale) {
+    final List<dynamic>? arr = (el['r1'] ?? el['p']) as List<dynamic>?;
+    if (arr == null || arr.length < 2) return null;
+    return (ox + (arr[0] as num).toDouble() * scale, oy + (arr[1] as num).toDouble() * scale);
+  }
+
+  static (List<double>, List<double>, double) _buildScaledPoly(List<dynamic> flat, double ox, double oy, double scale) {
+    final int n = flat.length ~/ 2;
+    final pts = List<double>.filled(n * 2, 0.0);
+    final cum = List<double>.filled(n, 0.0);
+    double acc = 0.0;
+    for (int i = 0; i < n; i++) {
+      final double x = ox + (flat[i * 2] as num).toDouble() * scale;
+      final double y = oy + (flat[i * 2 + 1] as num).toDouble() * scale;
+      pts[i * 2] = x;
+      pts[i * 2 + 1] = y;
+      if (i > 0) {
+        final dx = x - pts[(i - 1) * 2];
+        final dy = y - pts[(i - 1) * 2 + 1];
+        acc += math.sqrt(dx * dx + dy * dy);
+      }
+      cum[i] = acc;
+    }
+    return (pts, cum, acc);
+  }
+
+  static (double, double) _samplePoly(List<double> pts, List<double> cum, double total, double u) {
+    final int n = cum.length;
+    if (n == 0) return (0.0, 0.0);
+    if (n == 1 || total <= 1e-6 || u <= 0.0) return (pts[0], pts[1]);
+    if (u >= 1.0) return (pts[(n - 1) * 2], pts[(n - 1) * 2 + 1]);
+    final double target = u * total;
+    int lo = 0, hi = n - 1;
+    while (lo + 1 < hi) {
+      final int mid = (lo + hi) >> 1;
+      if (cum[mid] <= target) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    final double segLen = cum[hi] - cum[lo];
+    final double t = segLen > 1e-6 ? ((target - cum[lo]) / segLen) : 0.0;
+    final double x = pts[lo * 2] + (pts[hi * 2] - pts[lo * 2]) * t;
+    final double y = pts[lo * 2 + 1] + (pts[hi * 2 + 1] - pts[lo * 2 + 1]) * t;
+    return (x, y);
+  }
+
+  static void _emitSatinColumn({
+    required Map<String, dynamic> el,
+    required double ox,
+    required double oy,
+    required double scale,
+    required double densityUnits,
+    required int underlayMode,
+    required double curNeedleX,
+    required double curNeedleY,
+    required bool hasNeedle,
+    required (double, double)? nextAnchor,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final List<dynamic>? rawR1 = el['r1'] as List<dynamic>?;
+    final List<dynamic>? rawR2 = el['r2'] as List<dynamic>?;
+    if (rawR1 == null || rawR2 == null || rawR1.length < 4 || rawR2.length < 4) return;
+
+    final (p1, c1, len1) = _buildScaledPoly(rawR1, ox, oy, scale);
+    final (p2, c2, len2) = _buildScaledPoly(rawR2, ox, oy, scale);
+    final double maxLen = math.max(len1, len2);
+    if (maxLen < 1.0) return;
+
+    // بناء مقاطع متزامنة عبر الرنجات (Rungs)
+    final List<(double, double)> anchors = [(0.0, 0.0)];
+    final List<dynamic>? rawRungs = el['g'] as List<dynamic>?;
+    if (rawRungs != null) {
+      for (final rg in rawRungs) {
+        if (rg is List && rg.length >= 2) {
+          final double u1 = (rg[0] as num).toDouble().clamp(0.01, 0.99);
+          final double u2 = (rg[1] as num).toDouble().clamp(0.01, 0.99);
+          if (u1 > anchors.last.$1 + 0.005 && u2 > anchors.last.$2 + 0.005) {
+            anchors.add((u1, u2));
+          }
+        }
+      }
+    }
+    anchors.add((1.0, 1.0));
+
+    // تحديد اتجاه التطريز الأمثل لتقليل القفزات بين أعمدة الحرف
+    final s0a = _samplePoly(p1, c1, len1, 0.0);
+    final s0b = _samplePoly(p2, c2, len2, 0.0);
+    final s1a = _samplePoly(p1, c1, len1, 1.0);
+    final s1b = _samplePoly(p2, c2, len2, 1.0);
+    final double mid0x = (s0a.$1 + s0b.$1) * 0.5, mid0y = (s0a.$2 + s0b.$2) * 0.5;
+    final double mid1x = (s1a.$1 + s1b.$1) * 0.5, mid1y = (s1a.$2 + s1b.$2) * 0.5;
+
+    bool satinForward = true;
+    if (nextAnchor != null) {
+      final d0Next = (mid0x - nextAnchor.$1) * (mid0x - nextAnchor.$1) + (mid0y - nextAnchor.$2) * (mid0y - nextAnchor.$2);
+      final d1Next = (mid1x - nextAnchor.$1) * (mid1x - nextAnchor.$1) + (mid1y - nextAnchor.$2) * (mid1y - nextAnchor.$2);
+      satinForward = d1Next <= d0Next;
+    } else if (hasNeedle && underlayMode == 0) {
+      final d0Cur = (mid0x - curNeedleX) * (mid0x - curNeedleX) + (mid0y - curNeedleY) * (mid0y - curNeedleY);
+      final d1Cur = (mid1x - curNeedleX) * (mid1x - curNeedleX) + (mid1y - curNeedleY) * (mid1y - curNeedleY);
+      satinForward = d0Cur <= d1Cur;
+    }
+
+    // دالة مساعدة لأخذ نقطة متزامنة عند t في [0..1]
+    ((double, double), (double, double)) pairAt(double tGlobal) {
+      final int segCount = anchors.length - 1;
+      final double scaledT = tGlobal.clamp(0.0, 1.0) * segCount;
+      final int idx = scaledT.floor().clamp(0, segCount - 1);
+      final double localT = scaledT - idx;
+      final a = anchors[idx];
+      final b = anchors[idx + 1];
+      final u1 = a.$1 + (b.$1 - a.$1) * localT;
+      final u2 = a.$2 + (b.$2 - a.$2) * localT;
+      return (_samplePoly(p1, c1, len1, u1), _samplePoly(p2, c2, len2, u2));
+    }
+
+    bool firstStitchOfCol = true;
+
+    // 1) التبطين (Underlay) قبل غرز الفستون العلوية
+    final int fontUnderlay = (el['u'] as num?)?.toInt() ?? 1;
+    final bool doCenterWalk = underlayMode >= 1 && fontUnderlay != 0 && maxLen >= 18.0;
+    final bool doContour = underlayMode >= 2 && maxLen >= 25.0;
+
+    if (doCenterWalk) {
+      // نمشي بدرز التبطين عكس اتجاه الفستون النهائي بحيث ينتهي التبطين بالضبط عند بداية الفستون بدون أي قفزة!
+      final int uSteps = math.max(2, (maxLen / 22.0).ceil());
+      final double tStart = satinForward ? 0.94 : 0.06;
+      final double tEnd = satinForward ? 0.04 : 0.96;
+      for (int k = 0; k <= uSteps; k++) {
+        final double t = tStart + (tEnd - tStart) * (k / uSteps);
+        final (a, b) = pairAt(t);
+        addPt((a.$1 + b.$1) * 0.5, (a.$2 + b.$2) * 0.5, firstStitchOfCol);
+        firstStitchOfCol = false;
+      }
+    }
+
+    if (doContour) {
+      // تبطين حواف داخلي (18% للداخل) للأعمدة العريضة
+      final int cSteps = math.max(3, (maxLen / 24.0).ceil());
+      final double tA = satinForward ? 0.05 : 0.95;
+      final double tB = satinForward ? 0.95 : 0.05;
+      for (int k = 0; k <= cSteps; k++) {
+        final double t = tA + (tB - tA) * (k / cSteps);
+        final (a, b) = pairAt(t);
+        addPt(a.$1 + (b.$1 - a.$1) * 0.18, a.$2 + (b.$2 - a.$2) * 0.18, firstStitchOfCol);
+        firstStitchOfCol = false;
+      }
+      for (int k = 0; k <= cSteps; k++) {
+        final double t = tB + (tA - tB) * (k / cSteps);
+        final (a, b) = pairAt(t);
+        addPt(b.$1 + (a.$1 - b.$1) * 0.18, b.$2 + (a.$2 - b.$2) * 0.18, false);
+      }
+    }
+
+    // 2) غرز الفستون العلوية (Top Satin) مع تعويض السحب + تقصير المنحنيات الحادة + تقسيم الغرز الطويلة جداً
+    final List<(double, double)> orderedAnchors = satinForward ? anchors : anchors.reversed.toList();
+    double? prevAx, prevAy, prevBx, prevBy;
+    int stitchRow = 0;
+
+    for (int sIdx = 0; sIdx < orderedAnchors.length - 1; sIdx++) {
+      final double u1a = orderedAnchors[sIdx].$1;
+      final double u2a = orderedAnchors[sIdx].$2;
+      final double u1b = orderedAnchors[sIdx + 1].$1;
+      final double u2b = orderedAnchors[sIdx + 1].$2;
+
+      final double segLen1 = (u1b - u1a).abs() * len1;
+      final double segLen2 = (u2b - u2a).abs() * len2;
+      final double segMax = math.max(segLen1, segLen2);
+      if (segMax < 0.3) continue;
+
+      final int steps = math.max(2, (segMax / densityUnits).ceil());
+      final int startK = sIdx == 0 ? 0 : 1;
+
+      for (int k = startK; k <= steps; k++) {
+        final double frac = k / steps;
+        final double u1 = u1a + (u1b - u1a) * frac;
+        final double u2 = u2a + (u2b - u2a) * frac;
+        final aRaw = _samplePoly(p1, c1, len1, u1);
+        final bRaw = _samplePoly(p2, c2, len2, u2);
+
+        double ax = aRaw.$1, ay = aRaw.$2;
+        double bx = bRaw.$1, by = bRaw.$2;
+
+        // تعويض شد القماش (Pull Compensation ~0.12 mm لكل طرف)
+        final double dx = bx - ax;
+        final double dy = by - ay;
+        final double width = math.sqrt(dx * dx + dy * dy);
+        if (width > 4.0) {
+          final double pc = width > 14.0 ? 1.3 : 0.8;
+          final double ux = dx / width;
+          final double uy = dy / width;
+          ax -= ux * pc;
+          ay -= uy * pc;
+          bx += ux * pc;
+          by += uy * pc;
+        }
+
+        // تقصير الغرز الداخلية تلقائياً في اللفات الحادة (Auto Shortening)
+        double emitAx = ax, emitAy = ay, emitBx = bx, emitBy = by;
+        if (prevAx != null && prevAy != null && prevBx != null && prevBy != null && (stitchRow & 1) == 1) {
+          final double dA = math.sqrt((ax - prevAx) * (ax - prevAx) + (ay - prevAy) * (ay - prevAy));
+          final double dB = math.sqrt((bx - prevBx) * (bx - prevBx) + (by - prevBy) * (by - prevBy));
+          if (dA < 3.4 && dB > 4.2 && width > 10.0) {
+            emitAx = ax + (bx - ax) * 0.28;
+            emitAy = ay + (by - ay) * 0.28;
+          } else if (dB < 3.4 && dA > 4.2 && width > 10.0) {
+            emitBx = bx + (ax - bx) * 0.28;
+            emitBy = by + (ay - by) * 0.28;
+          }
+        }
+
+        // تقسيم الغرز الطويلة جداً (> 9.5 مم) تلقائياً لمنع الشد أو التنتيش (Auto-Split Satin)
+        if (width > 95.0) {
+          final double splitPos = (stitchRow % 3 == 0) ? 0.35 : ((stitchRow % 3 == 1) ? 0.55 : 0.45);
+          final double mx = emitAx + (emitBx - emitAx) * splitPos;
+          final double my = emitAy + (emitBy - emitAy) * splitPos;
+          addPt(emitAx, emitAy, firstStitchOfCol);
+          firstStitchOfCol = false;
+          addPt(mx, my, false);
+          addPt(emitBx, emitBy, false);
+        } else {
+          addPt(emitAx, emitAy, firstStitchOfCol);
+          firstStitchOfCol = false;
+          addPt(emitBx, emitBy, false);
+        }
+
+        prevAx = ax;
+        prevAy = ay;
+        prevBx = bx;
+        prevBy = by;
+        stitchRow++;
+      }
+    }
+  }
+
+  static void _emitRunningPath({
+    required Map<String, dynamic> el,
+    required double ox,
+    required double oy,
+    required double scale,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final List<dynamic>? rawP = el['p'] as List<dynamic>?;
+    if (rawP == null || rawP.length < 4) return;
+    final int n = rawP.length ~/ 2;
+    const double stepUnits = 22.0; // 2.2 مم
+
+    double px = ox + (rawP[0] as num).toDouble() * scale;
+    double py = oy + (rawP[1] as num).toDouble() * scale;
+    addPt(px, py, true);
+
+    for (int i = 1; i < n; i++) {
+      final double nx = ox + (rawP[i * 2] as num).toDouble() * scale;
+      final double ny = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
+      final double dx = nx - px;
+      final double dy = ny - py;
+      final double seg = math.sqrt(dx * dx + dy * dy);
+      if (seg > stepUnits) {
+        final int steps = (seg / stepUnits).ceil();
+        for (int s = 1; s < steps; s++) {
+          final double t = s / steps;
+          addPt(px + dx * t, py + dy * t, false);
+        }
+      }
+      if (seg > 1.0 || i == n - 1) {
+        addPt(nx, ny, false);
+      }
+      px = nx;
+      py = ny;
+    }
+  }
+
+  static void _emitFillPolygon({
+    required Map<String, dynamic> el,
+    required double ox,
+    required double oy,
+    required double scale,
+    required double densityUnits,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final List<dynamic>? rawP = el['p'] as List<dynamic>?;
+    if (rawP == null || rawP.length < 6) return;
+    final int n = rawP.length ~/ 2;
+    final xs = List<double>.filled(n, 0.0);
+    final ys = List<double>.filled(n, 0.0);
+    double minY = double.infinity, maxY = -double.infinity;
+    for (int i = 0; i < n; i++) {
+      xs[i] = ox + (rawP[i * 2] as num).toDouble() * scale;
+      ys[i] = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
+      if (ys[i] < minY) minY = ys[i];
+      if (ys[i] > maxY) maxY = ys[i];
+    }
+    if (maxY - minY < 2.0) return;
+
+    bool forward = true;
+    bool first = true;
+    const double stitchStep = 32.0;
+
+    for (double y = minY + densityUnits * 0.5; y <= maxY; y += densityUnits) {
+      final List<double> hits = [];
+      for (int i = 0; i < n; i++) {
+        final int j = (i + 1) % n;
+        final double y0 = ys[i], y1 = ys[j];
+        if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {
+          final double x = xs[i] + (y - y0) * (xs[j] - xs[i]) / (y1 - y0);
+          hits.add(x);
+        }
+      }
+      if (hits.length < 2) continue;
+      hits.sort();
+      for (int h = 0; h + 1 < hits.length; h += 2) {
+        final double xA = forward ? hits[h] : hits[h + 1];
+        final double xB = forward ? hits[h + 1] : hits[h];
+        addPt(xA, y, first);
+        first = false;
+        final double span = (xB - xA).abs();
+        if (span > stitchStep) {
+          final int steps = (span / stitchStep).floor();
+          for (int s = 1; s < steps; s++) {
+            addPt(xA + (xB - xA) * (s / steps), y, false);
+          }
+        }
+        addPt(xB, y, false);
+      }
+      forward = !forward;
+    }
+  }
+}
+
+// === TARIK_INKSTITCH_FONT_ENGINE_END ===
