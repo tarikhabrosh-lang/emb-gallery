@@ -2850,8 +2850,14 @@ class _VectorStitchPainter extends CustomPainter {
   final VectorDesignData data;
   final int limit;
   final bool showNeedle;
+  final bool is3D;
 
-  _VectorStitchPainter({required this.data, required this.limit, required this.showNeedle});
+  _VectorStitchPainter({
+    required this.data,
+    required this.limit,
+    required this.showNeedle,
+    this.is3D = false,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2874,14 +2880,66 @@ class _VectorStitchPainter extends CustomPainter {
 
     void flush() {
       if (!hasMove || activeColor < 0) return;
-      final paint = Paint()
-        ..color = Color(data.paletteArgb[activeColor % palLen])
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.15
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round
-        ..isAntiAlias = true;
-      canvas.drawPath(path, paint);
+      final Color baseColor = Color(data.paletteArgb[activeColor % palLen]);
+      if (is3D) {
+        final double tw = (scale * 3.1).clamp(1.8, 4.2);
+        canvas.save();
+        canvas.translate(tw * 0.35, tw * 0.35);
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = Colors.black.withOpacity(0.28)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw * 1.18
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.restore();
+
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = Color.lerp(baseColor, Colors.black, 0.25) ?? baseColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = baseColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw * 0.72
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.save();
+        canvas.translate(-tw * 0.2, -tw * 0.2);
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = (Color.lerp(baseColor, Colors.white, 0.62) ?? Colors.white).withOpacity(0.82)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw * 0.26
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.restore();
+      } else {
+        final paint = Paint()
+          ..color = baseColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.15
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true;
+        canvas.drawPath(path, paint);
+      }
       path = Path();
       hasMove = false;
     }
@@ -2924,12 +2982,12 @@ class _VectorStitchPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _VectorStitchPainter oldDelegate) {
-    return oldDelegate.limit != limit || oldDelegate.data != data;
+    return oldDelegate.limit != limit || oldDelegate.data != data || oldDelegate.is3D != is3D;
   }
 }
 
 
-/// شاشة الكتابة بالعربي والإنجليزي وتحويلها مباشرة إلى غرز تطريز (فستون / تاتامي + الكثافة + محاكاة فورية)
+/// شاشة الكتابة بالعربي والإنجليزي (فونطات تطريز فستون أصلية Ink/Stitch + خطوط عامة + معاينة 3D + محاكاة وتصدير)
 class TextToEmbroideryScreen extends StatefulWidget {
   const TextToEmbroideryScreen({super.key});
   @override
@@ -2941,13 +2999,31 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   VectorDesignData? _vec;
   bool _generating = false;
   bool _saving = false;
+  bool _loadingCatalog = true;
+  bool _is3DPreview = true;
+
+  // مكتبة فونطات التطريز الأصلية (Ink/Stitch & StitchFoundry Satin)
+  List<EmbFontMeta> _proFonts = const [];
+  EmbFontMeta? _selectedProFont;
+  bool _useProEmbFonts = true;
+
+  // إعدادات الفونطات الأصلية (فستون احترافي)
+  double _letterHeightCm = 2.5;
+  double _proDensityMm = 0.42;
+  double _extraSpacingMm = 0.0;
+  int _underlayMode = 1; // 0=بدون، 1=درز وسط، 2=حواف+وسط
+
+  // إعدادات الخطوط العامة (TTF)
   double _widthCm = 12.0;
-  double _densityMm = 0.45;
-  bool _isSatin = true; // true = فستون على خط الوسط, false = تاتامي
+  double _ttfDensityMm = 0.45;
+  bool _isSatin = true;
   bool _isBold = true;
   bool _isItalic = false;
   String? _selectedFontFamily = 'Lalezar';
+
   int _selectedColor = 0xFFFF1744;
+  String _exportFormat = 'DST';
+  String? _hintMsg;
 
   static const List<Map<String, String?>> _fontOptions = [
     {'family': 'Lalezar', 'ar': 'عريض (لاليزار)', 'en': 'Lalezar'},
@@ -2977,7 +3053,39 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   @override
   void initState() {
     super.initState();
-    _generate();
+    _initFontsAndGenerate();
+  }
+
+  Future<void> _initFontsAndGenerate() async {
+    final fonts = await InkStitchFontCatalog.loadIndex();
+    if (!mounted) return;
+    if (fonts.isNotEmpty) {
+      EmbFontMeta? chosen;
+      for (final f in fonts) {
+        if (f.rtl) {
+          chosen = f;
+          break;
+        }
+      }
+      chosen ??= fonts.first;
+      if (!chosen.rtl && _textCtrl.text.trim() == 'طارق') {
+        _textCtrl.text = 'Tarik';
+      }
+      setState(() {
+        _proFonts = fonts;
+        _selectedProFont = chosen;
+        _useProEmbFonts = true;
+        _loadingCatalog = false;
+      });
+    } else {
+      setState(() {
+        _proFonts = const [];
+        _selectedProFont = null;
+        _useProEmbFonts = false;
+        _loadingCatalog = false;
+      });
+    }
+    await _generate();
   }
 
   @override
@@ -2987,19 +3095,60 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   }
 
   Future<void> _generate() async {
-    if (_textCtrl.text.trim().isEmpty) return;
-    setState(() => _generating = true);
+    final txt = _textCtrl.text.trim();
+    if (txt.isEmpty) return;
+
+    setState(() {
+      _generating = true;
+      _hintMsg = null;
+    });
+
     try {
-      final v = await TextToStitchEngine.generateFromText(
-        text: _textCtrl.text,
-        widthCm: _widthCm,
-        densityMm: _densityMm,
-        colorArgb: _selectedColor,
-        isBold: _isBold,
-        isSatin: _isSatin,
-        isItalic: _isItalic,
-        fontFamily: _selectedFontFamily,
-      );
+      VectorDesignData? v;
+      if (_useProEmbFonts && _selectedProFont != null) {
+        final bool hasAr = ArabicShaper.containsArabic(txt);
+        // إذا كتب المستخدم بالعربي وكان الخط المختار إنجليزي، نحاول التبديل الذكي أو نعرض تلميحاً واضحاً
+        if (hasAr && !_selectedProFont!.rtl) {
+          EmbFontMeta? arFont;
+          for (final f in _proFonts) {
+            if (f.rtl) {
+              arFont = f;
+              break;
+            }
+          }
+          if (arFont != null) {
+            _selectedProFont = arFont;
+          }
+        }
+
+        v = await InkStitchFontEngine.generate(
+          meta: _selectedProFont!,
+          text: txt,
+          letterHeightCm: _letterHeightCm,
+          densityMm: _proDensityMm,
+          extraSpacingMm: _extraSpacingMm,
+          underlayMode: _underlayMode,
+          colorArgb: _selectedColor,
+        );
+
+        if (v == null && mounted) {
+          _hintMsg = _selectedProFont!.rtl
+              ? tr('اكتب حروفاً عربية أو إنجليزية مدعومة في هذا الخط', 'Type supported Arabic or Latin characters for this font')
+              : tr('هذا الخط مخصّص للحروف الإنجليزية — اكتب بالإنجليزية أو اختر «حاسوب عربي»', 'This font is for English letters — type English or select an Arabic font');
+        }
+      } else {
+        v = await TextToStitchEngine.generateFromText(
+          text: txt,
+          widthCm: _widthCm,
+          densityMm: _ttfDensityMm,
+          colorArgb: _selectedColor,
+          isBold: _isBold,
+          isSatin: _isSatin,
+          isItalic: _isItalic,
+          fontFamily: _selectedFontFamily,
+        );
+      }
+
       if (mounted) {
         setState(() {
           _vec = v;
@@ -3016,19 +3165,20 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
     setState(() => _saving = true);
     try {
       final safeName = 'text_${DateTime.now().millisecondsSinceEpoch}';
+      final ext = _exportFormat.toUpperCase();
       final String outPath = shareAfter
-          ? '${(await getTemporaryDirectory()).path}/$safeName.DST'
-          : '/storage/emulated/0/Download/$safeName.DST';
+          ? '${(await getTemporaryDirectory()).path}/$safeName.$ext'
+          : '/storage/emulated/0/Download/$safeName.$ext';
 
       final res = await VectorDesignEditor.exportVectorToFile(
         _vec!,
         outPath,
-        'DST',
+        ext,
         baseName: safeName,
       );
       if (res != null && await File(res).exists()) {
         if (shareAfter) {
-          await Share.shareXFiles([XFile(res)], text: '$safeName.DST');
+          await Share.shareXFiles([XFile(res)], text: '$safeName.$ext');
         } else if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -3047,13 +3197,34 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   @override
   Widget build(BuildContext context) {
     final dimText = formatDimensionsCm(_vec?.widthMm, _vec?.heightMm);
+    final bool proActive = _useProEmbFonts && _proFonts.isNotEmpty && _selectedProFont != null;
+
     return Scaffold(
       backgroundColor: const Color(0xFF0E131D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
-        title: Text(tr('الكتابة وتحويلها لغرز', 'Text to Stitches'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        title: Text(
+          tr('الكتابة والتطريز', 'Embroidery Lettering'),
+          style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16, fontWeight: FontWeight.bold),
+        ),
         actions: [
-          if (_vec != null)
+          if (_vec != null) ...[
+            TextButton(
+              onPressed: () => setState(() => _is3DPreview = !_is3DPreview),
+              style: TextButton.styleFrom(
+                backgroundColor: _is3DPreview ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                minimumSize: Size.zero,
+              ),
+              child: Text(
+                '3D',
+                style: TextStyle(
+                  color: _is3DPreview ? const Color(0xFFD4AF37) : Colors.white60,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+            ),
             IconButton(
               icon: const Icon(Icons.play_circle_outline, color: Color(0xFFD4AF37)),
               tooltip: tr('محاكاة الغرز', 'Simulate'),
@@ -3064,22 +3235,28 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                 );
               },
             ),
+          ],
         ],
       ),
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Expanded(
                   child: TextField(
                     controller: _textCtrl,
-                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    minLines: 1,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.newline,
+                    style: const TextStyle(color: Colors.white, fontSize: 15),
                     decoration: InputDecoration(
-                      hintText: tr('اكتب نصاً بالعربي أو الإنجليزي...', 'Type Arabic or English text...'),
+                      hintText: tr('اكتب سطراً أو عدة أسطر بالعربي أو الإنجليزي...', 'Type one or more lines (Arabic / English)...'),
                       filled: true,
                       fillColor: const Color(0xFF18202E),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
                     ),
                     onSubmitted: (_) => _generate(),
@@ -3091,7 +3268,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFD4AF37),
                     foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                   child: Text(tr('توليد', 'Create'), style: const TextStyle(fontWeight: FontWeight.bold)),
@@ -3101,25 +3278,60 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           ),
           Expanded(
             child: Container(
-              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              margin: const EdgeInsets.fromLTRB(12, 2, 12, 8),
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
               clipBehavior: Clip.antiAlias,
-              child: _generating
+              child: (_generating || _loadingCatalog)
                   ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
                   : (_vec == null
-                      ? Center(child: Text(tr('اكتب نصاً واضغط توليد', 'Enter text and tap Create'), style: const TextStyle(color: Colors.black54)))
-                      : InteractiveViewer(
-                          minScale: 0.8,
-                          maxScale: 8.0,
-                          child: CustomPaint(
-                            painter: _VectorStitchPainter(data: _vec!, limit: _vec!.stX.length, showNeedle: false),
-                            size: Size.infinite,
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(20),
+                            child: Text(
+                              _hintMsg ?? tr('اكتب نصاً واضغط توليد', 'Enter text and tap Create'),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.black54, fontSize: 13, fontWeight: FontWeight.w600),
+                            ),
                           ),
+                        )
+                      : Stack(
+                          children: [
+                            InteractiveViewer(
+                              minScale: 0.7,
+                              maxScale: 10.0,
+                              child: CustomPaint(
+                                painter: _VectorStitchPainter(
+                                  data: _vec!,
+                                  limit: _vec!.stX.length,
+                                  showNeedle: false,
+                                  is3D: _is3DPreview,
+                                ),
+                                size: Size.infinite,
+                              ),
+                            ),
+                            if (proActive)
+                              Positioned(
+                                top: 8,
+                                left: 8,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF0E131D).withOpacity(0.82),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.6)),
+                                  ),
+                                  child: Text(
+                                    '★ ${isArabicNotifier.value ? _selectedProFont!.nameAr : _selectedProFont!.nameEn}',
+                                    style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 10, fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                              ),
+                          ],
                         )),
             ),
           ),
           ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.46),
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.50),
             child: Container(
               padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
               decoration: const BoxDecoration(
@@ -3130,147 +3342,363 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // شريط اختيار نوع الخط (فونطات عربية وإنجليزية مدمجة للتطريز)
-                    SizedBox(
-                      height: 36,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: _fontOptions.length,
-                        separatorBuilder: (_, __) => const SizedBox(width: 6),
-                        itemBuilder: (_, idx) {
-                          final opt = _fontOptions[idx];
-                          final fam = opt['family'];
-                          final bool sel = _selectedFontFamily == fam;
-                          final label = isArabicNotifier.value ? (opt['ar'] ?? '') : (opt['en'] ?? '');
-                          return ChoiceChip(
-                            label: Text(
-                              label,
-                              style: TextStyle(
-                                fontFamily: fam,
-                                color: sel ? Colors.black : Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                    // التبديل بين مكتبة الفونطات الأصلية (فستون حقيقي) والخطوط العامة
+                    if (_proFonts.isNotEmpty) ...[
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ChoiceChip(
+                              label: Center(
+                                child: Text(
+                                  '★ ${tr('فونطات تطريز أصلية', 'Pro Satin Fonts')} (${_proFonts.length})',
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                               ),
+                              selected: _useProEmbFonts,
+                              selectedColor: const Color(0xFFD4AF37),
+                              backgroundColor: Colors.white10,
+                              labelStyle: TextStyle(
+                                color: _useProEmbFonts ? Colors.black : Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                              onSelected: (_) {
+                                if (!_useProEmbFonts) {
+                                  setState(() => _useProEmbFonts = true);
+                                  _generate();
+                                }
+                              },
                             ),
-                            selected: sel,
-                            selectedColor: const Color(0xFFD4AF37),
-                            backgroundColor: Colors.white10,
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                            onSelected: (_) {
-                              setState(() => _selectedFontFamily = fam);
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ChoiceChip(
+                              label: Center(
+                                child: Text(
+                                  tr('خطوط عامة (TTF)', 'General Fonts'),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              selected: !_useProEmbFonts,
+                              selectedColor: const Color(0xFF56CCF2),
+                              backgroundColor: Colors.white10,
+                              labelStyle: TextStyle(
+                                color: !_useProEmbFonts ? Colors.black : Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                              onSelected: (_) {
+                                if (_useProEmbFonts) {
+                                  setState(() => _useProEmbFonts = false);
+                                  _generate();
+                                }
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+
+                    if (proActive) ...[
+                      // شريط فونطات التطريز الأصلية (Ink/Stitch + StitchFoundry)
+                      SizedBox(
+                        height: 36,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _proFonts.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 6),
+                          itemBuilder: (_, idx) {
+                            final f = _proFonts[idx];
+                            final bool sel = _selectedProFont?.id == f.id;
+                            final label = isArabicNotifier.value ? f.nameAr : f.nameEn;
+                            return ChoiceChip(
+                              label: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (f.rtl)
+                                    Padding(
+                                      padding: const EdgeInsetsDirectional.only(end: 4),
+                                      child: Icon(Icons.star, size: 13, color: sel ? Colors.black : const Color(0xFFD4AF37)),
+                                    ),
+                                  Text(
+                                    label,
+                                    style: TextStyle(
+                                      color: sel ? Colors.black : Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              selected: sel,
+                              selectedColor: const Color(0xFFD4AF37),
+                              backgroundColor: Colors.white10,
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                              onSelected: (_) {
+                                setState(() {
+                                  _selectedProFont = f;
+                                  if (!f.rtl && _textCtrl.text.trim() == 'طارق') {
+                                    _textCtrl.text = 'Tarik';
+                                  } else if (f.rtl && _textCtrl.text.trim() == 'Tarik') {
+                                    _textCtrl.text = 'طارق';
+                                  }
+                                });
+                                _generate();
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+
+                      // ارتفاع الحرف + الغرز + المقاس الكلي
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${tr('ارتفاع الحرف', 'Height')}: ${_letterHeightCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? '  ($dimText)' : ''}',
+                            style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                          Text(
+                            '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
+                            style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: _letterHeightCm,
+                        min: 0.8,
+                        max: 8.0,
+                        divisions: 72,
+                        activeColor: const Color(0xFFD4AF37),
+                        onChanged: (v) => setState(() => _letterHeightCm = v),
+                        onChangeEnd: (_) => _generate(),
+                      ),
+
+                      // كثافة الفستون
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${tr('كثافة الفستون', 'Satin Density')}: ${_proDensityMm.toStringAsFixed(2)} ${tr('مم', 'mm')}',
+                            style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                          Text(
+                            _proDensityMm <= 0.38
+                                ? tr('كثيف', 'Dense')
+                                : (_proDensityMm >= 0.56 ? tr('خفيف', 'Light') : tr('قياسي', 'Standard')),
+                            style: const TextStyle(color: Colors.white70, fontSize: 11),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: _proDensityMm,
+                        min: 0.30,
+                        max: 0.80,
+                        divisions: 20,
+                        activeColor: const Color(0xFF56CCF2),
+                        onChanged: (v) => setState(() => _proDensityMm = v),
+                        onChangeEnd: (_) => _generate(),
+                      ),
+
+                      // تباعد الحروف
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${tr('تباعد الحروف', 'Letter Spacing')}: ${_extraSpacingMm >= 0 ? '+' : ''}${_extraSpacingMm.toStringAsFixed(1)} ${tr('مم', 'mm')}',
+                            style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: _extraSpacingMm,
+                        min: -1.5,
+                        max: 4.0,
+                        divisions: 22,
+                        activeColor: Colors.tealAccent,
+                        onChanged: (v) => setState(() => _extraSpacingMm = v),
+                        onChangeEnd: (_) => _generate(),
+                      ),
+
+                      // نوع التبطين (Underlay)
+                      Row(
+                        children: [
+                          Text('${tr('التبطين:', 'Underlay:')} ', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Wrap(
+                              spacing: 6,
+                              children: [
+                                (0, tr('بدون', 'None')),
+                                (1, tr('درز وسط', 'Center')),
+                                (2, tr('حواف + وسط', 'Contour')),
+                              ].map((opt) {
+                                final sel = _underlayMode == opt.$1;
+                                return ChoiceChip(
+                                  label: Text(opt.$2, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: sel ? Colors.black : Colors.white)),
+                                  selected: sel,
+                                  selectedColor: const Color(0xFFD4AF37),
+                                  backgroundColor: Colors.white10,
+                                  visualDensity: VisualDensity.compact,
+                                  onSelected: (_) {
+                                    if (_underlayMode != opt.$1) {
+                                      setState(() => _underlayMode = opt.$1);
+                                      _generate();
+                                    }
+                                  },
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                    ] else ...[
+                      // شريط اختيار نوع الخط (خطوط عامة TTF)
+                      SizedBox(
+                        height: 36,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _fontOptions.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 6),
+                          itemBuilder: (_, idx) {
+                            final opt = _fontOptions[idx];
+                            final fam = opt['family'];
+                            final bool sel = _selectedFontFamily == fam;
+                            final label = isArabicNotifier.value ? (opt['ar'] ?? '') : (opt['en'] ?? '');
+                            return ChoiceChip(
+                              label: Text(
+                                label,
+                                style: TextStyle(
+                                  fontFamily: fam,
+                                  color: sel ? Colors.black : Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              selected: sel,
+                              selectedColor: const Color(0xFF56CCF2),
+                              backgroundColor: Colors.white10,
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                              onSelected: (_) {
+                                setState(() => _selectedFontFamily = fam);
+                                _generate();
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ChoiceChip(
+                              label: Center(child: Text(tr('فستون (Satin)', 'Satin'))),
+                              selected: _isSatin,
+                              selectedColor: const Color(0xFFD4AF37),
+                              labelStyle: TextStyle(
+                                color: _isSatin ? Colors.black : Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                              onSelected: (_) {
+                                if (!_isSatin) {
+                                  setState(() => _isSatin = true);
+                                  _generate();
+                                }
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ChoiceChip(
+                              label: Center(child: Text(tr('تاتامي (Tatami)', 'Tatami'))),
+                              selected: !_isSatin,
+                              selectedColor: const Color(0xFFD4AF37),
+                              labelStyle: TextStyle(
+                                color: !_isSatin ? Colors.black : Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                              onSelected: (_) {
+                                if (_isSatin) {
+                                  setState(() => _isSatin = false);
+                                  _generate();
+                                }
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          IconButton(
+                            onPressed: () {
+                              setState(() => _isBold = !_isBold);
                               _generate();
                             },
-                          );
-                        },
+                            icon: Icon(Icons.format_bold, color: _isBold ? const Color(0xFFD4AF37) : Colors.white38),
+                            tooltip: tr('خط عريض', 'Bold'),
+                          ),
+                          IconButton(
+                            onPressed: () {
+                              setState(() => _isItalic = !_isItalic);
+                              _generate();
+                            },
+                            icon: Icon(Icons.format_italic, color: _isItalic ? const Color(0xFFD4AF37) : Colors.white38),
+                            tooltip: tr('خط مائل', 'Italic'),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    // التبديل بين فستون (Satin) وتاتامي (Tatami) + عريض/مائل
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ChoiceChip(
-                            label: Center(child: Text(tr('فستون (Satin)', 'Satin'))),
-                            selected: _isSatin,
-                            selectedColor: const Color(0xFFD4AF37),
-                            labelStyle: TextStyle(
-                              color: _isSatin ? Colors.black : Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
-                            ),
-                            onSelected: (_) {
-                              if (!_isSatin) {
-                                setState(() => _isSatin = true);
-                                _generate();
-                              }
-                            },
+                      const SizedBox(height: 6),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${tr('العرض', 'Width')}: ${_widthCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? ' ($dimText)' : ''}',
+                            style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ChoiceChip(
-                            label: Center(child: Text(tr('تاتامي (Tatami)', 'Tatami'))),
-                            selected: !_isSatin,
-                            selectedColor: const Color(0xFFD4AF37),
-                            labelStyle: TextStyle(
-                              color: !_isSatin ? Colors.black : Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
-                            ),
-                            onSelected: (_) {
-                              if (_isSatin) {
-                                setState(() => _isSatin = false);
-                                _generate();
-                              }
-                            },
+                          Text(
+                            '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
+                            style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
                           ),
-                        ),
-                        const SizedBox(width: 6),
-                        IconButton(
-                          onPressed: () {
-                            setState(() => _isBold = !_isBold);
-                            _generate();
-                          },
-                          icon: Icon(Icons.format_bold, color: _isBold ? const Color(0xFFD4AF37) : Colors.white38),
-                          tooltip: tr('خط عريض', 'Bold'),
-                        ),
-                        IconButton(
-                          onPressed: () {
-                            setState(() => _isItalic = !_isItalic);
-                            _generate();
-                          },
-                          icon: Icon(Icons.format_italic, color: _isItalic ? const Color(0xFFD4AF37) : Colors.white38),
-                          tooltip: tr('خط مائل', 'Italic'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          '${tr('العرض', 'Width')}: ${_widthCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? ' ($dimText)' : ''}',
-                          style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
-                        ),
-                        Text(
-                          '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
-                          style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
-                        ),
-                      ],
-                    ),
-                    Slider(
-                      value: _widthCm,
-                      min: 4.0,
-                      max: 30.0,
-                      divisions: 26,
-                      activeColor: const Color(0xFFD4AF37),
-                      onChanged: (v) => setState(() => _widthCm = v),
-                      onChangeEnd: (_) => _generate(),
-                    ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          '${tr('كثافة الغرز (تخفيف / زيادة)', 'Stitch Density')}: ${_densityMm.toStringAsFixed(2)} ${tr('مم', 'mm')}',
-                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
-                        ),
-                        Text(
-                          _densityMm <= 0.40
-                              ? tr('كثيف', 'Dense')
-                              : (_densityMm >= 0.65 ? tr('خفيف', 'Light') : tr('متوسط', 'Normal')),
-                          style: const TextStyle(color: Colors.white70, fontSize: 11),
-                        ),
-                      ],
-                    ),
-                    Slider(
-                      value: _densityMm,
-                      min: 0.30,
-                      max: 0.90,
-                      divisions: 12,
-                      activeColor: const Color(0xFF56CCF2),
-                      onChanged: (v) => setState(() => _densityMm = v),
-                      onChangeEnd: (_) => _generate(),
-                    ),
+                        ],
+                      ),
+                      Slider(
+                        value: _widthCm,
+                        min: 4.0,
+                        max: 30.0,
+                        divisions: 26,
+                        activeColor: const Color(0xFFD4AF37),
+                        onChanged: (v) => setState(() => _widthCm = v),
+                        onChangeEnd: (_) => _generate(),
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${tr('كثافة الغرز (تخفيف / زيادة)', 'Stitch Density')}: ${_ttfDensityMm.toStringAsFixed(2)} ${tr('مم', 'mm')}',
+                            style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                          Text(
+                            _ttfDensityMm <= 0.40
+                                ? tr('كثيف', 'Dense')
+                                : (_ttfDensityMm >= 0.65 ? tr('خفيف', 'Light') : tr('متوسط', 'Normal')),
+                            style: const TextStyle(color: Colors.white70, fontSize: 11),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: _ttfDensityMm,
+                        min: 0.30,
+                        max: 0.90,
+                        divisions: 12,
+                        activeColor: const Color(0xFF56CCF2),
+                        onChanged: (v) => setState(() => _ttfDensityMm = v),
+                        onChangeEnd: (_) => _generate(),
+                      ),
+                    ],
+
+                    // لون الخيط
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -3299,13 +3727,43 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                       ],
                     ),
                     const SizedBox(height: 10),
+
+                    // اختيار صيغة التصدير + أزرار الحفظ والمشاركة
                     Row(
                       children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.black26,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: Colors.white24),
+                          ),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<String>(
+                              value: _exportFormat,
+                              dropdownColor: const Color(0xFF18202E),
+                              style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                              items: UniversalExporter.supportedFormats
+                                  .map((f) => DropdownMenuItem<String>(
+                                        value: f['ext'],
+                                        child: Text('.${f['ext']}'),
+                                      ))
+                                  .toList(),
+                              onChanged: (v) {
+                                if (v != null) setState(() => _exportFormat = v);
+                              },
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: OutlinedButton.icon(
                             onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: false),
-                            icon: const Icon(Icons.save_alt, size: 18, color: Color(0xFFD4AF37)),
-                            label: Text(tr('حفظ DST', 'Save DST'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                            icon: const Icon(Icons.save_alt, size: 17, color: Color(0xFFD4AF37)),
+                            label: Text(
+                              '${tr('حفظ', 'Save')} $_exportFormat',
+                              style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
                             style: OutlinedButton.styleFrom(
                               side: const BorderSide(color: Color(0xFFD4AF37)),
                               padding: const EdgeInsets.symmetric(vertical: 11),
@@ -3313,12 +3771,15 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: ElevatedButton.icon(
                             onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: true),
-                            icon: const Icon(Icons.ios_share, size: 18),
-                            label: Text(tr('مشاركة DST', 'Share DST'), style: const TextStyle(fontWeight: FontWeight.bold)),
+                            icon: const Icon(Icons.ios_share, size: 17),
+                            label: Text(
+                              '${tr('مشاركة', 'Share')} $_exportFormat',
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: const Color(0xFFD4AF37),
                               foregroundColor: Colors.black,
