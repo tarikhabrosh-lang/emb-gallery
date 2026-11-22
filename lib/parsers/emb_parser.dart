@@ -3723,6 +3723,7 @@ class VectorDesignEditor {
     Set<int> deletedColors = const {},
     int? trimStart,
     int? trimEnd,
+    double densityFactor = 1.0,
   }) {
     final int total = src.stX.length;
     if (total == 0) return src;
@@ -3755,22 +3756,12 @@ class VectorDesignEditor {
     bool forceMove = true;
     final Set<int> usedColors = {};
 
-    for (int i = startIdx; i < endIdx; i++) {
-      final int c = src.stColor[i];
-      if (deletedColors.contains(c)) {
-        forceMove = true;
-        continue;
-      }
-      final pt = xform(src.stX[i], src.stY[i]);
-      final double px = pt.$1;
-      final double py = pt.$2;
+    void pushStitch(double px, double py, int mv, int c) {
       stX.add(px);
       stY.add(py);
-      stMove.add((forceMove || src.stMove[i] != 0) ? 1 : 0);
+      stMove.add(mv);
       stColor.add(c);
       usedColors.add(c);
-      forceMove = false;
-
       if (!hasBounds) {
         minX = maxX = px;
         minY = maxY = py;
@@ -3781,6 +3772,58 @@ class VectorDesignEditor {
         if (py < minY) minY = py;
         if (py > maxY) maxY = py;
       }
+    }
+
+    final double safeDensity = densityFactor.clamp(0.5, 1.8);
+    double thinAcc = 0.0;
+    double denseAcc = 0.0;
+    double prevPx = 0.0, prevPy = 0.0;
+    bool hasPrev = false;
+    int prevColor = -1;
+
+    for (int i = startIdx; i < endIdx; i++) {
+      final int c = src.stColor[i];
+      if (deletedColors.contains(c)) {
+        forceMove = true;
+        hasPrev = false;
+        continue;
+      }
+      final pt = xform(src.stX[i], src.stY[i]);
+      final double px = pt.$1;
+      final double py = pt.$2;
+      final bool isMove = forceMove || src.stMove[i] != 0 || (hasPrev && c != prevColor);
+
+      if (safeDensity < 0.99 && !isMove && hasPrev && i + 1 < endIdx && src.stMove[i + 1] == 0 && src.stColor[i + 1] == c) {
+        // تخفيف الغرز مع الحفاظ على نقاط البداية والنهاية وتغييرات اللون
+        thinAcc += safeDensity;
+        if (thinAcc < 1.0) {
+          continue;
+        }
+        thinAcc -= 1.0;
+      }
+
+      pushStitch(px, py, isMove ? 1 : 0, c);
+      forceMove = false;
+
+      if (safeDensity > 1.01 && !isMove && hasPrev && i + 1 < endIdx && src.stMove[i + 1] == 0 && src.stColor[i + 1] == c) {
+        // تكثيف الغرز بإضافة غرزة وسطية ناعمة بين الغرزتين المتتاليتين
+        denseAcc += (safeDensity - 1.0);
+        if (denseAcc >= 1.0) {
+          denseAcc -= 1.0;
+          final nextPt = xform(src.stX[i + 1], src.stY[i + 1]);
+          final double mx = (prevPx + nextPt.$1) * 0.5;
+          final double my = (prevPy + nextPt.$2) * 0.5;
+          final double d = math.sqrt((mx - px) * (mx - px) + (my - py) * (my - py));
+          if (d >= 2.0) {
+            pushStitch(mx, my, 0, c);
+          }
+        }
+      }
+
+      prevPx = px;
+      prevPy = py;
+      prevColor = c;
+      hasPrev = true;
     }
 
     final seqX = _Float32Buf(math.max(16, src.seqX.length));
