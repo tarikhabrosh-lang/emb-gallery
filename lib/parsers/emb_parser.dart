@@ -719,13 +719,25 @@ Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double max
         ..isAntiAlias = true;
       canvas.drawPath(currentPath, corePaint);
 
-      // 4) لمعة الحرير العلوية (TrueView 3D Silk Sheen)
+      // 4) لمعة الحرير العلوية المزدوجة (TrueView 3D Silk Sheen + Specular Rim)
       canvas.save();
-      canvas.translate(-hiOff, -hiOff);
-      final hiPaint = Paint()
-        ..color = (Color.lerp(baseColor, Colors.white, 0.56) ?? Colors.white).withOpacity(0.84)
+      canvas.translate(-hiOff * 0.7, -hiOff * 0.7);
+      final midHiPaint = Paint()
+        ..color = (Color.lerp(baseColor, Colors.white, 0.38) ?? Colors.white).withOpacity(0.65)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = threadW * 0.30
+        ..strokeWidth = threadW * 0.48
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      canvas.drawPath(currentPath, midHiPaint);
+      canvas.restore();
+
+      canvas.save();
+      canvas.translate(-hiOff * 1.15, -hiOff * 1.15);
+      final hiPaint = Paint()
+        ..color = (Color.lerp(baseColor, Colors.white, 0.72) ?? Colors.white).withOpacity(0.88)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = threadW * 0.22
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
@@ -2408,6 +2420,79 @@ class UniversalFormatParser {
     }
   }
 
+  /// فحص ذكي لمحتوى الملف عند فتحه من واتساب بلاحقة مختلفة أو .bin
+  static Future<EmbDesignInfo?> parseByContentFallback(String filePath, {double maxCanvas = 640.0}) async {
+    try {
+      final file = File(filePath);
+      if (!await file.exists()) return null;
+      final bytes = await file.readAsBytes();
+      if (bytes.length < 16) return null;
+
+      // 1) Wilcom OLE2 (.EMB)
+      if (bytes[0] == 0xD0 && bytes[1] == 0xCF && bytes[2] == 0x11 && bytes[3] == 0xE0) {
+        return await EmbParser.parseFile(filePath);
+      }
+      // 2) Tajima (.DST)
+      if (bytes.length >= 512 && bytes[0] == 0x4C && bytes[1] == 0x41 && bytes[2] == 0x3A) {
+        return await DstParser.parseFile(filePath, maxCanvas: maxCanvas);
+      }
+      // 3) Brother (.PES / .PEC)
+      if (bytes[0] == 0x23 && bytes[1] == 0x50 && bytes[2] == 0x45 && bytes[3] == 0x53) {
+        final vec = await Isolate.run(() => _decodePesSync(bytes));
+        if (vec != null && vec.stX.length > 2) return await _vecToInfo(filePath, vec, maxCanvas);
+      }
+      if (bytes[0] == 0x23 && bytes[1] == 0x50 && bytes[2] == 0x45 && bytes[3] == 0x43) {
+        final vec = await Isolate.run(() => _decodePecSync(bytes, 8, 'Brother (PEC)'));
+        if (vec != null && vec.stX.length > 2) return await _vecToInfo(filePath, vec, maxCanvas);
+      }
+      // 4) Try Singer (.XXX), Melco (.EXP), Janome (.JEF), Barudan (.DSB), Tajima (.TBF)
+      final VectorDesignData? vec = await Isolate.run(() {
+        final lower = filePath.toLowerCase();
+        if (lower.endsWith('.xxx')) return _decodeXxxSync(bytes);
+        if (lower.endsWith('.exp')) return _decodeExpSync(bytes);
+        if (lower.endsWith('.jef')) return _decodeJefSync(bytes);
+        if (lower.endsWith('.dsb')) return _decodeDsbSync(bytes);
+        if (lower.endsWith('.tbf')) return _decodeTbfSync(bytes);
+        // تجربة تلقائية للصيغ القياسية
+        final vExp = _decodeExpSync(bytes);
+        if (vExp != null && vExp.stitches > 10) return vExp;
+        final vXxx = _decodeXxxSync(bytes);
+        if (vXxx != null && vXxx.stitches > 10) return vXxx;
+        final vJef = _decodeJefSync(bytes);
+        if (vJef != null && vJef.stitches > 10) return vJef;
+        final vDsb = _decodeDsbSync(bytes);
+        if (vDsb != null && vDsb.stitches > 10) return vDsb;
+        return null;
+      });
+      if (vec != null && vec.stX.length > 2) {
+        return await _vecToInfo(filePath, vec, maxCanvas);
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<EmbDesignInfo> _vecToInfo(String filePath, VectorDesignData vec, double maxCanvas) async {
+    final previewPng = await _renderVectorDesignToImage(vec, maxCanvas: maxCanvas);
+    return EmbDesignInfo(
+      filePath: filePath,
+      fileName: filePath.split(Platform.pathSeparator).last,
+      previewJpeg: previewPng,
+      stitches: vec.stitches,
+      colorCount: vec.colorCount,
+      stopsCount: vec.stopsCount,
+      jumpsCount: vec.jumpsCount,
+      sequinsCount: vec.sequinsCount,
+      beadsCount: vec.beadsCount,
+      trimsCount: vec.trimsCount,
+      machineType: vec.machineType,
+      colorSequence: [],
+      widthMm: vec.widthMm,
+      heightMm: vec.heightMm,
+    );
+  }
+
   static VectorDesignData? _decodeAnySync(String filePath) {
     final file = File(filePath);
     if (!file.existsSync()) return null;
@@ -3779,7 +3864,9 @@ class VectorDesignEditor {
 }
 
 
-/// محرك تحويل الكتابة العربية والإنجليزية إلى غرز تطريز حقيقية (Tatami Fill)
+/// محرك تحويل الكتابة العربية والإنجليزية إلى غرز تطريز احترافية
+/// يدعم: التبديل بين فستون على خط الوسط (Centerline Satin) وتاتامي (Tatami)
+/// + التحكم بالكثافة + أقرب نقطة تلاقي + الدخول بدرز وسط والرجوع بفستون + تقصير الغرز الداخلية في اللفات
 class TextToStitchEngine {
   static Future<VectorDesignData?> generateFromText({
     required String text,
@@ -3787,11 +3874,16 @@ class TextToStitchEngine {
     double densityMm = 0.45,
     int colorArgb = 0xFFFF1744,
     bool isBold = true,
+    bool isSatin = true,
+    bool isItalic = false,
+    String? fontFamily,
   }) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return null;
 
-    // 1) رسم النص بدقة عالية على لوحة شفافة (يدعم تشكيل واتصال الحروف العربية بالكامل)
+    final bool isRtl = RegExp(r'[\u0600-\u06FF]').hasMatch(trimmed);
+
+    // 1) رسم النص بدقة عالية على لوحة شفافة (يدعم اتصال الحروف العربية بالكامل)
     const double fontSize = 140.0;
     final tp = TextPainter(
       text: TextSpan(
@@ -3800,12 +3892,12 @@ class TextToStitchEngine {
           color: const Color(0xFFFFFFFF),
           fontSize: fontSize,
           fontWeight: isBold ? FontWeight.w800 : FontWeight.w500,
-          height: 1.2,
+          fontStyle: isItalic ? FontStyle.italic : FontStyle.normal,
+          fontFamily: fontFamily,
+          height: 1.25,
         ),
       ),
-      textDirection: RegExp(r'[\u0600-\u06FF]').hasMatch(trimmed)
-          ? TextDirection.rtl
-          : TextDirection.ltr,
+      textDirection: isRtl ? TextDirection.rtl : TextDirection.ltr,
       textAlign: TextAlign.center,
     )..layout(maxWidth: 1600);
 
@@ -3824,11 +3916,128 @@ class TextToStitchEngine {
 
     final Uint8List pixels = rgba.buffer.asUint8List();
 
-    // 2) تحويل البكسلات المرسومة إلى غرز تطريز تاتامي (وحدة الغرزة = 0.1 مم)
+    // 2) تنفيذ الحسابات الهندسية الثقيلة في الخيط الخلفي (Isolate) لعدم تجميد الواجهة
+    return await Isolate.run(() => _buildStitchesFromMask(
+          pixels: pixels,
+          w: w,
+          h: h,
+          isRtl: isRtl,
+          widthCm: widthCm,
+          densityMm: densityMm,
+          colorArgb: colorArgb,
+          isSatin: isSatin,
+        ));
+  }
+
+  static VectorDesignData? _buildStitchesFromMask({
+    required Uint8List pixels,
+    required int w,
+    required int h,
+    required bool isRtl,
+    required double widthCm,
+    required double densityMm,
+    required int colorArgb,
+    required bool isSatin,
+  }) {
+    // 1) فصل الكائنات المتصلة (Connected Components)
+    final Int32List labels = Int32List(w * h);
+    final List<_TextComp> comps = [];
+    final List<int> queue = [];
+
+    int nextLabel = 1;
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        final int idx = y * w + x;
+        if (labels[idx] != 0 || pixels[idx * 4 + 3] < 96) continue;
+
+        final int cid = nextLabel++;
+        labels[idx] = cid;
+        queue.clear();
+        queue.add(idx);
+        int qHead = 0;
+        int minX = x, maxX = x, minY = y, maxY = y;
+        int area = 0;
+
+        while (qHead < queue.length) {
+          final int cur = queue[qHead++];
+          final int cx = cur % w;
+          final int cy = cur ~/ w;
+          area++;
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+
+          for (int dy = -1; dy <= 1; dy++) {
+            final int ny = cy + dy;
+            if (ny < 0 || ny >= h) continue;
+            for (int dx = -1; dx <= 1; dx++) {
+              if (dx == 0 && dy == 0) continue;
+              final int nx = cx + dx;
+              if (nx < 0 || nx >= w) continue;
+              final int nIdx = ny * w + nx;
+              if (labels[nIdx] == 0 && pixels[nIdx * 4 + 3] >= 96) {
+                labels[nIdx] = cid;
+                queue.add(nIdx);
+              }
+            }
+          }
+        }
+
+        if (area >= 8) {
+          comps.add(_TextComp(cid, minX, maxX, minY, maxY, area));
+        }
+      }
+    }
+
+    if (comps.isEmpty) return null;
+
+    // 2) ترتيب الكائنات بترتيب القراءة الطبيعي مع إلحاق النقط مباشرة بعد الحرف التابع لها
+    int maxArea = 1;
+    for (final c in comps) {
+      if (c.area > maxArea) maxArea = c.area;
+    }
+    final List<_TextComp> bodies = [];
+    final List<_TextComp> dots = [];
+    for (final c in comps) {
+      final int cw = c.maxX - c.minX + 1;
+      final int ch = c.maxY - c.minY + 1;
+      if (c.area < maxArea * 0.14 && cw < 44 && ch < 44) {
+        dots.add(c);
+      } else {
+        bodies.add(c);
+      }
+    }
+
+    if (isRtl) {
+      bodies.sort((a, b) => b.maxX.compareTo(a.maxX));
+      dots.sort((a, b) => b.centerX.compareTo(a.centerX));
+    } else {
+      bodies.sort((a, b) => a.minX.compareTo(b.minX));
+      dots.sort((a, b) => a.centerX.compareTo(b.centerX));
+    }
+
+    final List<_TextComp> ordered = [];
+    final Set<int> placedDots = {};
+    for (final body in bodies) {
+      ordered.add(body);
+      for (final dot in dots) {
+        if (placedDots.contains(dot.id)) continue;
+        if (dot.centerX >= body.minX - 12 && dot.centerX <= body.maxX + 12) {
+          ordered.add(dot);
+          placedDots.add(dot.id);
+        }
+      }
+    }
+    for (final dot in dots) {
+      if (!placedDots.contains(dot.id)) ordered.add(dot);
+    }
+
     final double targetWidthUnits = (widthCm * 100.0).clamp(200.0, 4500.0);
     final double pxToUnits = targetWidthUnits / w;
-    final int rowStepPx = math.max(1, ((densityMm * 10.0) / pxToUnits).round());
-    final int stitchStepPx = math.max(2, (32.0 / pxToUnits).round()); // ~3.2 مم طول الغرزة
+    final double safeDensityMm = densityMm.clamp(0.25, 1.2);
+    final double rowStepPx = math.max(1.05, (safeDensityMm * 10.0) / pxToUnits);
+    final double stitchStepPx = math.max(2.5, 30.0 / pxToUnits);
 
     final stX = _Float32Buf(8192);
     final stY = _Float32Buf(8192);
@@ -3838,63 +4047,320 @@ class TextToStitchEngine {
     double minX = double.infinity, maxX = -double.infinity;
     double minY = double.infinity, maxY = -double.infinity;
     bool hasBounds = false;
-    bool leftToRight = true;
     int jumpCount = 0;
+    double curNeedleX = 0.0, curNeedleY = 0.0;
+    bool hasNeedlePos = false;
 
-    void addPt(double px, double py, bool isMove) {
-      stX.add(px);
-      stY.add(py);
-      stMove.add(isMove ? 1 : 0);
+    void addPt(double ux, double uy, bool isMove) {
+      // إذا كانت المسافة قصيرة جداً (< 2.5 مم = 25 وحدة) نصلها بغرزة ناعمة بدون قفزة
+      bool actualMove = isMove;
+      if (isMove && hasNeedlePos) {
+        final double d = math.sqrt((ux - curNeedleX) * (ux - curNeedleX) + (uy - curNeedleY) * (uy - curNeedleY));
+        if (d < 24.0) {
+          actualMove = false;
+        }
+      }
+      stX.add(ux);
+      stY.add(uy);
+      stMove.add(actualMove ? 1 : 0);
       stColor.add(0);
-      if (isMove) jumpCount++;
+      if (actualMove) jumpCount++;
+      curNeedleX = ux;
+      curNeedleY = uy;
+      hasNeedlePos = true;
       if (!hasBounds) {
-        minX = maxX = px;
-        minY = maxY = py;
+        minX = maxX = ux;
+        minY = maxY = uy;
         hasBounds = true;
       } else {
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
+        if (ux < minX) minX = ux;
+        if (ux > maxX) maxX = ux;
+        if (uy < minY) minY = uy;
+        if (uy > maxY) maxY = uy;
       }
     }
 
-    for (int y = 0; y < h; y += rowStepPx) {
-      // استخراج المقاطع الأفقية الممتلئة في هذا السطر
-      final List<(int, int)> runs = [];
-      int x = 0;
-      while (x < w) {
-        while (x < w && pixels[(y * w + x) * 4 + 3] < 96) {
-          x++;
-        }
-        if (x >= w) break;
-        final int startX = x;
-        while (x < w && pixels[(y * w + x) * 4 + 3] >= 96) {
-          x++;
-        }
-        if (x - startX >= 2) {
-          runs.add((startX, x - 1));
-        }
-      }
-      if (runs.isEmpty) continue;
+    if (isSatin) {
+      // ====== وضع الفستون على خط الوسط (Centerline Satin + Underlay Return + Auto-Shortening) ======
+      for (final comp in ordered) {
+        final int pad = 2;
+        final int bw = (comp.maxX - comp.minX + 1) + pad * 2;
+        final int bh = (comp.maxY - comp.minY + 1) + pad * 2;
+        final int ox = comp.minX - pad;
+        final int oy = comp.minY - pad;
 
-      final orderedRuns = leftToRight ? runs : runs.reversed.toList();
-      for (final run in orderedRuns) {
-        final int a = leftToRight ? run.$1 : run.$2;
-        final int b = leftToRight ? run.$2 : run.$1;
-        final double py = y * pxToUnits;
-
-        addPt(a * pxToUnits, py, true);
-        final int dist = (b - a).abs();
-        if (dist > stitchStepPx) {
-          final int dir = b > a ? 1 : -1;
-          for (int cx = a + dir * stitchStepPx; dir > 0 ? cx < b : cx > b; cx += dir * stitchStepPx) {
-            addPt(cx * pxToUnits, py, false);
+        final Uint8List bin = Uint8List(bw * bh);
+        for (int y = comp.minY; y <= comp.maxY; y++) {
+          for (int x = comp.minX; x <= comp.maxX; x++) {
+            if (labels[y * w + x] == comp.id) {
+              bin[(y - oy) * bw + (x - ox)] = 1;
+            }
           }
         }
-        addPt(b * pxToUnits, py, false);
+
+        // خريطة المسافة (Distance Transform) لمعرفة نصف عرض الحرف r_i عند كل نقطة
+        final Float32List distMap = _computeDistanceTransform(bin, bw, bh);
+
+        // استخراج خط الوسط (Zhang-Suen Skeleton)
+        final Uint8List skel = _zhangSuenThin(Uint8List.fromList(bin), bw, bh);
+        List<List<(double, double, double)>> chains = _extractSkeletonChains(skel, distMap, bw, bh, ox, oy);
+
+        // احتياطي للنقط الصغيرة جداً التي تتلاشى في الترقيق
+        if (chains.isEmpty) {
+          final double cx = (comp.minX + comp.maxX) * 0.5;
+          final double cy = (comp.minY + comp.maxY) * 0.5;
+          final double r = math.max(1.5, math.min(comp.maxX - comp.minX + 1, comp.maxY - comp.minY + 1) * 0.48);
+          final double halfLen = math.max(1.5, math.max(comp.maxX - comp.minX + 1, comp.maxY - comp.minY + 1) * 0.35);
+          chains = [
+            [
+              (cx - halfLen, cy, r),
+              (cx, cy, r),
+              (cx + halfLen, cy, r),
+            ]
+          ];
+        }
+
+        // ترتيب الفروع حسب أقرب نقطة تلاقي مع موقع الإبرة الحالي
+        final List<List<(double, double, double)>> orderedChains = [];
+        final List<bool> used = List<bool>.filled(chains.length, false);
+        double refX = hasNeedlePos ? (curNeedleX / pxToUnits) : (isRtl ? comp.maxX.toDouble() : comp.minX.toDouble());
+        double refY = hasNeedlePos ? (curNeedleY / pxToUnits) : ((comp.minY + comp.maxY) * 0.5);
+
+        for (int k = 0; k < chains.length; k++) {
+          int bestIdx = -1;
+          bool bestRev = false;
+          double bestD = 1e18;
+          for (int j = 0; j < chains.length; j++) {
+            if (used[j]) continue;
+            final ch = chains[j];
+            if (ch.isEmpty) continue;
+            final dStart = _dist2(refX, refY, ch.first.$1, ch.first.$2);
+            if (dStart < bestD) {
+              bestD = dStart;
+              bestIdx = j;
+              bestRev = false;
+            }
+            final dEnd = _dist2(refX, refY, ch.last.$1, ch.last.$2);
+            if (dEnd < bestD) {
+              bestD = dEnd;
+              bestIdx = j;
+              bestRev = true;
+            }
+          }
+          if (bestIdx == -1) break;
+          used[bestIdx] = true;
+          final chosen = bestRev ? chains[bestIdx].reversed.toList() : chains[bestIdx];
+          orderedChains.add(chosen);
+          refX = chosen.first.$1; // لأننا نرجع بالفستون لنقطة الدخول أو ننهي قريباً منها
+          refY = chosen.first.$2;
+        }
+
+        // رسم كل فرع: دخول بدرز وسط (Underlay) ثم رجوع بفستون (Satin Return)
+        for (final rawChain in orderedChains) {
+          final smoothed = _smoothAndResampleChain(rawChain, rowStepPx);
+          if (smoothed.length < 2) continue;
+
+          // 1) الدخول بدرز وسط (Running Stitch Underlay) بخطوة ~2.4 مم
+          final double runStepUnits = 24.0;
+          addPt(smoothed.first.$1 * pxToUnits, smoothed.first.$2 * pxToUnits, true);
+          double acc = 0.0;
+          for (int i = 1; i < smoothed.length; i++) {
+            final double dx = (smoothed[i].$1 - smoothed[i - 1].$1) * pxToUnits;
+            final double dy = (smoothed[i].$2 - smoothed[i - 1].$2) * pxToUnits;
+            acc += math.sqrt(dx * dx + dy * dy);
+            if (acc >= runStepUnits || i == smoothed.length - 1) {
+              addPt(smoothed[i].$1 * pxToUnits, smoothed[i].$2 * pxToUnits, false);
+              acc = 0.0;
+            }
+          }
+
+          // 2) الرجوع بفستون (Satin Return) على طول خط الوسط مع دوران عمودي ناعم + تقصير اللفات الحادة
+          final rev = smoothed.reversed.toList();
+          double? prevLx, prevLy, prevRx, prevRy;
+          const double minInnerDistUnits = 3.6; // حد الأمان 0.36 مم لمنع تكتّل الخيط في اللفات
+
+          for (int i = 0; i < rev.length; i++) {
+            final int iPrev = math.max(0, i - 2);
+            final int iNext = math.min(rev.length - 1, i + 2);
+            double tx = rev[iNext].$1 - rev[iPrev].$1;
+            double ty = rev[iNext].$2 - rev[iPrev].$2;
+            final double tLen = math.sqrt(tx * tx + ty * ty);
+            double nx = 0.0, ny = 1.0;
+            if (tLen > 1e-4) {
+              nx = -ty / tLen;
+              ny = tx / tLen;
+            }
+
+            final double cx = rev[i].$1;
+            final double cy = rev[i].$2;
+            final double rPx = (rev[i].$3 * 1.08).clamp(1.6, 38.0);
+
+            double lx = (cx + nx * rPx) * pxToUnits;
+            double ly = (cy + ny * rPx) * pxToUnits;
+            double rx = (cx - nx * rPx) * pxToUnits;
+            double ry = (cy - ny * rPx) * pxToUnits;
+
+            // تقصير الغرز الداخلية في اللفات الحادة (Auto Shortening)
+            if (prevLx != null && prevLy != null) {
+              final double dl = math.sqrt((lx - prevLx) * (lx - prevLx) + (ly - prevLy) * (ly - prevLy));
+              if (dl < minInnerDistUnits) {
+                lx = (cx + nx * rPx * 0.72) * pxToUnits;
+                ly = (cy + ny * rPx * 0.72) * pxToUnits;
+              }
+            }
+            if (prevRx != null && prevRy != null) {
+              final double dr = math.sqrt((rx - prevRx) * (rx - prevRx) + (ry - prevRy) * (ry - prevRy));
+              if (dr < minInnerDistUnits) {
+                rx = (cx - nx * rPx * 0.72) * pxToUnits;
+                ry = (cy - ny * rPx * 0.72) * pxToUnits;
+              }
+            }
+
+            addPt(lx, ly, false);
+            addPt(rx, ry, false);
+            prevLx = lx;
+            prevLy = ly;
+            prevRx = rx;
+            prevRy = ry;
+          }
+        }
       }
-      leftToRight = !leftToRight;
+    } else {
+      // ====== وضع التاتامي (Tatami Fill مع زاوية مناسبة لكل حرف وأقرب نقطة تلاقي) ======
+      for (final comp in ordered) {
+        final double cw = (comp.maxX - comp.minX + 1).toDouble();
+        final double ch = (comp.maxY - comp.minY + 1).toDouble();
+        final double cx = (comp.minX + comp.maxX) * 0.5;
+        final double cy = (comp.minY + comp.maxY) * 0.5;
+
+        double angleDeg;
+        if (ch > cw * 1.35) {
+          angleDeg = 12.0;
+        } else if (cw > ch * 1.35) {
+          angleDeg = 68.0;
+        } else {
+          angleDeg = 42.0;
+        }
+
+        final double rad = angleDeg * math.pi / 180.0;
+        final double cosA = math.cos(rad);
+        final double sinA = math.sin(rad);
+        final double diag = math.sqrt(cw * cw + ch * ch) * 0.55 + 2.0;
+
+        final List<List<(double, double, double)>> branches = [];
+
+        for (double v = -diag; v <= diag; v += rowStepPx) {
+          final List<(double, double)> rowRuns = [];
+          double u = -diag;
+          while (u <= diag) {
+            final int sx = (cx + u * cosA - v * sinA).round();
+            final int sy = (cy + u * sinA + v * cosA).round();
+            if (sx >= comp.minX && sx <= comp.maxX && sy >= comp.minY && sy <= comp.maxY && labels[sy * w + sx] == comp.id) {
+              final double uStart = u;
+              while (u <= diag) {
+                final int nx = (cx + u * cosA - v * sinA).round();
+                final int ny = (cy + u * sinA + v * cosA).round();
+                if (nx < comp.minX || nx > comp.maxX || ny < comp.minY || ny > comp.maxY || labels[ny * w + nx] != comp.id) {
+                  break;
+                }
+                u += 1.0;
+              }
+              if (u - uStart >= 1.5) {
+                rowRuns.add((uStart, u - 1.0));
+              }
+            } else {
+              u += 1.0;
+            }
+          }
+
+          for (final run in rowRuns) {
+            List<(double, double, double)>? bestBranch;
+            double bestDist = 1e9;
+            for (final br in branches) {
+              final last = br.last;
+              if ((v - last.$1).abs() <= rowStepPx * 1.6) {
+                final bool overlaps = run.$1 <= last.$3 + 4.0 && run.$2 >= last.$2 - 4.0;
+                if (overlaps) {
+                  final double d = ((run.$1 + run.$2) * 0.5 - (last.$2 + last.$3) * 0.5).abs();
+                  if (d < bestDist) {
+                    bestDist = d;
+                    bestBranch = br;
+                  }
+                }
+              }
+            }
+            if (bestBranch != null) {
+              bestBranch.add((v, run.$1, run.$2));
+            } else {
+              branches.add([(v, run.$1, run.$2)]);
+            }
+          }
+        }
+
+        // ترتيب الفروع حسب أقرب نقطة تلاقي
+        final List<bool> usedBr = List<bool>.filled(branches.length, false);
+        for (int k = 0; k < branches.length; k++) {
+          int bestIdx = -1;
+          bool bestRev = false;
+          double bestD = 1e18;
+          final double refX = hasNeedlePos ? curNeedleX : (cx * pxToUnits);
+          final double refY = hasNeedlePos ? curNeedleY : (cy * pxToUnits);
+
+          for (int j = 0; j < branches.length; j++) {
+            if (usedBr[j] || branches[j].isEmpty) continue;
+            final s0 = branches[j].first;
+            final x0 = (cx + s0.$2 * cosA - s0.$1 * sinA) * pxToUnits;
+            final y0 = (cy + s0.$2 * sinA + s0.$1 * cosA) * pxToUnits;
+            final d0 = _dist2(refX, refY, x0, y0);
+            if (d0 < bestD) {
+              bestD = d0;
+              bestIdx = j;
+              bestRev = false;
+            }
+            final s1 = branches[j].last;
+            final x1 = (cx + s1.$2 * cosA - s1.$1 * sinA) * pxToUnits;
+            final y1 = (cy + s1.$2 * sinA + s1.$1 * cosA) * pxToUnits;
+            final d1 = _dist2(refX, refY, x1, y1);
+            if (d1 < bestD) {
+              bestD = d1;
+              bestIdx = j;
+              bestRev = true;
+            }
+          }
+          if (bestIdx == -1) break;
+          usedBr[bestIdx] = true;
+          final br = bestRev ? branches[bestIdx].reversed.toList() : branches[bestIdx];
+
+          bool forward = true;
+          bool firstInBranch = true;
+          for (final seg in br) {
+            final double v = seg.$1;
+            final double a = forward ? seg.$2 : seg.$3;
+            final double b = forward ? seg.$3 : seg.$2;
+
+            final double x0 = (cx + a * cosA - v * sinA) * pxToUnits;
+            final double y0 = (cy + a * sinA + v * cosA) * pxToUnits;
+            addPt(x0, y0, firstInBranch);
+            firstInBranch = false;
+
+            final double dist = (b - a).abs();
+            if (dist > stitchStepPx) {
+              final int steps = (dist / stitchStepPx).floor();
+              for (int s = 1; s < steps; s++) {
+                final double u = a + (b - a) * (s / steps);
+                final double xm = (cx + u * cosA - v * sinA) * pxToUnits;
+                final double ym = (cy + u * sinA + v * cosA) * pxToUnits;
+                addPt(xm, ym, false);
+              }
+            }
+
+            final double x1 = (cx + b * cosA - v * sinA) * pxToUnits;
+            final double y1 = (cy + b * sinA + v * cosA) * pxToUnits;
+            addPt(x1, y1, false);
+            forward = !forward;
+          }
+        }
+      }
     }
 
     if (stX.length < 2) return null;
@@ -3923,7 +4389,235 @@ class TextToStitchEngine {
       minY: minY,
       maxY: maxY,
       hasBounds: hasBounds,
-      machineType: 'Tarik Lettering',
+      machineType: isSatin ? 'Tarik Satin' : 'Tarik Tatami',
     );
   }
+
+  static double _dist2(double x1, double y1, double x2, double y2) {
+    final dx = x1 - x2;
+    final dy = y1 - y2;
+    return dx * dx + dy * dy;
+  }
+
+  static Float32List _computeDistanceTransform(Uint8List bin, int w, int h) {
+    final dist = Float32List(w * h);
+    const double inf = 1e6;
+    for (int i = 0; i < w * h; i++) {
+      dist[i] = bin[i] != 0 ? inf : 0.0;
+    }
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        final int idx = y * w + x;
+        if (dist[idx] == 0.0) continue;
+        double m = dist[idx];
+        final double d1 = dist[idx - 1] + 1.0;
+        final double d2 = dist[idx - w] + 1.0;
+        final double d3 = dist[idx - w - 1] + 1.414;
+        final double d4 = dist[idx - w + 1] + 1.414;
+        if (d1 < m) m = d1;
+        if (d2 < m) m = d2;
+        if (d3 < m) m = d3;
+        if (d4 < m) m = d4;
+        dist[idx] = m;
+      }
+    }
+    for (int y = h - 2; y >= 1; y--) {
+      for (int x = w - 2; x >= 1; x--) {
+        final int idx = y * w + x;
+        if (dist[idx] == 0.0) continue;
+        double m = dist[idx];
+        final double d1 = dist[idx + 1] + 1.0;
+        final double d2 = dist[idx + w] + 1.0;
+        final double d3 = dist[idx + w + 1] + 1.414;
+        final double d4 = dist[idx + w - 1] + 1.414;
+        if (d1 < m) m = d1;
+        if (d2 < m) m = d2;
+        if (d3 < m) m = d3;
+        if (d4 < m) m = d4;
+        dist[idx] = m;
+      }
+    }
+    return dist;
+  }
+
+  static Uint8List _zhangSuenThin(Uint8List img, int w, int h) {
+    final List<int> toRemove = [];
+    for (int iter = 0; iter < 42; iter++) {
+      bool changed = false;
+      for (int step = 0; step < 2; step++) {
+        toRemove.clear();
+        for (int y = 1; y < h - 1; y++) {
+          final int row = y * w;
+          for (int x = 1; x < w - 1; x++) {
+            final int idx = row + x;
+            if (img[idx] == 0) continue;
+            final int p2 = img[idx - w];
+            final int p3 = img[idx - w + 1];
+            final int p4 = img[idx + 1];
+            final int p5 = img[idx + w + 1];
+            final int p6 = img[idx + w];
+            final int p7 = img[idx + w - 1];
+            final int p8 = img[idx - 1];
+            final int p9 = img[idx - w - 1];
+
+            final int b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+            if (b < 2 || b > 6) continue;
+
+            int a = 0;
+            if (p2 == 0 && p3 == 1) a++;
+            if (p3 == 0 && p4 == 1) a++;
+            if (p4 == 0 && p5 == 1) a++;
+            if (p5 == 0 && p6 == 1) a++;
+            if (p6 == 0 && p7 == 1) a++;
+            if (p7 == 0 && p8 == 1) a++;
+            if (p8 == 0 && p9 == 1) a++;
+            if (p9 == 0 && p2 == 1) a++;
+            if (a != 1) continue;
+
+            if (step == 0) {
+              if (p2 * p4 * p6 != 0) continue;
+              if (p4 * p6 * p8 != 0) continue;
+            } else {
+              if (p2 * p4 * p8 != 0) continue;
+              if (p2 * p6 * p8 != 0) continue;
+            }
+            toRemove.add(idx);
+          }
+        }
+        if (toRemove.isNotEmpty) {
+          for (final idx in toRemove) {
+            img[idx] = 0;
+          }
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    return img;
+  }
+
+  static List<List<(double, double, double)>> _extractSkeletonChains(
+    Uint8List skel,
+    Float32List distMap,
+    int w,
+    int h,
+    int ox,
+    int oy,
+  ) {
+    final Uint8List visited = Uint8List(w * h);
+    final List<List<(double, double, double)>> chains = [];
+    const dirs = [
+      (1, 0), (-1, 0), (0, 1), (0, -1),
+      (1, 1), (-1, -1), (1, -1), (-1, 1),
+    ];
+
+    int degree(int x, int y) {
+      int deg = 0;
+      for (final d in dirs) {
+        final nx = x + d.$1;
+        final ny = y + d.$2;
+        if (nx >= 0 && nx < w && ny >= 0 && ny < h && skel[ny * w + nx] != 0) deg++;
+      }
+      return deg;
+    }
+
+    void walkFrom(int sx, int sy) {
+      final List<(double, double, double)> chain = [];
+      int cx = sx, cy = sy;
+      while (true) {
+        final int idx = cy * w + cx;
+        visited[idx] = 1;
+        chain.add(((cx + ox).toDouble(), (cy + oy).toDouble(), distMap[idx]));
+
+        int nextX = -1, nextY = -1;
+        for (final d in dirs) {
+          final nx = cx + d.$1;
+          final ny = cy + d.$2;
+          if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+            final nIdx = ny * w + nx;
+            if (skel[nIdx] != 0 && visited[nIdx] == 0) {
+              nextX = nx;
+              nextY = ny;
+              break;
+            }
+          }
+        }
+        if (nextX == -1) break;
+        cx = nextX;
+        cy = nextY;
+      }
+      if (chain.length >= 2) {
+        chains.add(chain);
+      }
+    }
+
+    // نبدأ أولاً من الأطراف الحرة (degree == 1) لتتبع المسارات الطويلة النظيفة
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        final int idx = y * w + x;
+        if (skel[idx] != 0 && visited[idx] == 0 && degree(x, y) == 1) {
+          walkFrom(x, y);
+        }
+      }
+    }
+    // ثم أي حلقات مغلقة متبقية (مثل حلقة حرف ط أو ق أو O)
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        final int idx = y * w + x;
+        if (skel[idx] != 0 && visited[idx] == 0) {
+          walkFrom(x, y);
+        }
+      }
+    }
+    return chains;
+  }
+
+  static List<(double, double, double)> _smoothAndResampleChain(
+    List<(double, double, double)> raw,
+    double stepPx,
+  ) {
+    if (raw.length <= 2) return raw;
+
+    // 1) تنعيم المسار مرتين
+    List<(double, double, double)> pts = List.from(raw);
+    for (int pass = 0; pass < 2; pass++) {
+      final List<(double, double, double)> next = [pts.first];
+      for (int i = 1; i < pts.length - 1; i++) {
+        final x = (pts[i - 1].$1 + pts[i].$1 * 2.0 + pts[i + 1].$1) * 0.25;
+        final y = (pts[i - 1].$2 + pts[i].$2 * 2.0 + pts[i + 1].$2) * 0.25;
+        final r = (pts[i - 1].$3 + pts[i].$3 * 2.0 + pts[i + 1].$3) * 0.25;
+        next.add((x, y, r));
+      }
+      next.add(pts.last);
+      pts = next;
+    }
+
+    // 2) إعادة التوزيع بمسافات متساوية حسب الكثافة
+    final List<(double, double, double)> out = [pts.first];
+    double carry = 0.0;
+    for (int i = 1; i < pts.length; i++) {
+      final double x0 = pts[i - 1].$1, y0 = pts[i - 1].$2, r0 = pts[i - 1].$3;
+      final double x1 = pts[i].$1, y1 = pts[i].$2, r1 = pts[i].$3;
+      final double segLen = math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+      if (segLen < 1e-4) continue;
+      double d = stepPx - carry;
+      while (d <= segLen) {
+        final double t = d / segLen;
+        out.add((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, r0 + (r1 - r0) * t));
+        d += stepPx;
+      }
+      carry = segLen - (d - stepPx);
+    }
+    if (out.length < 2) {
+      out.add(pts.last);
+    }
+    return out;
+  }
 }
+
+class _TextComp {
+  final int id, minX, maxX, minY, maxY, area;
+  _TextComp(this.id, this.minX, this.maxX, this.minY, this.maxY, this.area);
+  double get centerX => (minX + maxX) * 0.5;
+}
+// Tarik emb - latest
