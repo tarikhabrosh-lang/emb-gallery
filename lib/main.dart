@@ -260,13 +260,14 @@ class LicenseManager {
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  SystemChrome.setSystemUIChangeCallback((systemOverlaysAreVisible) async {
-    if (systemOverlaysAreVisible) {
-      await Future.delayed(const Duration(seconds: 2));
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    }
-  });
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Color(0xFF0E131D),
+    statusBarIconBrightness: Brightness.light,
+    systemNavigationBarColor: Color(0xFF0E131D),
+    systemNavigationBarIconBrightness: Brightness.light,
+    systemNavigationBarDividerColor: Color(0xFF18202E),
+  ));
   runApp(const EmbGalleryApp());
 }
 
@@ -334,7 +335,14 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
           ),
           builder: (context, child) => Directionality(
             textDirection: isAr ? TextDirection.rtl : TextDirection.ltr,
-            child: child ?? const SizedBox.shrink(),
+            child: ColoredBox(
+              color: const Color(0xFF0E131D),
+              child: SafeArea(
+                top: false,
+                bottom: true,
+                child: child ?? const SizedBox.shrink(),
+              ),
+            ),
           ),
           home: _license == null
               ? const Scaffold(
@@ -856,25 +864,31 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
         return Scaffold(
           appBar: AppBar(
             backgroundColor: const Color(0xFF0E131D),
+            titleSpacing: 12,
             title: const Text(
               'Tarik emb',
-              style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFD4AF37), letterSpacing: 0.6),
+              maxLines: 1,
+              softWrap: false,
+              style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFD4AF37), fontSize: 19, letterSpacing: 0.4),
             ),
             actions: [
               if (_isBackgroundSyncing)
                 const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 8),
+                  padding: EdgeInsets.symmetric(horizontal: 4),
                   child: Center(
                     child: SizedBox(
-                      width: 14,
-                      height: 14,
+                      width: 13,
+                      height: 13,
                       child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)),
                     ),
                   ),
                 ),
               if (widget.license['activated'] != true)
                 IconButton(
-                  icon: const Icon(Icons.lock_open, color: Colors.greenAccent),
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                  icon: const Icon(Icons.lock_open, color: Colors.greenAccent, size: 20),
                   tooltip: tr('تفعيل النسخة', 'Activate App'),
                   onPressed: () {
                     Navigator.push(
@@ -885,17 +899,32 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                     );
                   },
                 ),
-              TextButton.icon(
-                onPressed: () async {
+              InkWell(
+                onTap: () async {
                   await _EmbGalleryAppState.toggleLanguage();
                   setState(() {});
                 },
-                icon: const Icon(Icons.language, color: Color(0xFFD4AF37), size: 18),
-                label: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD4AF37).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.45)),
+                  ),
+                  child: Text(
+                    isAr ? 'EN' : 'عربي',
+                    style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 11),
+                  ),
+                ),
               ),
               IconButton(
-                icon: const Icon(Icons.calculate_outlined, color: Color(0xFFD4AF37)),
-                tooltip: tr('حاسبة التطريز (\$)', 'Embroidery Calculator (\$)'),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                icon: const Icon(Icons.calculate_outlined, color: Color(0xFFD4AF37), size: 22),
+                tooltip: tr('حساب التطريز (\$)', 'Embroidery Calculator (\$)'),
                 onPressed: () {
                   Navigator.push(
                     context,
@@ -904,7 +933,10 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                 },
               ),
               IconButton(
-                icon: const Icon(Icons.text_fields, color: Color(0xFFD4AF37)),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                icon: const Icon(Icons.text_fields, color: Color(0xFFD4AF37), size: 22),
                 tooltip: tr('كتابة وتحويل لغرز', 'Text to Stitches'),
                 onPressed: () {
                   Navigator.push(
@@ -914,10 +946,14 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                 },
               ),
               IconButton(
-                icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37)),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37), size: 21),
                 tooltip: tr('تحديث', 'Refresh'),
                 onPressed: _startBackgroundScan,
               ),
+              const SizedBox(width: 4),
             ],
           ),
           body: Column(
@@ -1743,7 +1779,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                 },
                                 icon: const Icon(Icons.calculate, size: 19, color: Colors.greenAccent),
                                 label: Text(
-                                  tr('حاسبة السعر والخيط والوقت (\$)', 'Price, Thread & Time Calculator (\$)'),
+                                  tr('حساب التطريز (الغرز والخيط والسعر)', 'Calculate Embroidery (Price & Thread)'),
                                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.greenAccent),
                                 ),
                                 style: OutlinedButton.styleFrom(
@@ -1963,7 +1999,6 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   @override
   void initState() {
     super.initState();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _transformController.addListener(() {
       final scale = _transformController.value.getMaxScaleOnAxis();
       if ((scale - _currentScale).abs() > 0.05) setState(() => _currentScale = scale);
@@ -2500,7 +2535,13 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   bool _saving = false;
 
   double _scale = 1.0;
-  double _densityFactor = 1.0;
+  double _densityMm = 0.50; // الكثافة الأساسية 0.50 مم
+  final TextEditingController _densityCtrl = TextEditingController(text: '0.50');
+  bool _filterEnabled = false;
+  double _minStitchFilterMm = 0.30; // فلترة الفلم من 0.3 إلى 1.5 مم
+  final TextEditingController _filterCtrl = TextEditingController(text: '0.30');
+  int _filteredOutCount = 0;
+
   double _rotationDeg = 0.0;
   bool _flipH = false;
   bool _flipV = false;
@@ -2513,6 +2554,13 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _densityCtrl.dispose();
+    _filterCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -2537,9 +2585,28 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
     }
   }
 
+  void _setDensityMm(double val, {bool syncText = true}) {
+    final clamped = val.clamp(0.25, 1.00);
+    _densityMm = double.parse(clamped.toStringAsFixed(2));
+    if (syncText) {
+      _densityCtrl.text = _densityMm.toStringAsFixed(2);
+    }
+    _rebuildEdited();
+  }
+
+  void _setFilterMm(double val, {bool syncText = true}) {
+    final clamped = val.clamp(0.30, 1.50);
+    _minStitchFilterMm = double.parse(clamped.toStringAsFixed(2));
+    if (syncText) {
+      _filterCtrl.text = _minStitchFilterMm.toStringAsFixed(2);
+    }
+    _rebuildEdited();
+  }
+
   void _rebuildEdited() {
     if (_original == null) return;
-    final next = VectorDesignEditor.transform(
+    final double factor = (0.50 / _densityMm).clamp(0.45, 2.0);
+    final withoutFilter = VectorDesignEditor.transform(
       _original!,
       scale: _scale,
       rotationDeg: _rotationDeg,
@@ -2548,9 +2615,32 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
       deletedColors: _deletedColors,
       trimStart: _trimStart,
       trimEnd: _trimEnd,
-      densityFactor: _densityFactor,
+      densityFactor: factor,
+      minStitchFilterMm: 0.0,
     );
-    setState(() => _edited = next);
+    final VectorDesignData next;
+    int removed = 0;
+    if (_filterEnabled) {
+      next = VectorDesignEditor.transform(
+        _original!,
+        scale: _scale,
+        rotationDeg: _rotationDeg,
+        flipH: _flipH,
+        flipV: _flipV,
+        deletedColors: _deletedColors,
+        trimStart: _trimStart,
+        trimEnd: _trimEnd,
+        densityFactor: factor,
+        minStitchFilterMm: _minStitchFilterMm,
+      );
+      removed = max(0, withoutFilter.stitches - next.stitches);
+    } else {
+      next = withoutFilter;
+    }
+    setState(() {
+      _edited = next;
+      _filteredOutCount = removed;
+    });
   }
 
   Future<void> _saveEdited() async {
@@ -2595,11 +2685,14 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   Widget build(BuildContext context) {
     final total = _original?.stX.length ?? 0;
     final dimText = formatDimensionsCm(_edited?.widthMm, _edited?.heightMm);
+    final int densityPct = ((0.50 / _densityMm) * 100).round();
+    final numFmt = intl.NumberFormat('#,###');
+
     return Scaffold(
       backgroundColor: const Color(0xFF0E131D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
-        title: Text(tr('تعديل التصميم', 'Edit Design'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        title: Text(tr('تعديل الفلم', 'Edit Design'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
         actions: [
           TextButton.icon(
             onPressed: _saving || _edited == null ? null : _saveEdited,
@@ -2632,213 +2725,361 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                       ),
                     ),
                     ConstrainedBox(
-                      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.48),
+                      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.50),
                       child: Container(
-                      padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF18202E),
-                        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-                      ),
-                      child: SingleChildScrollView(
-                        child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF18202E),
+                          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                        ),
+                        child: SingleChildScrollView(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              Text(
-                                '${tr('الحجم', 'Scale')}: ${(_scale * 100).round()}%${dimText != null ? '  ($dimText)' : ''}',
-                                style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
-                              ),
-                              Text(
-                                '${tr('الغرز', 'Stitches')}: ${_edited!.stitches}',
-                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
-                              ),
-                            ],
-                          ),
-                          Slider(
-                            value: _scale,
-                            min: 0.5,
-                            max: 2.0,
-                            divisions: 30,
-                            activeColor: const Color(0xFFD4AF37),
-                            onChanged: (v) {
-                              _scale = v;
-                              _rebuildEdited();
-                            },
-                          ),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                '${tr('كثافة الغرز (تخفيف / تكثيف)', 'Stitch Density')}: ${(_densityFactor * 100).round()}%',
-                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
-                              ),
-                              Text(
-                                _densityFactor < 0.98
-                                    ? tr('تخفيف', 'Lighter')
-                                    : (_densityFactor > 1.02 ? tr('تكثيف', 'Denser') : tr('أصلي', 'Original')),
-                                style: const TextStyle(color: Colors.white70, fontSize: 11),
-                              ),
-                            ],
-                          ),
-                          Slider(
-                            value: _densityFactor,
-                            min: 0.5,
-                            max: 1.8,
-                            divisions: 26,
-                            activeColor: const Color(0xFF56CCF2),
-                            onChanged: (v) {
-                              _densityFactor = v;
-                              _rebuildEdited();
-                            },
-                          ),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                '${tr('الدوران', 'Rotation')}: ${_rotationDeg.round()}°',
-                                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
-                              ),
+                              // الحجم وعدد الغرز
                               Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [0, 90, 180, 270].map((deg) {
-                                  final bool sel = _rotationDeg.round() == deg;
-                                  return Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                                    child: InkWell(
-                                      onTap: () {
-                                        _rotationDeg = deg.toDouble();
-                                        _rebuildEdited();
-                                      },
-                                      borderRadius: BorderRadius.circular(8),
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: sel ? const Color(0xFFD4AF37) : Colors.white10,
-                                          borderRadius: BorderRadius.circular(8),
-                                        ),
-                                        child: Text(
-                                          '$deg°',
-                                          style: TextStyle(
-                                            color: sel ? Colors.black : Colors.white,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 11,
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    '${tr('الحجم', 'Scale')}: ${(_scale * 100).round()}%${dimText != null ? '  ($dimText)' : ''}',
+                                    style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                                  ),
+                                  Text(
+                                    '${tr('الغرز', 'Stitches')}: ${numFmt.format(_edited!.stitches)}',
+                                    style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                              Slider(
+                                value: _scale,
+                                min: 0.5,
+                                max: 2.0,
+                                divisions: 30,
+                                activeColor: const Color(0xFFD4AF37),
+                                onChanged: (v) {
+                                  _scale = v;
+                                  _rebuildEdited();
+                                },
+                              ),
+
+                              // نسبة الكثافة بالأرقام (الأساسية 0.50)
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                margin: const EdgeInsets.only(bottom: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black26,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: Colors.white12),
+                                ),
+                                child: Column(
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            '${tr('الكثافة (الأساسية 0.50)', 'Density (Base 0.50)')}: $densityPct%',
+                                            style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
                                           ),
                                         ),
-                                      ),
+                                        Text(
+                                          _densityMm < 0.49
+                                              ? tr('تكثيف', 'Denser')
+                                              : (_densityMm > 0.51 ? tr('تخفيف', 'Lighter') : tr('أصلي', 'Original')),
+                                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 11),
+                                        ),
+                                      ],
                                     ),
-                                  );
-                                }).toList(),
+                                    const SizedBox(height: 6),
+                                    Row(
+                                      children: [
+                                        IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: () => _setDensityMm(_densityMm - 0.05),
+                                          icon: const Icon(Icons.remove_circle_outline, color: Color(0xFF56CCF2)),
+                                          tooltip: tr('تكثيف (-0.05)', 'Denser (-0.05)'),
+                                        ),
+                                        SizedBox(
+                                          width: 68,
+                                          child: TextField(
+                                            controller: _densityCtrl,
+                                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                                              filled: true,
+                                              fillColor: const Color(0xFF0E131D),
+                                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                            ),
+                                            onSubmitted: (txt) {
+                                              final v = double.tryParse(txt.trim().replaceAll(',', '.'));
+                                              if (v != null) _setDensityMm(v, syncText: true);
+                                            },
+                                          ),
+                                        ),
+                                        IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: () => _setDensityMm(_densityMm + 0.05),
+                                          icon: const Icon(Icons.add_circle_outline, color: Color(0xFF56CCF2)),
+                                          tooltip: tr('تخفيف (+0.05)', 'Lighter (+0.05)'),
+                                        ),
+                                        Expanded(
+                                          child: Slider(
+                                            value: _densityMm.clamp(0.25, 1.00),
+                                            min: 0.25,
+                                            max: 1.00,
+                                            divisions: 15,
+                                            activeColor: const Color(0xFF56CCF2),
+                                            onChanged: (v) => _setDensityMm(v),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ],
-                          ),
-                          Slider(
-                            value: _rotationDeg.clamp(0.0, 360.0),
-                            min: 0.0,
-                            max: 360.0,
-                            divisions: 360,
-                            activeColor: const Color(0xFFD4AF37),
-                            onChanged: (v) {
-                              _rotationDeg = v;
-                              _rebuildEdited();
-                            },
-                          ),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: [
-                              OutlinedButton.icon(
-                                onPressed: () {
-                                  _flipH = !_flipH;
+
+                              // فلترة الفلم (0.3 إلى 1.5 مم مع حماية غرز الزوايا)
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                margin: const EdgeInsets.only(bottom: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black26,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: _filterEnabled ? Colors.greenAccent.withOpacity(0.5) : Colors.white12,
+                                  ),
+                                ),
+                                child: Column(
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                tr('فلترة الغرز القصيرة (0.3 - 1.5 مم)', 'Small-Stitch Filter (0.3 - 1.5 mm)'),
+                                                style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                                              ),
+                                              Text(
+                                                _filterEnabled
+                                                    ? '${tr('تمت فلترة', 'Filtered')} ${numFmt.format(_filteredOutCount)} ${tr('غرزة (مع حماية الزوايا)', 'st (corners protected)')}'
+                                                    : tr('مع الحفاظ على غرز الزوايا دون تشويه', 'Preserves sharp corners automatically'),
+                                                style: const TextStyle(color: Colors.white60, fontSize: 10),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Switch(
+                                          value: _filterEnabled,
+                                          activeColor: Colors.greenAccent,
+                                          onChanged: (v) {
+                                            _filterEnabled = v;
+                                            _rebuildEdited();
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                    if (_filterEnabled)
+                                      Row(
+                                        children: [
+                                          IconButton(
+                                            visualDensity: VisualDensity.compact,
+                                            onPressed: () => _setFilterMm(_minStitchFilterMm - 0.10),
+                                            icon: const Icon(Icons.remove_circle_outline, color: Colors.greenAccent),
+                                          ),
+                                          SizedBox(
+                                            width: 68,
+                                            child: TextField(
+                                              controller: _filterCtrl,
+                                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                              textAlign: TextAlign.center,
+                                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                                              decoration: InputDecoration(
+                                                isDense: true,
+                                                contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                                                filled: true,
+                                                fillColor: const Color(0xFF0E131D),
+                                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                              ),
+                                              onSubmitted: (txt) {
+                                                final v = double.tryParse(txt.trim().replaceAll(',', '.'));
+                                                if (v != null) _setFilterMm(v, syncText: true);
+                                              },
+                                            ),
+                                          ),
+                                          IconButton(
+                                            visualDensity: VisualDensity.compact,
+                                            onPressed: () => _setFilterMm(_minStitchFilterMm + 0.10),
+                                            icon: const Icon(Icons.add_circle_outline, color: Colors.greenAccent),
+                                          ),
+                                          Expanded(
+                                            child: Slider(
+                                              value: _minStitchFilterMm.clamp(0.30, 1.50),
+                                              min: 0.30,
+                                              max: 1.50,
+                                              divisions: 12,
+                                              activeColor: Colors.greenAccent,
+                                              onChanged: (v) => _setFilterMm(v),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                  ],
+                                ),
+                              ),
+
+                              // الدوران
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    '${tr('الدوران', 'Rotation')}: ${_rotationDeg.round()}°',
+                                    style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                                  ),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [0, 90, 180, 270].map((deg) {
+                                      final bool sel = _rotationDeg.round() == deg;
+                                      return Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                                        child: InkWell(
+                                          onTap: () {
+                                            _rotationDeg = deg.toDouble();
+                                            _rebuildEdited();
+                                          },
+                                          borderRadius: BorderRadius.circular(8),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                            decoration: BoxDecoration(
+                                              color: sel ? const Color(0xFFD4AF37) : Colors.white10,
+                                              borderRadius: BorderRadius.circular(8),
+                                            ),
+                                            child: Text(
+                                              '$deg°',
+                                              style: TextStyle(
+                                                color: sel ? Colors.black : Colors.white,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ],
+                              ),
+                              Slider(
+                                value: _rotationDeg.clamp(0.0, 360.0),
+                                min: 0.0,
+                                max: 360.0,
+                                divisions: 360,
+                                activeColor: const Color(0xFFD4AF37),
+                                onChanged: (v) {
+                                  _rotationDeg = v;
                                   _rebuildEdited();
                                 },
-                                icon: Icon(Icons.flip, size: 17, color: _flipH ? const Color(0xFFD4AF37) : Colors.white70),
-                                label: Text(tr('قلب أفقي', 'Flip H'), style: const TextStyle(color: Colors.white, fontSize: 12)),
-                                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
                               ),
-                              OutlinedButton.icon(
-                                onPressed: () {
-                                  _flipV = !_flipV;
-                                  _rebuildEdited();
-                                },
-                                icon: Icon(Icons.swap_vert, size: 17, color: _flipV ? const Color(0xFFD4AF37) : Colors.white70),
-                                label: Text(tr('قلب عمودي', 'Flip V'), style: const TextStyle(color: Colors.white, fontSize: 12)),
-                                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
-                              ),
-                            ],
-                          ),
-                          if (_availableColors.length > 1) ...[
-                            const SizedBox(height: 8),
-                            Align(
-                              alignment: AlignmentDirectional.centerStart,
-                              child: Text(
-                                tr('اضغط على أي لون لحذفه أو إرجاعه:', 'Tap any color to delete/restore:'),
-                                style: const TextStyle(color: Colors.white70, fontSize: 11),
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            SizedBox(
-                              height: 32,
-                              child: ListView.separated(
-                                scrollDirection: Axis.horizontal,
-                                itemCount: _availableColors.length,
-                                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                                itemBuilder: (_, idx) {
-                                  final cIdx = _availableColors[idx];
-                                  final isDeleted = _deletedColors.contains(cIdx);
-                                  final col = Color(_original!.paletteArgb[cIdx % _original!.paletteArgb.length]);
-                                  return GestureDetector(
-                                    onTap: () {
-                                      if (isDeleted) {
-                                        _deletedColors.remove(cIdx);
-                                      } else if (_availableColors.length - _deletedColors.length > 1) {
-                                        _deletedColors.add(cIdx);
-                                      }
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                children: [
+                                  OutlinedButton.icon(
+                                    onPressed: () {
+                                      _flipH = !_flipH;
                                       _rebuildEdited();
                                     },
-                                    child: Container(
-                                      width: 32,
-                                      height: 32,
-                                      decoration: BoxDecoration(
-                                        color: isDeleted ? Colors.black38 : col,
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: isDeleted ? Colors.redAccent : Colors.white,
-                                          width: 2,
+                                    icon: Icon(Icons.flip, size: 17, color: _flipH ? const Color(0xFFD4AF37) : Colors.white70),
+                                    label: Text(tr('قلب أفقي', 'Flip H'), style: const TextStyle(color: Colors.white, fontSize: 12)),
+                                    style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
+                                  ),
+                                  OutlinedButton.icon(
+                                    onPressed: () {
+                                      _flipV = !_flipV;
+                                      _rebuildEdited();
+                                    },
+                                    icon: Icon(Icons.swap_vert, size: 17, color: _flipV ? const Color(0xFFD4AF37) : Colors.white70),
+                                    label: Text(tr('قلب عمودي', 'Flip V'), style: const TextStyle(color: Colors.white, fontSize: 12)),
+                                    style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
+                                  ),
+                                ],
+                              ),
+                              if (_availableColors.length > 1) ...[
+                                const SizedBox(height: 8),
+                                Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  child: Text(
+                                    tr('اضغط على أي لون لحذفه أو إرجاعه:', 'Tap any color to delete/restore:'),
+                                    style: const TextStyle(color: Colors.white70, fontSize: 11),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                SizedBox(
+                                  height: 32,
+                                  child: ListView.separated(
+                                    scrollDirection: Axis.horizontal,
+                                    itemCount: _availableColors.length,
+                                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                                    itemBuilder: (_, idx) {
+                                      final cIdx = _availableColors[idx];
+                                      final isDeleted = _deletedColors.contains(cIdx);
+                                      final col = Color(_original!.paletteArgb[cIdx % _original!.paletteArgb.length]);
+                                      return GestureDetector(
+                                        onTap: () {
+                                          if (isDeleted) {
+                                            _deletedColors.remove(cIdx);
+                                          } else if (_availableColors.length - _deletedColors.length > 1) {
+                                            _deletedColors.add(cIdx);
+                                          }
+                                          _rebuildEdited();
+                                        },
+                                        child: Container(
+                                          width: 32,
+                                          height: 32,
+                                          decoration: BoxDecoration(
+                                            color: isDeleted ? Colors.black38 : col,
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: isDeleted ? Colors.redAccent : Colors.white,
+                                              width: 2,
+                                            ),
+                                          ),
+                                          child: isDeleted ? const Icon(Icons.close, size: 16, color: Colors.redAccent) : null,
                                         ),
-                                      ),
-                                      child: isDeleted ? const Icon(Icons.close, size: 16, color: Colors.redAccent) : null,
-                                    ),
-                                  );
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                              const SizedBox(height: 6),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(tr('قص الغرز (بداية / نهاية):', 'Trim Stitches (Start / End):'), style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                                  Text('$_trimStart - $_trimEnd', style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                                ],
+                              ),
+                              RangeSlider(
+                                values: RangeValues(_trimStart.toDouble(), _trimEnd.toDouble()),
+                                min: 0,
+                                max: total.toDouble(),
+                                activeColor: const Color(0xFF56CCF2),
+                                onChanged: (rv) {
+                                  if (rv.end - rv.start >= 2) {
+                                    _trimStart = rv.start.round();
+                                    _trimEnd = rv.end.round();
+                                    _rebuildEdited();
+                                  }
                                 },
                               ),
-                            ),
-                          ],
-                          const SizedBox(height: 6),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(tr('قص الغرز (بداية / نهاية):', 'Trim Stitches (Start / End):'), style: const TextStyle(color: Colors.white70, fontSize: 11)),
-                              Text('$_trimStart - $_trimEnd', style: const TextStyle(color: Colors.white70, fontSize: 11)),
                             ],
                           ),
-                          RangeSlider(
-                            values: RangeValues(_trimStart.toDouble(), _trimEnd.toDouble()),
-                            min: 0,
-                            max: total.toDouble(),
-                            activeColor: const Color(0xFF56CCF2),
-                            onChanged: (rv) {
-                              if (rv.end - rv.start >= 2) {
-                                _trimStart = rv.start.round();
-                                _trimEnd = rv.end.round();
-                                _rebuildEdited();
-                              }
-                            },
-                          ),
-                        ],
+                        ),
                       ),
-                      ),
-                    ),
                     ),
                   ],
                 ),
@@ -3801,7 +4042,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   }
 }
 
-/// شاشة حاسبة التطريز الشاملة بالدولار ($) + تقدير الخيط العلوي والمكوك والوقت التقديري للماكينة
+/// شاشة حساب التطريز المبسطة (حساب مباشر للغرز والترتر والخرز والخيط والوقت + سعر الـ 1000 غرزة الافتراضي 0.09$ + عدد القطع)
 class EmbroideryCalculatorScreen extends StatefulWidget {
   final EmbDesignInfo? design;
   const EmbroideryCalculatorScreen({super.key, this.design});
@@ -3811,14 +4052,16 @@ class EmbroideryCalculatorScreen extends StatefulWidget {
 
 class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen> {
   final TextEditingController _stitchesCtrl = TextEditingController();
-  final TextEditingController _pricePer1kCtrl = TextEditingController(text: '0.25');
-  final TextEditingController _sequinsCtrl = TextEditingController(text: '0');
-  final TextEditingController _priceSeq1kCtrl = TextEditingController(text: '0.15');
-  final TextEditingController _beadsCtrl = TextEditingController(text: '0');
-  final TextEditingController _priceBead1kCtrl = TextEditingController(text: '0.20');
+  final TextEditingController _pricePer1kCtrl = TextEditingController(text: '0.09');
   final TextEditingController _qtyCtrl = TextEditingController(text: '1');
+  final TextEditingController _sequinsCtrl = TextEditingController(text: '0');
+  final TextEditingController _priceSeq1kCtrl = TextEditingController(text: '0.00');
+  final TextEditingController _beadsCtrl = TextEditingController(text: '0');
+  final TextEditingController _priceBead1kCtrl = TextEditingController(text: '0.00');
   final TextEditingController _speedCtrl = TextEditingController(text: '800');
   final TextEditingController _colorsCtrl = TextEditingController(text: '1');
+
+  static const List<String> _ratePresets = ['0.07', '0.08', '0.09', '0.10', '0.12', '0.15'];
 
   @override
   void initState() {
@@ -3839,11 +4082,11 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
   void dispose() {
     _stitchesCtrl.dispose();
     _pricePer1kCtrl.dispose();
+    _qtyCtrl.dispose();
     _sequinsCtrl.dispose();
     _priceSeq1kCtrl.dispose();
     _beadsCtrl.dispose();
     _priceBead1kCtrl.dispose();
-    _qtyCtrl.dispose();
     _speedCtrl.dispose();
     _colorsCtrl.dispose();
     super.dispose();
@@ -3852,7 +4095,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
   Future<void> _loadSavedRates() async {
     try {
       final dir = await getApplicationSupportDirectory();
-      final f = File('${dir.path}/tarik_calc_prefs.json');
+      final f = File('${dir.path}/tarik_calc_prefs_v2.json');
       if (await f.exists()) {
         final Map<String, dynamic> map = jsonDecode(await f.readAsString());
         if (!mounted) return;
@@ -3869,7 +4112,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
   Future<void> _saveRates() async {
     try {
       final dir = await getApplicationSupportDirectory();
-      final f = File('${dir.path}/tarik_calc_prefs.json');
+      final f = File('${dir.path}/tarik_calc_prefs_v2.json');
       await f.writeAsString(jsonEncode({
         'pricePer1k': _pricePer1kCtrl.text.trim(),
         'priceSeq1k': _priceSeq1kCtrl.text.trim(),
@@ -3883,6 +4126,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
 
   @override
   Widget build(BuildContext context) {
+    final bool fromDesign = widget.design != null;
     final double stitches = _p(_stitchesCtrl).clamp(0, 1e9);
     final double rate1k = _p(_pricePer1kCtrl).clamp(0, 1e6);
     final double sequins = _p(_sequinsCtrl).clamp(0, 1e9);
@@ -3914,7 +4158,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
       backgroundColor: const Color(0xFF0E131D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
-        title: Text(tr('حاسبة التطريز (\$)', 'Embroidery Calculator (\$)'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        title: Text(tr('حساب التطريز (\$)', 'Embroidery Calculator (\$)'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
         actions: [
           IconButton(
             icon: const Icon(Icons.share, color: Color(0xFFD4AF37)),
@@ -3930,6 +4174,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
                   '$beadLine'
                   '• ${tr('الوقت التقديري', 'Est. Time')}: $mins ${tr('د', 'm')} $secs ${tr('ث', 's')}\n'
                   '• ${tr('الخيط العلوي', 'Upper Thread')}: ${upperThreadM.toStringAsFixed(1)} ${tr('م', 'm')}\n'
+                  '• ${tr('سعر الـ 1000 غرزة', 'Rate / 1K')}: \$${rate1k.toStringAsFixed(2)}\n'
                   '💵 ${tr('سعر القطعة', 'Unit Price')}: \$${unitTotalUsd.toStringAsFixed(2)}\n'
                   '$totalLine';
               Share.share(msg);
@@ -3938,11 +4183,11 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
         ],
       ),
       body: ListView(
-        padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 20),
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 20),
         children: [
-          if (widget.design != null)
+          if (fromDesign)
             Container(
-              margin: const EdgeInsets.only(bottom: 12),
+              margin: const EdgeInsets.only(bottom: 10),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
                 color: const Color(0xFF18202E),
@@ -3959,7 +4204,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
               ),
             ),
 
-          // بطاقة النتيجة الرئيسية بالدولار
+          // 1) بطاقة النتيجة والإحصائيات المباشرة للتصميم
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -3973,11 +4218,11 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
             ),
             child: Column(
               children: [
-                Text(tr('التكلفة التقديرية للقطعة الواحدة', 'Estimated Unit Cost'), style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                const SizedBox(height: 6),
+                Text(tr('سعر القطعة الواحدة', 'Unit Price'), style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                const SizedBox(height: 4),
                 Text(
                   '\$${unitTotalUsd.toStringAsFixed(2)}',
-                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 34),
+                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 36),
                 ),
                 if (qty > 1) ...[
                   const SizedBox(height: 6),
@@ -3989,26 +4234,45 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
                     ),
                     child: Text(
                       '${tr('الإجمالي لـ', 'Total for')} $qty ${tr('قطعة', 'pcs')}:  \$${grandTotalUsd.toStringAsFixed(2)}',
-                      style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 15),
+                      style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 16),
                     ),
                   ),
                 ],
                 const Divider(color: Colors.white12, height: 22),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                Wrap(
+                  spacing: 18,
+                  runSpacing: 12,
+                  alignment: WrapAlignment.spaceAround,
                   children: [
                     _StatBadge(
-                      label: tr('الوقت التقديري', 'Est. Time'),
-                      value: '$mins:${secs.toString().padLeft(2, '0')} ${tr('د', 'm')}',
+                      label: tr('الغرز', 'Stitches'),
+                      value: numFmt.format(stitches.round()),
                       color: const Color(0xFF56CCF2),
                     ),
+                    if (sequins > 0)
+                      _StatBadge(
+                        label: tr('الترتر', 'Sequins'),
+                        value: numFmt.format(sequins.round()),
+                        color: Colors.pinkAccent,
+                      ),
+                    if (beads > 0)
+                      _StatBadge(
+                        label: tr('الخرز', 'Beads'),
+                        value: numFmt.format(beads.round()),
+                        color: const Color(0xFFFFCA28),
+                      ),
                     _StatBadge(
-                      label: tr('خيط علوي', 'Upper Thread'),
+                      label: tr('الوقت', 'Time'),
+                      value: '$mins:${secs.toString().padLeft(2, '0')} ${tr('د', 'm')}',
+                      color: Colors.purpleAccent,
+                    ),
+                    _StatBadge(
+                      label: tr('خيط علوي', 'Upper'),
                       value: '${upperThreadM.toStringAsFixed(1)} ${tr('م', 'm')}',
                       color: Colors.lightGreenAccent,
                     ),
                     _StatBadge(
-                      label: tr('خيط مكوك', 'Bobbin'),
+                      label: tr('مكوك', 'Bobbin'),
                       value: '${bobbinThreadM.toStringAsFixed(1)} ${tr('م', 'm')}',
                       color: Colors.orangeAccent,
                     ),
@@ -4019,48 +4283,176 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
           ),
 
           const SizedBox(height: 16),
-          _buildPairRow(
-            leftLabel: tr('عدد الغرز', 'Stitches'),
-            leftCtrl: _stitchesCtrl,
-            rightLabel: tr('سعر الألف غرزة (\$)', 'Price / 1K Stitches (\$)'),
-            rightCtrl: _pricePer1kCtrl,
-            saveRight: true,
+
+          // 2) الحقول الأساسية المبسّطة فقط: سعر الـ 1000 غرزة + عدد القطع
+          if (!fromDesign) ...[
+            _buildCalcField(
+              label: tr('عدد الغرز', 'Stitch Count'),
+              controller: _stitchesCtrl,
+              onChanged: () => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                flex: 3,
+                child: _buildCalcField(
+                  label: tr('سعر الـ 1000 غرزة (\$)', 'Price / 1K Stitches (\$)'),
+                  controller: _pricePer1kCtrl,
+                  onChanged: () {
+                    setState(() {});
+                    _saveRates();
+                  },
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(tr('عدد القطع', 'Quantity'), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF18202E),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Row(
+                        children: [
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(minWidth: 34, minHeight: 42),
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(Icons.remove, color: Color(0xFFD4AF37), size: 18),
+                            onPressed: qty > 1
+                                ? () {
+                                    _qtyCtrl.text = '${qty - 1}';
+                                    setState(() {});
+                                  }
+                                : null,
+                          ),
+                          Expanded(
+                            child: TextField(
+                              controller: _qtyCtrl,
+                              keyboardType: TextInputType.number,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                              decoration: const InputDecoration(border: InputBorder.none, isDense: true),
+                              onChanged: (_) => setState(() {}),
+                            ),
+                          ),
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(minWidth: 34, minHeight: 42),
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(Icons.add, color: Color(0xFFD4AF37), size: 18),
+                            onPressed: () {
+                              _qtyCtrl.text = '${qty + 1}';
+                              setState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
+
           const SizedBox(height: 10),
-          _buildPairRow(
-            leftLabel: tr('عدد الترتر', 'Sequins'),
-            leftCtrl: _sequinsCtrl,
-            rightLabel: tr('سعر الألف ترتر (\$)', 'Price / 1K Sequins (\$)'),
-            rightCtrl: _priceSeq1kCtrl,
-            saveRight: true,
+
+          // أزرار سريعة لأسعار الـ 1000 غرزة الشائعة (مثل 9 سنت)
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: _ratePresets.map((preset) {
+              final sel = _pricePer1kCtrl.text.trim() == preset;
+              return ChoiceChip(
+                label: Text(
+                  '\$$preset',
+                  style: TextStyle(
+                    color: sel ? Colors.black : Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                ),
+                selected: sel,
+                selectedColor: const Color(0xFFD4AF37),
+                backgroundColor: const Color(0xFF18202E),
+                visualDensity: VisualDensity.compact,
+                onSelected: (_) {
+                  _pricePer1kCtrl.text = preset;
+                  setState(() {});
+                  _saveRates();
+                },
+              );
+            }).toList(),
           ),
+
+          const SizedBox(height: 14),
+
+          // 3) إعدادات متقدمة مطوية (سرعة الماكينة / تسعير إضافي للترتر والخرز / تعديل الغرز)
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF18202E),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: ExpansionTile(
+              iconColor: const Color(0xFFD4AF37),
+              collapsedIconColor: Colors.white60,
+              title: Text(
+                tr('إعدادات إضافية (سرعة الماكينة / الترتر والخرز)', 'More Options (Speed / Sequins & Beads)'),
+                style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+              childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              children: [
+                if (fromDesign) ...[
+                  _buildCalcField(
+                    label: tr('تعديل عدد الغرز يدوياً', 'Override Stitch Count'),
+                    controller: _stitchesCtrl,
+                    onChanged: () => setState(() {}),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                _buildPairRow(
+                  leftLabel: tr('عدد الترتر', 'Sequins'),
+                  leftCtrl: _sequinsCtrl,
+                  rightLabel: tr('سعر الألف ترتر (\$)', 'Price / 1K Sequins'),
+                  rightCtrl: _priceSeq1kCtrl,
+                  saveRight: true,
+                ),
+                const SizedBox(height: 10),
+                _buildPairRow(
+                  leftLabel: tr('عدد الخرز', 'Beads'),
+                  leftCtrl: _beadsCtrl,
+                  rightLabel: tr('سعر الألف خرزة (\$)', 'Price / 1K Beads'),
+                  rightCtrl: _priceBead1kCtrl,
+                  saveRight: true,
+                ),
+                const SizedBox(height: 10),
+                _buildPairRow(
+                  leftLabel: tr('سرعة الماكينة (غرزة/د)', 'Speed (SPM)'),
+                  leftCtrl: _speedCtrl,
+                  rightLabel: tr('عدد الألوان', 'Colors'),
+                  rightCtrl: _colorsCtrl,
+                  saveLeft: true,
+                ),
+              ],
+            ),
+          ),
+
           const SizedBox(height: 10),
-          _buildPairRow(
-            leftLabel: tr('عدد الخرز', 'Beads'),
-            leftCtrl: _beadsCtrl,
-            rightLabel: tr('سعر الألف خرزة (\$)', 'Price / 1K Beads (\$)'),
-            rightCtrl: _priceBead1kCtrl,
-            saveRight: true,
-          ),
-          const SizedBox(height: 10),
-          _buildPairRow(
-            leftLabel: tr('عدد القطع', 'Quantity'),
-            leftCtrl: _qtyCtrl,
-            rightLabel: tr('سرعة الماكينة (غرزة/د)', 'Speed (SPM)'),
-            rightCtrl: _speedCtrl,
-            saveRight: true,
-          ),
-          const SizedBox(height: 10),
-          _buildCalcField(
-            label: tr('عدد الألوان (لحساب وقت التبديل)', 'Color Count (for change time)'),
-            controller: _colorsCtrl,
-            onChanged: () => setState(() {}),
-          ),
-          const SizedBox(height: 12),
           Text(
             tr(
-              '* يتم حفظ أسعار الألف غرزة والترتر والخرز وسرعة الماكينة تلقائياً على جهازك للاستخدام السريع.',
-              '* Your default rates and machine speed are saved automatically on your device.',
+              '* يتم حفظ سعر الـ 1000 غرزة تلقائياً (الافتراضي 0.09\$ = 9 سنت).',
+              '* Your default price per 1K stitches is saved automatically (default \$0.09).',
             ),
             textAlign: TextAlign.center,
             style: const TextStyle(color: Colors.white54, fontSize: 11),
@@ -4075,6 +4467,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     required TextEditingController leftCtrl,
     required String rightLabel,
     required TextEditingController rightCtrl,
+    bool saveLeft = false,
     bool saveRight = false,
   }) {
     return Row(
@@ -4083,7 +4476,10 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
           child: _buildCalcField(
             label: leftLabel,
             controller: leftCtrl,
-            onChanged: () => setState(() {}),
+            onChanged: () {
+              setState(() {});
+              if (saveLeft) _saveRates();
+            },
           ),
         ),
         const SizedBox(width: 10),
@@ -4117,7 +4513,7 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
           decoration: InputDecoration(
             filled: true,
-            fillColor: const Color(0xFF18202E),
+            fillColor: const Color(0xFF0E131D),
             contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white12)),
             enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white12)),
@@ -4129,4 +4525,4 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - full features v2
+// Tarik emb - Pro v3
