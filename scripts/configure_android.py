@@ -121,7 +121,7 @@ class MainActivity : FlutterActivity() {
                     if (!name.isNullOrBlank()) displayName = name
                 }
             }
-            displayName = displayName.substringAfterLast('/').substringAfterLast('\\\\')
+            displayName = displayName.substringAfterLast('/').substringAfterLast('\\')
             val lowerName = displayName.lowercase()
             val validExts = listOf(
                 ".emb", ".dst", ".dhp", ".dha", ".dhe",
