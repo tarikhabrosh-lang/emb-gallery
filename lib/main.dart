@@ -42,27 +42,32 @@ int compareNatural(String a, String b) {
 
 Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
   final lower = path.toLowerCase();
+  EmbDesignInfo? result;
   if (lower.endsWith('.dst')) {
-    return await DstParser.parseFile(path, maxCanvas: 640.0);
+    result = await DstParser.parseFile(path, maxCanvas: 640.0);
   } else if (lower.endsWith('.emb')) {
-    return await EmbParser.parseFile(path);
+    result = await EmbParser.parseFile(path);
   } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
-    return await DahaoParser.parseFile(path, maxCanvas: 640.0);
+    result = await DahaoParser.parseFile(path, maxCanvas: 640.0);
   } else if (UniversalFormatParser.isSupported(lower)) {
-    return await UniversalFormatParser.parseFile(path, maxCanvas: 640.0);
-  } else {
-    final name = path.split(Platform.pathSeparator).last;
-    return EmbDesignInfo(
-      filePath: path,
-      fileName: name,
-      stitches: 0,
-      colorCount: 0,
-      jumpsCount: 0,
-      sequinsCount: 0,
-      machineType: 'Other',
-      colorSequence: [],
-    );
+    result = await UniversalFormatParser.parseFile(path, maxCanvas: 640.0);
   }
+
+  // فحص ذكي لمحتوى الملف إذا كانت اللاحقة مختلفة أو مرسلة من واتساب بصيغة BIN
+  result ??= await UniversalFormatParser.parseByContentFallback(path, maxCanvas: 640.0);
+  if (result != null) return result;
+
+  final name = path.split(Platform.pathSeparator).last;
+  return EmbDesignInfo(
+    filePath: path,
+    fileName: name,
+    stitches: 0,
+    colorCount: 0,
+    jumpsCount: 0,
+    sequinsCount: 0,
+    machineType: 'Other',
+    colorSequence: [],
+  );
 }
 
 /// مدير الكاش والمزامنة الدائمة على ذاكرة الهاتف لفتح المجلدات فوراً بدون انتظار
@@ -541,7 +546,13 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
 
   Future<void> _openIncomingEmbFile(String path) async {
     final EmbDesignInfo? info = await DesignCacheManager.getOrParse(path);
-    if (info == null || !mounted) return;
+    if (!mounted) return;
+    if (info == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${tr('تعذر قراءة الملف:', 'Could not read file:')} ${path.split(Platform.pathSeparator).last}')),
+      );
+      return;
+    }
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => DesignDetailScreen(design: info)),
@@ -874,6 +885,16 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                 },
                 icon: const Icon(Icons.language, color: Color(0xFFD4AF37), size: 18),
                 label: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+              ),
+              IconButton(
+                icon: const Icon(Icons.calculate_outlined, color: Color(0xFFD4AF37)),
+                tooltip: tr('حاسبة التطريز (\$)', 'Embroidery Calculator (\$)'),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const EmbroideryCalculatorScreen()),
+                  );
+                },
               ),
               IconButton(
                 icon: const Icon(Icons.text_fields, color: Color(0xFFD4AF37)),
@@ -1700,6 +1721,32 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                               _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
                             ],
                           ),
+                          if (d.stitches > 0) ...[
+                            const SizedBox(height: 12),
+                            SizedBox(
+                              width: double.infinity,
+                              child: OutlinedButton.icon(
+                                onPressed: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => EmbroideryCalculatorScreen(design: d),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.calculate, size: 19, color: Colors.greenAccent),
+                                label: Text(
+                                  tr('حاسبة السعر والخيط والوقت (\$)', 'Price, Thread & Time Calculator (\$)'),
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.greenAccent),
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  side: BorderSide(color: Colors.greenAccent.withOpacity(0.55)),
+                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                              ),
+                            ),
+                          ],
                           if (VectorDesignLoader.supportsVectorView(d.filePath)) ...[
                             const SizedBox(height: 14),
                             Row(
@@ -1810,6 +1857,76 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                   ],
                 ),
               ),
+              if (d.colorSequence.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF18202E),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.palette_outlined, size: 18, color: Color(0xFFD4AF37)),
+                          const SizedBox(width: 8),
+                          Text(
+                            '${tr('جدول تسلسل الألوان والتوقفات', 'Color Sequence & Stops')} (${d.colorSequence.length})',
+                            style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 14),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      ...d.colorSequence.map((step) {
+                        final ThreadColorStep s = step as ThreadColorStep;
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 6),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.black26,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 22,
+                                height: 22,
+                                decoration: BoxDecoration(
+                                  color: Color(s.colorValue),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: Colors.white54, width: 1.5),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                '#${s.stopNumber}',
+                                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  s.colorName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                                ),
+                              ),
+                              if (s.stitches > 0)
+                                Text(
+                                  '${numFmt.format(s.stitches)} ${tr('غرزة', 'st')}',
+                                  style: const TextStyle(color: Color(0xFF56CCF2), fontSize: 12),
+                                ),
+                            ],
+                          ),
+                        );
+                      }),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -2149,8 +2266,9 @@ class _AutoFadeWelcomeBannerState extends State<_AutoFadeWelcomeBanner> {
 
 /// شاشة محاكاة سير الغرز (Stitch Player) مع تحكم بالسرعة وشريط التمرير
 class StitchSimulatorScreen extends StatefulWidget {
-  final EmbDesignInfo design;
-  const StitchSimulatorScreen({super.key, required this.design});
+  final EmbDesignInfo? design;
+  final VectorDesignData? initialVector;
+  const StitchSimulatorScreen({super.key, this.design, this.initialVector});
   @override
   State<StitchSimulatorScreen> createState() => _StitchSimulatorScreenState();
 }
@@ -2160,9 +2278,9 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   bool _loading = true;
   bool _playing = false;
   int _currentStitch = 0;
-  int _speedIndex = 1; // 0=1x, 1=3x, 2=8x, 3=20x
-  static const List<int> _speedSteps = [8, 28, 90, 260];
-  static const List<String> _speedLabels = ['1x', '3x', '8x', '20x'];
+  int _speedIndex = 3; // 3x افتراضي
+  static const List<int> _speedSteps = [1, 4, 12, 30, 80, 200, 450];
+  static const List<String> _speedLabels = ['0.2x', '0.5x', '1x', '3x', '8x', '20x', '45x'];
   Timer? _timer;
 
   @override
@@ -2178,7 +2296,7 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   }
 
   Future<void> _loadVector() async {
-    final v = await VectorDesignLoader.load(widget.design.filePath);
+    final v = widget.initialVector ?? (widget.design != null ? await VectorDesignLoader.load(widget.design!.filePath) : null);
     if (!mounted) return;
     setState(() {
       _vec = v;
@@ -2306,17 +2424,48 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                                   padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
                                 ),
                               ),
-                              TextButton(
-                                onPressed: () {
-                                  setState(() => _speedIndex = (_speedIndex + 1) % _speedSteps.length);
-                                },
-                                style: TextButton.styleFrom(
-                                  backgroundColor: Colors.white10,
-                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white10,
+                                  borderRadius: BorderRadius.circular(12),
                                 ),
-                                child: Text(
-                                  '${tr('السرعة', 'Speed')}: ${_speedLabels[_speedIndex]}',
-                                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      onPressed: _speedIndex > 0
+                                          ? () => setState(() => _speedIndex--)
+                                          : null,
+                                      icon: const Icon(Icons.remove, size: 18),
+                                      color: const Color(0xFFD4AF37),
+                                      disabledColor: Colors.white24,
+                                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                      padding: EdgeInsets.zero,
+                                      tooltip: tr('إبطاء', 'Slower'),
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                                      child: Text(
+                                        _speedLabels[_speedIndex],
+                                        style: const TextStyle(
+                                          color: Color(0xFFD4AF37),
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      onPressed: _speedIndex < _speedSteps.length - 1
+                                          ? () => setState(() => _speedIndex++)
+                                          : null,
+                                      icon: const Icon(Icons.add, size: 18),
+                                      color: const Color(0xFFD4AF37),
+                                      disabledColor: Colors.white24,
+                                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                      padding: EdgeInsets.zero,
+                                      tooltip: tr('تسريع', 'Faster'),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
@@ -2474,13 +2623,16 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                         ),
                       ),
                     ),
-                    Container(
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.48),
+                      child: Container(
                       padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
                       decoration: const BoxDecoration(
                         color: Color(0xFF18202E),
                         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
                       ),
-                      child: Column(
+                      child: SingleChildScrollView(
+                        child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Row(
@@ -2508,17 +2660,59 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                             },
                           ),
                           Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '${tr('الدوران', 'Rotation')}: ${_rotationDeg.round()}°',
+                                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [0, 90, 180, 270].map((deg) {
+                                  final bool sel = _rotationDeg.round() == deg;
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                                    child: InkWell(
+                                      onTap: () {
+                                        _rotationDeg = deg.toDouble();
+                                        _rebuildEdited();
+                                      },
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: sel ? const Color(0xFFD4AF37) : Colors.white10,
+                                          borderRadius: BorderRadius.circular(8),
+                                        ),
+                                        child: Text(
+                                          '$deg°',
+                                          style: TextStyle(
+                                            color: sel ? Colors.black : Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ],
+                          ),
+                          Slider(
+                            value: _rotationDeg.clamp(0.0, 360.0),
+                            min: 0.0,
+                            max: 360.0,
+                            divisions: 360,
+                            activeColor: const Color(0xFFD4AF37),
+                            onChanged: (v) {
+                              _rotationDeg = v;
+                              _rebuildEdited();
+                            },
+                          ),
+                          Row(
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             children: [
-                              OutlinedButton.icon(
-                                onPressed: () {
-                                  _rotationDeg = (_rotationDeg + 90) % 360;
-                                  _rebuildEdited();
-                                },
-                                icon: const Icon(Icons.rotate_right, size: 17, color: Color(0xFFD4AF37)),
-                                label: Text('${_rotationDeg.round()}°', style: const TextStyle(color: Colors.white, fontSize: 12)),
-                                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
-                              ),
                               OutlinedButton.icon(
                                 onPressed: () {
                                   _flipH = !_flipH;
@@ -2609,6 +2803,8 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                           ),
                         ],
                       ),
+                      ),
+                    ),
                     ),
                   ],
                 ),
@@ -2676,8 +2872,19 @@ class _VectorStitchPainter extends CustomPainter {
     flush();
 
     if (showNeedle && count > 0) {
-      canvas.drawCircle(Offset(lastX, lastY), 7.5, Paint()..color = const Color(0xFFD4AF37).withOpacity(0.35));
-      canvas.drawCircle(Offset(lastX, lastY), 3.8, Paint()..color = Colors.redAccent);
+      const double arm = 9.0;
+      final crossShadow = Paint()
+        ..color = Colors.black.withOpacity(0.45)
+        ..strokeWidth = 3.2
+        ..strokeCap = StrokeCap.round;
+      final crossPaint = Paint()
+        ..color = Colors.redAccent
+        ..strokeWidth = 1.8
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(Offset(lastX - arm, lastY), Offset(lastX + arm, lastY), crossShadow);
+      canvas.drawLine(Offset(lastX, lastY - arm), Offset(lastX, lastY + arm), crossShadow);
+      canvas.drawLine(Offset(lastX - arm, lastY), Offset(lastX + arm, lastY), crossPaint);
+      canvas.drawLine(Offset(lastX, lastY - arm), Offset(lastX, lastY + arm), crossPaint);
     }
   }
 
@@ -2688,7 +2895,7 @@ class _VectorStitchPainter extends CustomPainter {
 }
 
 
-/// شاشة الكتابة بالعربي والإنجليزي وتحويلها مباشرة إلى غرز تطريز (.DST / .EXP / .XXX ...)
+/// شاشة الكتابة بالعربي والإنجليزي وتحويلها مباشرة إلى غرز تطريز (فستون / تاتامي + الكثافة + محاكاة فورية)
 class TextToEmbroideryScreen extends StatefulWidget {
   const TextToEmbroideryScreen({super.key});
   @override
@@ -2696,12 +2903,15 @@ class TextToEmbroideryScreen extends StatefulWidget {
 }
 
 class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
-  final TextEditingController _textCtrl = TextEditingController(text: 'Tarik emb');
+  final TextEditingController _textCtrl = TextEditingController(text: 'طارق');
   VectorDesignData? _vec;
   bool _generating = false;
   bool _saving = false;
   double _widthCm = 12.0;
   double _densityMm = 0.45;
+  bool _isSatin = true; // true = فستون على خط الوسط, false = تاتامي
+  bool _isBold = true;
+  bool _isItalic = false;
   int _selectedColor = 0xFFFF1744;
 
   static const List<int> _threadColors = [
@@ -2735,6 +2945,9 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
         widthCm: _widthCm,
         densityMm: _densityMm,
         colorArgb: _selectedColor,
+        isBold: _isBold,
+        isSatin: _isSatin,
+        isItalic: _isItalic,
       );
       if (mounted) {
         setState(() {
@@ -2788,6 +3001,19 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
         title: Text(tr('الكتابة وتحويلها لغرز', 'Text to Stitches'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        actions: [
+          if (_vec != null)
+            IconButton(
+              icon: const Icon(Icons.play_circle_outline, color: Color(0xFFD4AF37)),
+              tooltip: tr('محاكاة الغرز', 'Simulate'),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => StitchSimulatorScreen(initialVector: _vec)),
+                );
+              },
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -2824,7 +3050,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           ),
           Expanded(
             child: Container(
-              margin: const EdgeInsets.all(12),
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
               clipBehavior: Clip.antiAlias,
               child: _generating
@@ -2841,96 +3067,185 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                         )),
             ),
           ),
-          Container(
-            padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
-            decoration: const BoxDecoration(
-              color: Color(0xFF18202E),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.46),
+            child: Container(
+              padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
+              decoration: const BoxDecoration(
+                color: Color(0xFF18202E),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
-                      '${tr('العرض', 'Width')}: ${_widthCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? '  ($dimText)' : ''}',
-                      style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
-                    ),
-                    Text(
-                      '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
-                      style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
-                    ),
-                  ],
-                ),
-                Slider(
-                  value: _widthCm,
-                  min: 4.0,
-                  max: 30.0,
-                  divisions: 26,
-                  activeColor: const Color(0xFFD4AF37),
-                  onChanged: (v) => setState(() => _widthCm = v),
-                  onChangeEnd: (_) => _generate(),
-                ),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(tr('لون الخيط:', 'Thread:'), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    // التبديل بين فستون (Satin) وتاتامي (Tatami) + عريض/مائل
                     Row(
-                      children: _threadColors.map((c) {
-                        final sel = c == _selectedColor;
-                        return GestureDetector(
-                          onTap: () {
-                            setState(() => _selectedColor = c);
+                      children: [
+                        Expanded(
+                          child: ChoiceChip(
+                            label: Center(child: Text(tr('فستون (Satin)', 'Satin'))),
+                            selected: _isSatin,
+                            selectedColor: const Color(0xFFD4AF37),
+                            labelStyle: TextStyle(
+                              color: _isSatin ? Colors.black : Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                            onSelected: (_) {
+                              if (!_isSatin) {
+                                setState(() => _isSatin = true);
+                                _generate();
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ChoiceChip(
+                            label: Center(child: Text(tr('تاتامي (Tatami)', 'Tatami'))),
+                            selected: !_isSatin,
+                            selectedColor: const Color(0xFFD4AF37),
+                            labelStyle: TextStyle(
+                              color: !_isSatin ? Colors.black : Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                            onSelected: (_) {
+                              if (_isSatin) {
+                                setState(() => _isSatin = false);
+                                _generate();
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        IconButton(
+                          onPressed: () {
+                            setState(() => _isBold = !_isBold);
                             _generate();
                           },
-                          child: Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 4),
-                            width: 26,
-                            height: 26,
-                            decoration: BoxDecoration(
-                              color: Color(c),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: sel ? const Color(0xFFD4AF37) : Colors.white38, width: sel ? 2.5 : 1),
+                          icon: Icon(Icons.format_bold, color: _isBold ? const Color(0xFFD4AF37) : Colors.white38),
+                          tooltip: tr('خط عريض', 'Bold'),
+                        ),
+                        IconButton(
+                          onPressed: () {
+                            setState(() => _isItalic = !_isItalic);
+                            _generate();
+                          },
+                          icon: Icon(Icons.format_italic, color: _isItalic ? const Color(0xFFD4AF37) : Colors.white38),
+                          tooltip: tr('خط مائل', 'Italic'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '${tr('العرض', 'Width')}: ${_widthCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? ' ($dimText)' : ''}',
+                          style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                        ),
+                        Text(
+                          '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
+                          style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                    Slider(
+                      value: _widthCm,
+                      min: 4.0,
+                      max: 30.0,
+                      divisions: 26,
+                      activeColor: const Color(0xFFD4AF37),
+                      onChanged: (v) => setState(() => _widthCm = v),
+                      onChangeEnd: (_) => _generate(),
+                    ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '${tr('كثافة الغرز (تخفيف / زيادة)', 'Stitch Density')}: ${_densityMm.toStringAsFixed(2)} ${tr('مم', 'mm')}',
+                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                        ),
+                        Text(
+                          _densityMm <= 0.40
+                              ? tr('كثيف', 'Dense')
+                              : (_densityMm >= 0.65 ? tr('خفيف', 'Light') : tr('متوسط', 'Normal')),
+                          style: const TextStyle(color: Colors.white70, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                    Slider(
+                      value: _densityMm,
+                      min: 0.30,
+                      max: 0.90,
+                      divisions: 12,
+                      activeColor: const Color(0xFF56CCF2),
+                      onChanged: (v) => setState(() => _densityMm = v),
+                      onChangeEnd: (_) => _generate(),
+                    ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(tr('لون الخيط:', 'Thread:'), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                        Row(
+                          children: _threadColors.map((c) {
+                            final sel = c == _selectedColor;
+                            return GestureDetector(
+                              onTap: () {
+                                setState(() => _selectedColor = c);
+                                _generate();
+                              },
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(horizontal: 4),
+                                width: 25,
+                                height: 25,
+                                decoration: BoxDecoration(
+                                  color: Color(c),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: sel ? const Color(0xFFD4AF37) : Colors.white38, width: sel ? 2.5 : 1),
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: false),
+                            icon: const Icon(Icons.save_alt, size: 18, color: Color(0xFFD4AF37)),
+                            label: Text(tr('حفظ DST', 'Save DST'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(color: Color(0xFFD4AF37)),
+                              padding: const EdgeInsets.symmetric(vertical: 11),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                             ),
                           ),
-                        );
-                      }).toList(),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: true),
+                            icon: const Icon(Icons.ios_share, size: 18),
+                            label: Text(tr('مشاركة DST', 'Share DST'), style: const TextStyle(fontWeight: FontWeight.bold)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFD4AF37),
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(vertical: 11),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: false),
-                        icon: const Icon(Icons.save_alt, size: 18, color: Color(0xFFD4AF37)),
-                        label: Text(tr('حفظ DST', 'Save DST'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: Color(0xFFD4AF37)),
-                          padding: const EdgeInsets.symmetric(vertical: 11),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _saving || _vec == null ? null : () => _exportText(shareAfter: true),
-                        icon: const Icon(Icons.ios_share, size: 18),
-                        label: Text(tr('مشاركة DST', 'Share DST'), style: const TextStyle(fontWeight: FontWeight.bold)),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFD4AF37),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 11),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+              ),
             ),
           ),
         ],
@@ -2938,3 +3253,333 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
     );
   }
 }
+
+/// شاشة حاسبة التطريز الشاملة بالدولار ($) + تقدير الخيط العلوي والمكوك والوقت التقديري للماكينة
+class EmbroideryCalculatorScreen extends StatefulWidget {
+  final EmbDesignInfo? design;
+  const EmbroideryCalculatorScreen({super.key, this.design});
+  @override
+  State<EmbroideryCalculatorScreen> createState() => _EmbroideryCalculatorScreenState();
+}
+
+class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen> {
+  final TextEditingController _stitchesCtrl = TextEditingController();
+  final TextEditingController _pricePer1kCtrl = TextEditingController(text: '0.25');
+  final TextEditingController _sequinsCtrl = TextEditingController(text: '0');
+  final TextEditingController _priceSeq1kCtrl = TextEditingController(text: '0.15');
+  final TextEditingController _beadsCtrl = TextEditingController(text: '0');
+  final TextEditingController _priceBead1kCtrl = TextEditingController(text: '0.20');
+  final TextEditingController _qtyCtrl = TextEditingController(text: '1');
+  final TextEditingController _speedCtrl = TextEditingController(text: '800');
+  final TextEditingController _colorsCtrl = TextEditingController(text: '1');
+
+  @override
+  void initState() {
+    super.initState();
+    final d = widget.design;
+    if (d != null) {
+      _stitchesCtrl.text = '${d.stitches}';
+      _sequinsCtrl.text = '${d.sequinsCount}';
+      _beadsCtrl.text = '${d.beadsCount}';
+      _colorsCtrl.text = '${max(1, d.colorCount)}';
+    } else {
+      _stitchesCtrl.text = '10000';
+    }
+    _loadSavedRates();
+  }
+
+  @override
+  void dispose() {
+    _stitchesCtrl.dispose();
+    _pricePer1kCtrl.dispose();
+    _sequinsCtrl.dispose();
+    _priceSeq1kCtrl.dispose();
+    _beadsCtrl.dispose();
+    _priceBead1kCtrl.dispose();
+    _qtyCtrl.dispose();
+    _speedCtrl.dispose();
+    _colorsCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSavedRates() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final f = File('${dir.path}/tarik_calc_prefs.json');
+      if (await f.exists()) {
+        final Map<String, dynamic> map = jsonDecode(await f.readAsString());
+        if (!mounted) return;
+        setState(() {
+          if (map['pricePer1k'] != null) _pricePer1kCtrl.text = map['pricePer1k'].toString();
+          if (map['priceSeq1k'] != null) _priceSeq1kCtrl.text = map['priceSeq1k'].toString();
+          if (map['priceBead1k'] != null) _priceBead1kCtrl.text = map['priceBead1k'].toString();
+          if (map['speed'] != null) _speedCtrl.text = map['speed'].toString();
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveRates() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final f = File('${dir.path}/tarik_calc_prefs.json');
+      await f.writeAsString(jsonEncode({
+        'pricePer1k': _pricePer1kCtrl.text.trim(),
+        'priceSeq1k': _priceSeq1kCtrl.text.trim(),
+        'priceBead1k': _priceBead1kCtrl.text.trim(),
+        'speed': _speedCtrl.text.trim(),
+      }));
+    } catch (_) {}
+  }
+
+  double _p(TextEditingController c) => double.tryParse(c.text.trim().replaceAll(',', '.')) ?? 0.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final double stitches = _p(_stitchesCtrl).clamp(0, 1e9);
+    final double rate1k = _p(_pricePer1kCtrl).clamp(0, 1e6);
+    final double sequins = _p(_sequinsCtrl).clamp(0, 1e9);
+    final double rateSeq1k = _p(_priceSeq1kCtrl).clamp(0, 1e6);
+    final double beads = _p(_beadsCtrl).clamp(0, 1e9);
+    final double rateBead1k = _p(_priceBead1kCtrl).clamp(0, 1e6);
+    final int qty = max(1, _p(_qtyCtrl).round());
+    final double speedSpm = _p(_speedCtrl).clamp(100, 3000);
+    final int colors = max(1, _p(_colorsCtrl).round());
+
+    final double stitchCost = (stitches / 1000.0) * rate1k;
+    final double seqCost = (sequins / 1000.0) * rateSeq1k;
+    final double beadCost = (beads / 1000.0) * rateBead1k;
+    final double unitTotalUsd = stitchCost + seqCost + beadCost;
+    final double grandTotalUsd = unitTotalUsd * qty;
+
+    // تقدير استهلاك الخيط (متر): ~5.2 متر خيط علوي + ~1.8 متر بوبين لكل 1000 غرزة
+    final double upperThreadM = (stitches / 1000.0) * 5.2;
+    final double bobbinThreadM = (stitches / 1000.0) * 1.8;
+
+    // تقدير الوقت بالدقائق: وقت الغرز + 12 ثانية لكل تغيير لون
+    final double runMinutes = (stitches / speedSpm) + ((colors - 1) * 0.2);
+    final int mins = runMinutes.floor();
+    final int secs = ((runMinutes - mins) * 60).round();
+
+    final numFmt = intl.NumberFormat('#,###');
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E131D),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E131D),
+        title: Text(tr('حاسبة التطريز (\$)', 'Embroidery Calculator (\$)'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.share, color: Color(0xFFD4AF37)),
+            tooltip: tr('مشاركة التسعيرة', 'Share Quote'),
+            onPressed: () {
+              final title = widget.design?.fileName ?? tr('تسعيرة تطريز', 'Embroidery Quote');
+              final seqLine = sequins > 0 ? '• ${tr('الترتر', 'Sequins')}: ${numFmt.format(sequins.round())}\n' : '';
+              final beadLine = beads > 0 ? '• ${tr('الخرز', 'Beads')}: ${numFmt.format(beads.round())}\n' : '';
+              final totalLine = qty > 1 ? '💰 ${tr('الإجمالي', 'Total')} ($qty): \$${grandTotalUsd.toStringAsFixed(2)}' : '';
+              final msg = '🧵 $title\n'
+                  '• ${tr('الغرز', 'Stitches')}: ${numFmt.format(stitches.round())}\n'
+                  '$seqLine'
+                  '$beadLine'
+                  '• ${tr('الوقت التقديري', 'Est. Time')}: $mins ${tr('د', 'm')} $secs ${tr('ث', 's')}\n'
+                  '• ${tr('الخيط العلوي', 'Upper Thread')}: ${upperThreadM.toStringAsFixed(1)} ${tr('م', 'm')}\n'
+                  '💵 ${tr('سعر القطعة', 'Unit Price')}: \$${unitTotalUsd.toStringAsFixed(2)}\n'
+                  '$totalLine';
+              Share.share(msg);
+            },
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 20),
+        children: [
+          if (widget.design != null)
+            Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF18202E),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.4)),
+              ),
+              child: Directionality(
+                textDirection: TextDirection.ltr,
+                child: Text(
+                  widget.design!.fileName,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+              ),
+            ),
+
+          // بطاقة النتيجة الرئيسية بالدولار
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF1F2B3E), Color(0xFF141C2B)],
+                begin: Alignment.topRight,
+                end: Alignment.bottomLeft,
+              ),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFFD4AF37), width: 1.4),
+            ),
+            child: Column(
+              children: [
+                Text(tr('التكلفة التقديرية للقطعة الواحدة', 'Estimated Unit Cost'), style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                const SizedBox(height: 6),
+                Text(
+                  '\$${unitTotalUsd.toStringAsFixed(2)}',
+                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 34),
+                ),
+                if (qty > 1) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2E7D32).withOpacity(0.35),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${tr('الإجمالي لـ', 'Total for')} $qty ${tr('قطعة', 'pcs')}:  \$${grandTotalUsd.toStringAsFixed(2)}',
+                      style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 15),
+                    ),
+                  ),
+                ],
+                const Divider(color: Colors.white12, height: 22),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _StatBadge(
+                      label: tr('الوقت التقديري', 'Est. Time'),
+                      value: '$mins:${secs.toString().padLeft(2, '0')} ${tr('د', 'm')}',
+                      color: const Color(0xFF56CCF2),
+                    ),
+                    _StatBadge(
+                      label: tr('خيط علوي', 'Upper Thread'),
+                      value: '${upperThreadM.toStringAsFixed(1)} ${tr('م', 'm')}',
+                      color: Colors.lightGreenAccent,
+                    ),
+                    _StatBadge(
+                      label: tr('خيط مكوك', 'Bobbin'),
+                      value: '${bobbinThreadM.toStringAsFixed(1)} ${tr('م', 'm')}',
+                      color: Colors.orangeAccent,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 16),
+          _buildPairRow(
+            leftLabel: tr('عدد الغرز', 'Stitches'),
+            leftCtrl: _stitchesCtrl,
+            rightLabel: tr('سعر الألف غرزة (\$)', 'Price / 1K Stitches (\$)'),
+            rightCtrl: _pricePer1kCtrl,
+            saveRight: true,
+          ),
+          const SizedBox(height: 10),
+          _buildPairRow(
+            leftLabel: tr('عدد الترتر', 'Sequins'),
+            leftCtrl: _sequinsCtrl,
+            rightLabel: tr('سعر الألف ترتر (\$)', 'Price / 1K Sequins (\$)'),
+            rightCtrl: _priceSeq1kCtrl,
+            saveRight: true,
+          ),
+          const SizedBox(height: 10),
+          _buildPairRow(
+            leftLabel: tr('عدد الخرز', 'Beads'),
+            leftCtrl: _beadsCtrl,
+            rightLabel: tr('سعر الألف خرزة (\$)', 'Price / 1K Beads (\$)'),
+            rightCtrl: _priceBead1kCtrl,
+            saveRight: true,
+          ),
+          const SizedBox(height: 10),
+          _buildPairRow(
+            leftLabel: tr('عدد القطع', 'Quantity'),
+            leftCtrl: _qtyCtrl,
+            rightLabel: tr('سرعة الماكينة (غرزة/د)', 'Speed (SPM)'),
+            rightCtrl: _speedCtrl,
+            saveRight: true,
+          ),
+          const SizedBox(height: 10),
+          _buildCalcField(
+            label: tr('عدد الألوان (لحساب وقت التبديل)', 'Color Count (for change time)'),
+            controller: _colorsCtrl,
+            onChanged: () => setState(() {}),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            tr(
+              '* يتم حفظ أسعار الألف غرزة والترتر والخرز وسرعة الماكينة تلقائياً على جهازك للاستخدام السريع.',
+              '* Your default rates and machine speed are saved automatically on your device.',
+            ),
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white54, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPairRow({
+    required String leftLabel,
+    required TextEditingController leftCtrl,
+    required String rightLabel,
+    required TextEditingController rightCtrl,
+    bool saveRight = false,
+  }) {
+    return Row(
+      children: [
+        Expanded(
+          child: _buildCalcField(
+            label: leftLabel,
+            controller: leftCtrl,
+            onChanged: () => setState(() {}),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: _buildCalcField(
+            label: rightLabel,
+            controller: rightCtrl,
+            onChanged: () {
+              setState(() {});
+              if (saveRight) _saveRates();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCalcField({
+    required String label,
+    required TextEditingController controller,
+    required VoidCallback onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+        const SizedBox(height: 4),
+        TextField(
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: const Color(0xFF18202E),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white12)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white12)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFD4AF37))),
+          ),
+          onChanged: (_) => onChanged(),
+        ),
+      ],
+    );
+  }
+}
+// Tarik emb - full features v2
