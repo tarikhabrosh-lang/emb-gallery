@@ -147,6 +147,32 @@ if os.path.exists("assets/logo.png"):
         if os.path.exists(dest_dir): shutil.copy("assets/logo.png", os.path.join(dest_dir, "ic_launcher.png"))
 
 
+
+
+# --- Configure Android styles.xml for clean persistent bottom navigation bar (Samsung Gallery style) ---
+for style_path in [
+    "android/app/src/main/res/values/styles.xml",
+    "android/app/src/main/res/values-night/styles.xml",
+    "android/app/src/main/res/values-v31/styles.xml",
+    "android/app/src/main/res/values-night-v31/styles.xml",
+]:
+    if os.path.exists(style_path):
+        with open(style_path, "r", encoding="utf-8") as sf:
+            st_xml = sf.read()
+        nav_items = """
+        <item name="android:navigationBarColor">#0E131D</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>"""
+        if "windowOptOutEdgeToEdgeEnforcement" not in st_xml:
+            st_xml = re.sub(
+                r'(<style\s+name="NormalTheme"[^>]*>)',
+                r'\1' + nav_items,
+                st_xml,
+                count=1,
+            )
+            with open(style_path, "w", encoding="utf-8") as sf:
+                sf.write(st_xml)
+            print(f"[NavBar OK] Patched {style_path}")
+
 # --- Auto-download Arabic & English Embroidery Fonts and register in pubspec.yaml ---
 import urllib.request
 
@@ -828,7 +854,8 @@ def _emb_compile_svg_font(svg_bytes, font_meta, font_id, name_ar, name_en):
 
     # Determine accurate baseline Y
     ref_chars = (
-        ['ا', 'ب', 'ت', 'ث', 'د', 'ط', 'ك', '\uFE8D', '\uFE8E', '\uFE8F', '\uFE91', '\uFE92', '\uFE90', '\uFEA9', '\uFEC1', '\uFEC3']
+        ['ا.isol', 'ا.fina', 'ب.isol', 'ب.init', 'ب.medi', 'ب.fina', 'ت.init', 'د.isol', 'ط.isol', 'ط.init', 'ك.init',
+         'ا', 'ب', 'ت', 'ث', 'د', 'ط', 'ك', '\uFE8D', '\uFE8E', '\uFE8F', '\uFE91', '\uFE92', '\uFE90', '\uFEA9', '\uFEC1', '\uFEC3']
         if is_rtl else
         ['A', 'B', 'D', 'E', 'F', 'H', 'I', 'K', 'L', 'M', 'N', 'R', 'T', 'Z', 'a', 'e', 'm', 'n', 'x']
     )
@@ -846,7 +873,7 @@ def _emb_compile_svg_font(svg_bytes, font_meta, font_id, name_ar, name_en):
             baseline_y = best_g[0]
 
     # Determine cap height above baseline
-    cap_chars = (['ا', 'ل', 'ك', '\uFE8D', '\uFE8E', '\uFEDD', '\uFEDF'] if is_rtl else ['A', 'E', 'H', 'I', 'M', 'T', 'B', 'L'])
+    cap_chars = (['ا.isol', 'ا.fina', 'ل.isol', 'ل.init', 'ك.isol', 'ط.isol', 'ط.init', 'ا', 'ل', 'ك', '\uFE8D', '\uFE8E', '\uFEDD', '\uFEDF'] if is_rtl else ['A', 'E', 'H', 'I', 'M', 'T', 'B', 'L'])
     cap_hs = [baseline_y - bboxes[c][2] for c in cap_chars if c in bboxes and (baseline_y - bboxes[c][2]) > 15.0]
     if not cap_hs:
         cap_hs = [b[3] - b[2] for b in bboxes.values() if (b[3] - b[2]) > 15.0]
@@ -885,10 +912,19 @@ def _emb_compile_svg_font(svg_bytes, font_meta, font_id, name_ar, name_en):
                 el_out.append({"t": "r", "p": flat_pts(el[1], minx, baseline_y)})
             elif el[0] == "f":
                 el_out.append({"t": "f", "p": flat_pts(el[1], minx, baseline_y)})
-        glyphs_out[ch] = {
+        g_obj = {
             "w": w,
             "e": el_out,
         }
+        raw_adv_map = font_meta.get("horiz_adv_x")
+        if isinstance(raw_adv_map, dict) and ch in raw_adv_map:
+            try:
+                av = round(float(raw_adv_map[ch]) * scale_01mm, 1)
+                if av > 2.0 and av < cap_h * 3.0:
+                    g_obj["a"] = av
+            except Exception:
+                pass
+        glyphs_out[ch] = g_obj
 
     if len(glyphs_out) < 10:
         return None
