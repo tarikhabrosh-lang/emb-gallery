@@ -260,6 +260,13 @@ class LicenseManager {
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  SystemChrome.setSystemUIChangeCallback((systemOverlaysAreVisible) async {
+    if (systemOverlaysAreVisible) {
+      await Future.delayed(const Duration(seconds: 2));
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+  });
   runApp(const EmbGalleryApp());
 }
 
@@ -1966,7 +1973,6 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
 
   @override
   void dispose() {
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _transformController.dispose();
     super.dispose();
   }
@@ -2494,6 +2500,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   bool _saving = false;
 
   double _scale = 1.0;
+  double _densityFactor = 1.0;
   double _rotationDeg = 0.0;
   bool _flipH = false;
   bool _flipV = false;
@@ -2541,6 +2548,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
       deletedColors: _deletedColors,
       trimStart: _trimStart,
       trimEnd: _trimEnd,
+      densityFactor: _densityFactor,
     );
     setState(() => _edited = next);
   }
@@ -2656,6 +2664,32 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                             activeColor: const Color(0xFFD4AF37),
                             onChanged: (v) {
                               _scale = v;
+                              _rebuildEdited();
+                            },
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '${tr('كثافة الغرز (تخفيف / تكثيف)', 'Stitch Density')}: ${(_densityFactor * 100).round()}%',
+                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                              Text(
+                                _densityFactor < 0.98
+                                    ? tr('تخفيف', 'Lighter')
+                                    : (_densityFactor > 1.02 ? tr('تكثيف', 'Denser') : tr('أصلي', 'Original')),
+                                style: const TextStyle(color: Colors.white70, fontSize: 11),
+                              ),
+                            ],
+                          ),
+                          Slider(
+                            value: _densityFactor,
+                            min: 0.5,
+                            max: 1.8,
+                            divisions: 26,
+                            activeColor: const Color(0xFF56CCF2),
+                            onChanged: (v) {
+                              _densityFactor = v;
                               _rebuildEdited();
                             },
                           ),
@@ -2912,7 +2946,23 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   bool _isSatin = true; // true = فستون على خط الوسط, false = تاتامي
   bool _isBold = true;
   bool _isItalic = false;
+  String? _selectedFontFamily = 'Lalezar';
   int _selectedColor = 0xFFFF1744;
+
+  static const List<Map<String, String?>> _fontOptions = [
+    {'family': 'Lalezar', 'ar': 'عريض (لاليزار)', 'en': 'Lalezar'},
+    {'family': 'Amiri', 'ar': 'نسخ (أميري)', 'en': 'Amiri'},
+    {'family': 'ArefRuqaa', 'ar': 'رقعة', 'en': 'Ruqaa'},
+    {'family': 'ReemKufi', 'ar': 'كوفي', 'en': 'Kufi'},
+    {'family': 'Rakkas', 'ar': 'رقّاص عريض', 'en': 'Rakkas'},
+    {'family': 'Tajawal', 'ar': 'عصري (تجوال)', 'en': 'Tajawal'},
+    {'family': 'Lobster', 'ar': 'Lobster مشبّك', 'en': 'Lobster'},
+    {'family': 'GreatVibes', 'ar': 'Great Vibes', 'en': 'Great Vibes'},
+    {'family': 'Pacifico', 'ar': 'Pacifico', 'en': 'Pacifico'},
+    {'family': 'Cinzel', 'ar': 'Cinzel كلاسيك', 'en': 'Cinzel'},
+    {'family': 'BebasNeue', 'ar': 'Bebas عريض', 'en': 'Bebas Neue'},
+    {'family': null, 'ar': 'خط الجهاز', 'en': 'Default'},
+  ];
 
   static const List<int> _threadColors = [
     0xFFFF1744,
@@ -2948,6 +2998,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
         isBold: _isBold,
         isSatin: _isSatin,
         isItalic: _isItalic,
+        fontFamily: _selectedFontFamily,
       );
       if (mounted) {
         setState(() {
@@ -3079,6 +3130,41 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // شريط اختيار نوع الخط (فونطات عربية وإنجليزية مدمجة للتطريز)
+                    SizedBox(
+                      height: 36,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _fontOptions.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 6),
+                        itemBuilder: (_, idx) {
+                          final opt = _fontOptions[idx];
+                          final fam = opt['family'];
+                          final bool sel = _selectedFontFamily == fam;
+                          final label = isArabicNotifier.value ? (opt['ar'] ?? '') : (opt['en'] ?? '');
+                          return ChoiceChip(
+                            label: Text(
+                              label,
+                              style: TextStyle(
+                                fontFamily: fam,
+                                color: sel ? Colors.black : Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                            selected: sel,
+                            selectedColor: const Color(0xFFD4AF37),
+                            backgroundColor: Colors.white10,
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                            onSelected: (_) {
+                              setState(() => _selectedFontFamily = fam);
+                              _generate();
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 8),
                     // التبديل بين فستون (Satin) وتاتامي (Tatami) + عريض/مائل
                     Row(
                       children: [
