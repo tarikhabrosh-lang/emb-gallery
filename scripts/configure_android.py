@@ -145,3 +145,99 @@ if os.path.exists("assets/logo.png"):
     for folder in ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]:
         dest_dir = f"android/app/src/main/res/{folder}"
         if os.path.exists(dest_dir): shutil.copy("assets/logo.png", os.path.join(dest_dir, "ic_launcher.png"))
+
+
+# --- Auto-download Arabic & English Embroidery Fonts and register in pubspec.yaml ---
+import urllib.request
+
+fonts_dir = "assets/fonts"
+os.makedirs(fonts_dir, exist_ok=True)
+
+FONT_SPECS = [
+    ("Amiri", "Amiri-Bold.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Bold.ttf",
+    ]),
+    ("ArefRuqaa", "ArefRuqaa-Bold.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/arefruqaa/ArefRuqaa-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/arefruqaa/ArefRuqaa-Bold.ttf",
+    ]),
+    ("Tajawal", "Tajawal-Bold.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/tajawal/Tajawal-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/tajawal/Tajawal-Bold.ttf",
+    ]),
+    ("Lalezar", "Lalezar-Regular.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/lalezar/Lalezar-Regular.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/lalezar/Lalezar-Regular.ttf",
+    ]),
+    ("Rakkas", "Rakkas-Regular.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/rakkas/Rakkas-Regular.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/rakkas/Rakkas-Regular.ttf",
+    ]),
+    ("ReemKufi", "ReemKufi-Bold.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/reemkufi/static/ReemKufi-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/reemkufi/static/ReemKufi-Bold.ttf",
+    ]),
+    ("Lobster", "Lobster-Regular.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/lobster/Lobster-Regular.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/lobster/Lobster-Regular.ttf",
+    ]),
+    ("GreatVibes", "GreatVibes-Regular.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/greatvibes/GreatVibes-Regular.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/greatvibes/GreatVibes-Regular.ttf",
+    ]),
+    ("Pacifico", "Pacifico-Regular.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/pacifico/Pacifico-Regular.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/pacifico/Pacifico-Regular.ttf",
+    ]),
+    ("BebasNeue", "BebasNeue-Regular.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/bebasneue/BebasNeue-Regular.ttf",
+    ]),
+    ("Cinzel", "Cinzel-Bold.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/cinzel/static/Cinzel-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/cinzel/static/Cinzel-Bold.ttf",
+    ]),
+]
+
+downloaded_fonts = []
+for family, fname, urls in FONT_SPECS:
+    dest = os.path.join(fonts_dir, fname)
+    ok = os.path.exists(dest) and os.path.getsize(dest) > 10000
+    if not ok:
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    data = resp.read()
+                if len(data) > 10000 and data[:4] in (b"\x00\x01\x00\x00", b"OTTO", b"true"):
+                    with open(dest, "wb") as out_f:
+                        out_f.write(data)
+                    ok = True
+                    print(f"[Font OK] {family} -> {dest} ({len(data)} bytes)")
+                    break
+            except Exception as ex:
+                print(f"[Font Skip] {family} ({url}): {ex}")
+    if ok:
+        downloaded_fonts.append((family, f"assets/fonts/{fname}"))
+
+if downloaded_fonts and os.path.exists("pubspec.yaml"):
+    with open("pubspec.yaml", "r", encoding="utf-8") as f:
+        pub = f.read()
+    # Remove any previous auto-generated font block if present
+    pub = re.sub(r"\n  # TARIK_FONTS_START[\s\S]*?# TARIK_FONTS_END\n?", "\n", pub)
+    fonts_yaml_lines = ["  # TARIK_FONTS_START", "  fonts:"]
+    for family, asset_path in downloaded_fonts:
+        fonts_yaml_lines.append(f"    - family: {family}")
+        fonts_yaml_lines.append("      fonts:")
+        fonts_yaml_lines.append(f"        - asset: {asset_path}")
+    fonts_yaml_lines.append("  # TARIK_FONTS_END")
+    fonts_block = "\n".join(fonts_yaml_lines) + "\n"
+
+    if re.search(r"(?m)^flutter:\s*$", pub):
+        pub = re.sub(r"(?m)^flutter:\s*$", "flutter:\n" + fonts_block.rstrip("\n"), pub, count=1)
+    else:
+        pub = pub.rstrip() + "\n\nflutter:\n" + fonts_block
+    with open("pubspec.yaml", "w", encoding="utf-8") as f:
+        f.write(pub)
+    print(f"Registered {len(downloaded_fonts)} fonts in pubspec.yaml")
