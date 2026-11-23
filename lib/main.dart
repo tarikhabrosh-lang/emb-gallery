@@ -1842,6 +1842,33 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                 ),
                               ],
                             ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton.icon(
+                                onPressed: () async {
+                                  final editedPath = await Navigator.push<String>(
+                                    context,
+                                    MaterialPageRoute(builder: (_) => ObjectEditorScreen(design: d)),
+                                  );
+                                  if (editedPath != null && editedPath.isNotEmpty) {
+                                    _lastExportedPath = editedPath;
+                                  }
+                                },
+                                icon: const Icon(Icons.select_all, size: 19, color: Color(0xFFD4AF37)),
+                                label: Text(
+                                  tr('تحديد عنصر من الرسمة (تكبير / دوران / تحريك)', 'Select Element (Resize / Rotate / Move)'),
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF1F2B3E),
+                                  foregroundColor: Colors.white,
+                                  side: BorderSide(color: const Color(0xFFD4AF37).withOpacity(0.55)),
+                                  padding: const EdgeInsets.symmetric(vertical: 11),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                              ),
+                            ),
                           ],
                           if (UniversalExporter.canExport(d.filePath)) ...[
                             const SizedBox(height: 10),
@@ -2520,10 +2547,114 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   }
 }
 
-/// شاشة تعديل التصميم (تكبير/تصغير، دوران، قلب، حذف لون، حذف غرز، وحفظ)
+/// شبكة ويلكم 3×3 لتحديد نقطة البداية والنهاية (9 نقاط موصولة بخطوط تماماً مثل برنامج ويلكم)
+class _WilcomStartPointGrid extends StatelessWidget {
+  final int selectedAnchor; // 0=الأصلي، 1..9=نقاط الشبكة
+  final ValueChanged<int> onChanged;
+
+  const _WilcomStartPointGrid({
+    required this.selectedAnchor,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const double gridSize = 104.0;
+    const double pad = 16.0;
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: SizedBox(
+        width: gridSize,
+        height: gridSize,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: CustomPaint(painter: _WilcomGridLinesPainter(pad: pad)),
+            ),
+            for (int row = 0; row < 3; row++)
+              for (int col = 0; col < 3; col++)
+                Positioned(
+                  left: pad + col * ((gridSize - pad * 2) / 2.0) - 13.0,
+                  top: pad + row * ((gridSize - pad * 2) / 2.0) - 13.0,
+                  child: _buildNode(row * 3 + col + 1),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNode(int idx) {
+    final bool isSel = selectedAnchor == idx;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(idx),
+      child: SizedBox(
+        width: 26,
+        height: 26,
+        child: Center(
+          child: Container(
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              color: const Color(0xFF0E131D),
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: isSel ? const Color(0xFFD4AF37) : Colors.white70,
+                width: isSel ? 2.2 : 1.5,
+              ),
+            ),
+            child: isSel
+                ? Center(
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFD4AF37),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  )
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WilcomGridLinesPainter extends CustomPainter {
+  final double pad;
+  _WilcomGridLinesPainter({required this.pad});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white38
+      ..strokeWidth = 1.6;
+    final double step = (size.width - pad * 2) / 2.0;
+    for (int i = 0; i < 3; i++) {
+      final double pos = pad + i * step;
+      canvas.drawLine(Offset(pad, pos), Offset(size.width - pad, pos), paint);
+      canvas.drawLine(Offset(pos, pad), Offset(pos, size.height - pad), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _WilcomGridLinesPainter oldDelegate) => false;
+}
+
+/// شاشة تعديل الفلم الشاملة (طول×عرض، نقطة البداية والنهاية 9 نقاط مثل ويلكم، إطار درزة وبُعده، طول الدرزة Run، الكثافة، الفلترة، الدوران، القلب، حذف لون، قص غرز، وحفظ)
 class DesignEditorScreen extends StatefulWidget {
-  final EmbDesignInfo design;
-  const DesignEditorScreen({super.key, required this.design});
+  final EmbDesignInfo? design;
+  final VectorDesignData? initialVector;
+  final String defaultBaseName;
+  const DesignEditorScreen({
+    super.key,
+    this.design,
+    this.initialVector,
+    this.defaultBaseName = 'tarik_edit',
+  });
   @override
   State<DesignEditorScreen> createState() => _DesignEditorScreenState();
 }
@@ -2534,7 +2665,25 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   bool _loading = true;
   bool _saving = false;
 
-  double _scale = 1.0;
+  double _scaleX = 1.0;
+  double _scaleY = 1.0;
+  bool _lockAspect = true;
+  final TextEditingController _widthCmCtrl = TextEditingController();
+  final TextEditingController _heightCmCtrl = TextEditingController();
+
+  // نقطة البداية والنهاية (شبكة ويلكم 3×3: 0=الأصلي، 1..9=الشبكة)
+  int _startAnchor = 5; // المركز افتراضياً مثل ويلكم
+  bool _returnToStart = true;
+
+  // إطار الدرزة (Basting Frame) + التحكم بطول الدرزة Run (للإطار وتعديل الرسمات)
+  bool _addBastingFrame = false;
+  double _bastingMarginMm = 5.0;
+  final TextEditingController _marginCtrl = TextEditingController(text: '5.0');
+  bool _bastingSeparateColor = true;
+  double _runLengthMm = 4.0;
+  final TextEditingController _runLenCtrl = TextEditingController(text: '4.0');
+  bool _applyRunToDesign = false;
+
   double _densityMm = 0.50; // الكثافة الأساسية 0.50 مم
   final TextEditingController _densityCtrl = TextEditingController(text: '0.50');
   bool _filterEnabled = false;
@@ -2558,13 +2707,40 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
 
   @override
   void dispose() {
+    _widthCmCtrl.dispose();
+    _heightCmCtrl.dispose();
+    _marginCtrl.dispose();
+    _runLenCtrl.dispose();
     _densityCtrl.dispose();
     _filterCtrl.dispose();
     super.dispose();
   }
 
+  String _anchorLabel(int anchor) {
+    switch (anchor) {
+      case 1: return tr('أعلى يسار', 'Top Left');
+      case 2: return tr('أعلى وسط', 'Top Center');
+      case 3: return tr('أعلى يمين', 'Top Right');
+      case 4: return tr('وسط يسار', 'Mid Left');
+      case 5: return tr('المركز', 'Center');
+      case 6: return tr('وسط يمين', 'Mid Right');
+      case 7: return tr('أسفل يسار', 'Bottom Left');
+      case 8: return tr('أسفل وسط', 'Bottom Center');
+      case 9: return tr('أسفل يمين', 'Bottom Right');
+      default: return tr('الأصلي', 'Original');
+    }
+  }
+
+  void _syncDimInputs(VectorDesignData? v) {
+    if (v == null) return;
+    final wCm = (v.widthMm ?? 0.0) / 10.0;
+    final hCm = (v.heightMm ?? 0.0) / 10.0;
+    if (wCm > 0) _widthCmCtrl.text = wCm.toStringAsFixed(1);
+    if (hCm > 0) _heightCmCtrl.text = hCm.toStringAsFixed(1);
+  }
+
   Future<void> _load() async {
-    final v = await VectorDesignLoader.load(widget.design.filePath);
+    final v = widget.initialVector ?? (widget.design != null ? await VectorDesignLoader.load(widget.design!.filePath) : null);
     if (!mounted) return;
     if (v != null) {
       final Set<int> cols = {};
@@ -2574,15 +2750,49 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
       final sortedCols = cols.toList()..sort();
       setState(() {
         _original = v;
-        _edited = v;
         _availableColors = sortedCols;
         _trimStart = 0;
         _trimEnd = v.stX.length;
         _loading = false;
       });
+      _rebuildEdited(syncDims: true);
     } else {
       setState(() => _loading = false);
     }
+  }
+
+  void _applyNumericWidth(String txt) {
+    if (_original == null) return;
+    final double? targetW = double.tryParse(txt.trim().replaceAll(',', '.'));
+    final double baseW = (_original!.widthMm ?? 0.0) / 10.0;
+    if (targetW == null || targetW < 0.5 || targetW > 120.0 || baseW <= 0.05) return;
+    _scaleX = (targetW / baseW).clamp(0.2, 4.0);
+    if (_lockAspect) _scaleY = _scaleX;
+    _rebuildEdited(syncDims: true);
+  }
+
+  void _applyNumericHeight(String txt) {
+    if (_original == null) return;
+    final double? targetH = double.tryParse(txt.trim().replaceAll(',', '.'));
+    final double baseH = (_original!.heightMm ?? 0.0) / 10.0;
+    if (targetH == null || targetH < 0.5 || targetH > 120.0 || baseH <= 0.05) return;
+    _scaleY = (targetH / baseH).clamp(0.2, 4.0);
+    if (_lockAspect) _scaleX = _scaleY;
+    _rebuildEdited(syncDims: true);
+  }
+
+  void _setMarginMm(double val, {bool syncText = true}) {
+    final clamped = val.clamp(0.0, 30.0);
+    _bastingMarginMm = double.parse(clamped.toStringAsFixed(1));
+    if (syncText) _marginCtrl.text = _bastingMarginMm.toStringAsFixed(1);
+    _rebuildEdited(syncDims: true);
+  }
+
+  void _setRunLenMm(double val, {bool syncText = true}) {
+    final clamped = val.clamp(1.0, 10.0);
+    _runLengthMm = double.parse(clamped.toStringAsFixed(1));
+    if (syncText) _runLenCtrl.text = _runLengthMm.toStringAsFixed(1);
+    _rebuildEdited();
   }
 
   void _setDensityMm(double val, {bool syncText = true}) {
@@ -2603,12 +2813,13 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
     _rebuildEdited();
   }
 
-  void _rebuildEdited() {
+  void _rebuildEdited({bool syncDims = false}) {
     if (_original == null) return;
     final double factor = (0.50 / _densityMm).clamp(0.45, 2.0);
     final withoutFilter = VectorDesignEditor.transform(
       _original!,
-      scale: _scale,
+      scaleX: _scaleX,
+      scaleY: _scaleY,
       rotationDeg: _rotationDeg,
       flipH: _flipH,
       flipV: _flipV,
@@ -2617,13 +2828,21 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
       trimEnd: _trimEnd,
       densityFactor: factor,
       minStitchFilterMm: 0.0,
+      runStitchLengthMm: _runLengthMm,
+      applyRunLengthToDesign: _applyRunToDesign,
+      addBastingFrame: _addBastingFrame,
+      bastingMarginMm: _bastingMarginMm,
+      bastingSeparateColor: _bastingSeparateColor,
+      startAnchor: _startAnchor,
+      returnToStart: _returnToStart,
     );
     final VectorDesignData next;
     int removed = 0;
     if (_filterEnabled) {
       next = VectorDesignEditor.transform(
         _original!,
-        scale: _scale,
+        scaleX: _scaleX,
+        scaleY: _scaleY,
         rotationDeg: _rotationDeg,
         flipH: _flipH,
         flipV: _flipV,
@@ -2632,6 +2851,13 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
         trimEnd: _trimEnd,
         densityFactor: factor,
         minStitchFilterMm: _minStitchFilterMm,
+        runStitchLengthMm: _runLengthMm,
+        applyRunLengthToDesign: _applyRunToDesign,
+        addBastingFrame: _addBastingFrame,
+        bastingMarginMm: _bastingMarginMm,
+        bastingSeparateColor: _bastingSeparateColor,
+        startAnchor: _startAnchor,
+        returnToStart: _returnToStart,
       );
       removed = max(0, withoutFilter.stitches - next.stitches);
     } else {
@@ -2641,18 +2867,29 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
       _edited = next;
       _filteredOutCount = removed;
     });
+    if (syncDims) _syncDimInputs(next);
   }
 
   Future<void> _saveEdited() async {
     if (_edited == null || _saving) return;
-    final origExt = widget.design.filePath.split('.').last.toUpperCase();
-    final targetExt = UniversalExporter.supportedFormats.any((f) => f['ext'] == origExt) ? origExt : 'DST';
+    String targetExt = 'DST';
+    String baseName = widget.defaultBaseName;
+    String outDir = '/storage/emulated/0/Download';
+
+    if (widget.design != null) {
+      final origExt = widget.design!.filePath.split('.').last.toUpperCase();
+      if (UniversalExporter.supportedFormats.any((f) => f['ext'] == origExt)) {
+        targetExt = origExt;
+      }
+      baseName = '${widget.design!.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_edit';
+      outDir = File(widget.design!.filePath).parent.path;
+    } else {
+      baseName = '${widget.defaultBaseName}_${DateTime.now().millisecondsSinceEpoch}';
+    }
 
     setState(() => _saving = true);
     try {
-      final baseName = '${widget.design.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_edit';
-      final parentDir = File(widget.design.filePath).parent.path;
-      String outPath = '$parentDir/$baseName.$targetExt';
+      String outPath = '$outDir/$baseName.$targetExt';
       String? res = await VectorDesignEditor.exportVectorToFile(_edited!, outPath, targetExt, baseName: baseName);
       res ??= await VectorDesignEditor.exportVectorToFile(
         _edited!,
@@ -2684,7 +2921,6 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   @override
   Widget build(BuildContext context) {
     final total = _original?.stX.length ?? 0;
-    final dimText = formatDimensionsCm(_edited?.widthMm, _edited?.heightMm);
     final int densityPct = ((0.50 / _densityMm) * 100).round();
     final numFmt = intl.NumberFormat('#,###');
 
@@ -2694,6 +2930,37 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
         backgroundColor: const Color(0xFF0E131D),
         title: Text(tr('تعديل الفلم', 'Edit Design'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
         actions: [
+          if (_edited != null) ...[
+            IconButton(
+              icon: const Icon(Icons.play_circle_outline, color: Color(0xFFD4AF37), size: 21),
+              tooltip: tr('محاكاة الغرز', 'Simulate'),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => StitchSimulatorScreen(initialVector: _edited)),
+                );
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.select_all, color: Color(0xFF56CCF2), size: 21),
+              tooltip: tr('تحديد عنصر (ويلكم)', 'Select Element'),
+              onPressed: () async {
+                final resPath = await Navigator.push<String>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ObjectEditorScreen(
+                      design: widget.design,
+                      initialVector: _edited,
+                      defaultBaseName: widget.defaultBaseName,
+                    ),
+                  ),
+                );
+                if (resPath != null && resPath.isNotEmpty && mounted) {
+                  Navigator.of(context).pop(resPath);
+                }
+              },
+            ),
+          ],
           TextButton.icon(
             onPressed: _saving || _edited == null ? null : _saveEdited,
             icon: _saving
@@ -2714,18 +2981,43 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                         margin: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                         decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
                         clipBehavior: Clip.antiAlias,
-                        child: InteractiveViewer(
-                          minScale: 0.8,
-                          maxScale: 8.0,
-                          child: CustomPaint(
-                            painter: _VectorStitchPainter(data: _edited!, limit: _edited!.stX.length, showNeedle: false),
-                            size: Size.infinite,
-                          ),
+                        child: Stack(
+                          children: [
+                            InteractiveViewer(
+                              minScale: 0.8,
+                              maxScale: 8.0,
+                              child: CustomPaint(
+                                painter: _VectorStitchPainter(
+                                  data: _edited!,
+                                  limit: _edited!.stX.length,
+                                  showNeedle: false,
+                                  showOriginCrosshair: _startAnchor >= 1 && _startAnchor <= 9,
+                                ),
+                                size: Size.infinite,
+                              ),
+                            ),
+                            Positioned(
+                              top: 8,
+                              left: 8,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF0E131D).withOpacity(0.84),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.55)),
+                                ),
+                                child: Text(
+                                  '⊕ ${_anchorLabel(_startAnchor)}${_addBastingFrame ? ' • ${tr('إطار', 'Frame')} ${_bastingMarginMm.toStringAsFixed(0)}${tr('مم', 'mm')}' : ''}',
+                                  style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 10, fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
                     ConstrainedBox(
-                      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.50),
+                      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.52),
                       child: Container(
                         padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                         decoration: const BoxDecoration(
@@ -2736,33 +3028,401 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              // الحجم وعدد الغرز
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(
-                                    '${tr('الحجم', 'Scale')}: ${(_scale * 100).round()}%${dimText != null ? '  ($dimText)' : ''}',
-                                    style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
-                                  ),
-                                  Text(
-                                    '${tr('الغرز', 'Stitches')}: ${numFmt.format(_edited!.stitches)}',
-                                    style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
-                                  ),
-                                ],
-                              ),
-                              Slider(
-                                value: _scale,
-                                min: 0.5,
-                                max: 2.0,
-                                divisions: 30,
-                                activeColor: const Color(0xFFD4AF37),
-                                onChanged: (v) {
-                                  _scale = v;
-                                  _rebuildEdited();
-                                },
+                              // 1) جدول التكبير (العرض × الطول بالسم بالأرقام + قفل التناسب + شريط السحب)
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                margin: const EdgeInsets.only(bottom: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black26,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: Colors.white12),
+                                ),
+                                child: Column(
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          '${tr('مقاس الفلم (سم)', 'Size (cm)')}  ${(_scaleX * 100).round()}%',
+                                          style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                                        ),
+                                        Text(
+                                          '${tr('الغرز', 'Stitches')}: ${numFmt.format(_edited!.stitches)}',
+                                          style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: TextField(
+                                            controller: _widthCmCtrl,
+                                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                                            decoration: InputDecoration(
+                                              labelText: tr('العرض (سم)', 'Width (cm)'),
+                                              labelStyle: const TextStyle(color: Colors.white60, fontSize: 11),
+                                              isDense: true,
+                                              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                                              filled: true,
+                                              fillColor: const Color(0xFF0E131D),
+                                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                            ),
+                                            onSubmitted: _applyNumericWidth,
+                                          ),
+                                        ),
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                                          child: IconButton(
+                                            visualDensity: VisualDensity.compact,
+                                            onPressed: () => setState(() => _lockAspect = !_lockAspect),
+                                            icon: Icon(
+                                              _lockAspect ? Icons.link : Icons.link_off,
+                                              color: _lockAspect ? const Color(0xFFD4AF37) : Colors.white38,
+                                            ),
+                                            tooltip: tr('قفل التناسب', 'Lock Ratio'),
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: TextField(
+                                            controller: _heightCmCtrl,
+                                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                                            decoration: InputDecoration(
+                                              labelText: tr('الطول (سم)', 'Height (cm)'),
+                                              labelStyle: const TextStyle(color: Colors.white60, fontSize: 11),
+                                              isDense: true,
+                                              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                                              filled: true,
+                                              fillColor: const Color(0xFF0E131D),
+                                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                            ),
+                                            onSubmitted: _applyNumericHeight,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        ElevatedButton(
+                                          onPressed: () {
+                                            FocusScope.of(context).unfocus();
+                                            final curW = ((_edited?.widthMm ?? 0) / 10.0).toStringAsFixed(1);
+                                            final curH = ((_edited?.heightMm ?? 0) / 10.0).toStringAsFixed(1);
+                                            if (_widthCmCtrl.text.trim() != curW) {
+                                              _applyNumericWidth(_widthCmCtrl.text);
+                                            }
+                                            if (!_lockAspect || _heightCmCtrl.text.trim() != curH) {
+                                              if (!_lockAspect || _widthCmCtrl.text.trim() == curW) {
+                                                _applyNumericHeight(_heightCmCtrl.text);
+                                              }
+                                            }
+                                          },
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: const Color(0xFFD4AF37),
+                                            foregroundColor: Colors.black,
+                                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                            minimumSize: Size.zero,
+                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                          ),
+                                          child: const Icon(Icons.check, size: 18),
+                                        ),
+                                      ],
+                                    ),
+                                    Slider(
+                                      value: _scaleX.clamp(0.4, 2.5),
+                                      min: 0.4,
+                                      max: 2.5,
+                                      divisions: 42,
+                                      activeColor: const Color(0xFFD4AF37),
+                                      onChanged: (v) {
+                                        final ratio = _scaleX > 0.01 ? (_scaleY / _scaleX) : 1.0;
+                                        _scaleX = v;
+                                        _scaleY = _lockAspect ? v : (v * ratio).clamp(0.2, 4.0);
+                                        _rebuildEdited(syncDims: true);
+                                      },
+                                    ),
+                                  ],
+                                ),
                               ),
 
-                              // نسبة الكثافة بالأرقام (الأساسية 0.50)
+                              // 2) نقطة البداية والنهاية (شبكة ويلكم 3×3 ذات الـ 9 نقاط)
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                margin: const EdgeInsets.only(bottom: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black26,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: _startAnchor != 0 ? const Color(0xFFD4AF37).withOpacity(0.5) : Colors.white12,
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    _WilcomStartPointGrid(
+                                      selectedAnchor: _startAnchor,
+                                      onChanged: (idx) {
+                                        _startAnchor = idx;
+                                        _rebuildEdited();
+                                      },
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            tr('نقطة البداية والنهاية (ويلكم)', 'Auto Start & End'),
+                                            style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            '${tr('المكان المختار:', 'Selected:')} ${_anchorLabel(_startAnchor)}',
+                                            style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  tr('العودة للبداية في النهاية', 'Return End to Start'),
+                                                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                                                ),
+                                              ),
+                                              Switch(
+                                                value: _returnToStart,
+                                                activeColor: const Color(0xFFD4AF37),
+                                                onChanged: _startAnchor == 0
+                                                    ? null
+                                                    : (v) {
+                                                        _returnToStart = v;
+                                                        _rebuildEdited();
+                                                      },
+                                              ),
+                                            ],
+                                          ),
+                                          Align(
+                                            alignment: AlignmentDirectional.centerStart,
+                                            child: OutlinedButton(
+                                              onPressed: () {
+                                                _startAnchor = _startAnchor == 0 ? 5 : 0;
+                                                _rebuildEdited();
+                                              },
+                                              style: OutlinedButton.styleFrom(
+                                                side: const BorderSide(color: Colors.white24),
+                                                visualDensity: VisualDensity.compact,
+                                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                              ),
+                                              child: Text(
+                                                _startAnchor == 0
+                                                    ? tr('تفعيل المركز', 'Use Center')
+                                                    : tr('إرجاع للأصلي', 'Reset Original'),
+                                                style: const TextStyle(color: Colors.white70, fontSize: 11),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+
+                              // 3) إطار الدرزة (Basting Box) + التحكم ببُعده + التحكم بطول الدرزة Run (للإطار وللرسمات)
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                margin: const EdgeInsets.only(bottom: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black26,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: (_addBastingFrame || _applyRunToDesign) ? Colors.tealAccent.withOpacity(0.55) : Colors.white12,
+                                  ),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                tr('إطار درزة حول التصميم (Basting)', 'Basting Run Frame'),
+                                                style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                                              ),
+                                              Text(
+                                                _addBastingFrame
+                                                    ? '${tr('مفعّل — البُعد', 'Active — Margin')}: ${_bastingMarginMm.toStringAsFixed(1)} ${tr('مم', 'mm')}'
+                                                    : tr('إضافة أو إلغاء إطار درزة لتثبيت القماش', 'Add or remove running basting frame'),
+                                                style: const TextStyle(color: Colors.white60, fontSize: 10),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Switch(
+                                          value: _addBastingFrame,
+                                          activeColor: Colors.tealAccent,
+                                          onChanged: (v) {
+                                            _addBastingFrame = v;
+                                            _rebuildEdited(syncDims: true);
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                    if (_addBastingFrame) ...[
+                                      const SizedBox(height: 4),
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text(
+                                            tr('بُعد الإطار عن التصميم (مم)', 'Frame Margin (mm)'),
+                                            style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w600),
+                                          ),
+                                          Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(tr('لون مستقل', 'Separate Color'), style: const TextStyle(color: Colors.white60, fontSize: 10)),
+                                              Checkbox(
+                                                value: _bastingSeparateColor,
+                                                activeColor: Colors.tealAccent,
+                                                checkColor: Colors.black,
+                                                visualDensity: VisualDensity.compact,
+                                                onChanged: (v) {
+                                                  _bastingSeparateColor = v ?? true;
+                                                  _rebuildEdited();
+                                                },
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                      Row(
+                                        children: [
+                                          IconButton(
+                                            visualDensity: VisualDensity.compact,
+                                            onPressed: () => _setMarginMm(_bastingMarginMm - 1.0),
+                                            icon: const Icon(Icons.remove_circle_outline, color: Colors.tealAccent),
+                                          ),
+                                          SizedBox(
+                                            width: 62,
+                                            child: TextField(
+                                              controller: _marginCtrl,
+                                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                              textAlign: TextAlign.center,
+                                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                                              decoration: InputDecoration(
+                                                isDense: true,
+                                                contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                                                filled: true,
+                                                fillColor: const Color(0xFF0E131D),
+                                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                              ),
+                                              onSubmitted: (txt) {
+                                                final v = double.tryParse(txt.trim().replaceAll(',', '.'));
+                                                if (v != null) _setMarginMm(v, syncText: true);
+                                              },
+                                            ),
+                                          ),
+                                          IconButton(
+                                            visualDensity: VisualDensity.compact,
+                                            onPressed: () => _setMarginMm(_bastingMarginMm + 1.0),
+                                            icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent),
+                                          ),
+                                          Expanded(
+                                            child: Slider(
+                                              value: _bastingMarginMm.clamp(0.0, 30.0),
+                                              min: 0.0,
+                                              max: 30.0,
+                                              divisions: 30,
+                                              activeColor: Colors.tealAccent,
+                                              onChanged: (v) => _setMarginMm(v),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                    const Divider(color: Colors.white12, height: 14),
+                                    // التحكم بطول الدرزة Run (يشمل الإطار + تعديل درزات الرسمة)
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          '${tr('طول الدرزة (Run)', 'Run Stitch Length')}: ${_runLengthMm.toStringAsFixed(1)} ${tr('مم', 'mm')}',
+                                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                                        ),
+                                      ],
+                                    ),
+                                    Row(
+                                      children: [
+                                        IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: () => _setRunLenMm(_runLengthMm - 0.5),
+                                          icon: const Icon(Icons.remove_circle_outline, color: Color(0xFFD4AF37)),
+                                        ),
+                                        SizedBox(
+                                          width: 62,
+                                          child: TextField(
+                                            controller: _runLenCtrl,
+                                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                                              filled: true,
+                                              fillColor: const Color(0xFF0E131D),
+                                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                            ),
+                                            onSubmitted: (txt) {
+                                              final v = double.tryParse(txt.trim().replaceAll(',', '.'));
+                                              if (v != null) _setRunLenMm(v, syncText: true);
+                                            },
+                                          ),
+                                        ),
+                                        IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: () => _setRunLenMm(_runLengthMm + 0.5),
+                                          icon: const Icon(Icons.add_circle_outline, color: Color(0xFFD4AF37)),
+                                        ),
+                                        Expanded(
+                                          child: Slider(
+                                            value: _runLengthMm.clamp(1.0, 10.0),
+                                            min: 1.0,
+                                            max: 10.0,
+                                            divisions: 18,
+                                            activeColor: const Color(0xFFD4AF37),
+                                            onChanged: (v) => _setRunLenMm(v),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            tr('تطبيق طول الدرزة على درزات الرسمة أيضاً (مع حماية الفستون والزوايا)', 'Apply Run length to design Run stitches too (protects Satin & corners)'),
+                                            style: const TextStyle(color: Colors.white70, fontSize: 10.5),
+                                          ),
+                                        ),
+                                        Switch(
+                                          value: _applyRunToDesign,
+                                          activeColor: const Color(0xFFD4AF37),
+                                          onChanged: (v) {
+                                            _applyRunToDesign = v;
+                                            _rebuildEdited();
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+
+                              // 4) نسبة الكثافة بالأرقام (الأساسية 0.50)
                               Container(
                                 padding: const EdgeInsets.all(10),
                                 margin: const EdgeInsets.only(bottom: 8),
@@ -2841,7 +3501,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                 ),
                               ),
 
-                              // فلترة الفلم (0.3 إلى 1.5 مم مع حماية غرز الزوايا)
+                              // 5) فلترة الفلم (0.3 إلى 1.5 مم مع حماية غرز الزوايا)
                               Container(
                                 padding: const EdgeInsets.all(10),
                                 margin: const EdgeInsets.only(bottom: 8),
@@ -2933,7 +3593,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                 ),
                               ),
 
-                              // الدوران
+                              // 6) الدوران
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
@@ -2950,7 +3610,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                         child: InkWell(
                                           onTap: () {
                                             _rotationDeg = deg.toDouble();
-                                            _rebuildEdited();
+                                            _rebuildEdited(syncDims: true);
                                           },
                                           borderRadius: BorderRadius.circular(8),
                                           child: Container(
@@ -2982,7 +3642,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                 activeColor: const Color(0xFFD4AF37),
                                 onChanged: (v) {
                                   _rotationDeg = v;
-                                  _rebuildEdited();
+                                  _rebuildEdited(syncDims: true);
                                 },
                               ),
                               Row(
@@ -3035,7 +3695,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                           } else if (_availableColors.length - _deletedColors.length > 1) {
                                             _deletedColors.add(cIdx);
                                           }
-                                          _rebuildEdited();
+                                          _rebuildEdited(syncDims: true);
                                         },
                                         child: Container(
                                           width: 32,
@@ -3072,7 +3732,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                   if (rv.end - rv.start >= 2) {
                                     _trimStart = rv.start.round();
                                     _trimEnd = rv.end.round();
-                                    _rebuildEdited();
+                                    _rebuildEdited(syncDims: true);
                                   }
                                 },
                               ),
@@ -3092,12 +3752,14 @@ class _VectorStitchPainter extends CustomPainter {
   final int limit;
   final bool showNeedle;
   final bool is3D;
+  final bool showOriginCrosshair;
 
   _VectorStitchPainter({
     required this.data,
     required this.limit,
     required this.showNeedle,
     this.is3D = false,
+    this.showOriginCrosshair = false,
   });
 
   @override
@@ -3107,7 +3769,7 @@ class _VectorStitchPainter extends CustomPainter {
     final double rawH = data.maxY - data.minY;
     if (rawW <= 0 || rawH <= 0) return;
 
-    const double pad = 18.0;
+    const double pad = 22.0;
     final double scale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
     final double offX = (size.width - rawW * scale) * 0.5 - data.minX * scale;
     final double offY = (size.height - rawH * scale) * 0.5 - data.minY * scale;
@@ -3175,7 +3837,7 @@ class _VectorStitchPainter extends CustomPainter {
         final paint = Paint()
           ..color = baseColor
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.15
+          ..strokeWidth = 0.65
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true;
@@ -3204,6 +3866,38 @@ class _VectorStitchPainter extends CustomPainter {
     }
     flush();
 
+    // علامة نقطة البداية والنهاية (⊕ خضراء/حمراء واضحة مثل برنامج ويلكم عند الإحداثي (0,0))
+    if (showOriginCrosshair) {
+      final double ox = offX;
+      final double oy = offY;
+      const double arm = 12.0;
+      canvas.drawCircle(
+        Offset(ox, oy),
+        9.0,
+        Paint()..color = Colors.white.withOpacity(0.85),
+      );
+      canvas.drawCircle(
+        Offset(ox, oy),
+        8.0,
+        Paint()
+          ..color = const Color(0xFF00C853)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.2,
+      );
+      final crossBg = Paint()
+        ..color = Colors.white
+        ..strokeWidth = 3.6
+        ..strokeCap = StrokeCap.round;
+      final crossFg = Paint()
+        ..color = const Color(0xFFD50000)
+        ..strokeWidth = 1.9
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(Offset(ox - arm, oy), Offset(ox + arm, oy), crossBg);
+      canvas.drawLine(Offset(ox, oy - arm), Offset(ox, oy + arm), crossBg);
+      canvas.drawLine(Offset(ox - arm, oy), Offset(ox + arm, oy), crossFg);
+      canvas.drawLine(Offset(ox, oy - arm), Offset(ox, oy + arm), crossFg);
+    }
+
     if (showNeedle && count > 0) {
       const double arm = 9.0;
       final crossShadow = Paint()
@@ -3223,12 +3917,15 @@ class _VectorStitchPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _VectorStitchPainter oldDelegate) {
-    return oldDelegate.limit != limit || oldDelegate.data != data || oldDelegate.is3D != is3D;
+    return oldDelegate.limit != limit ||
+        oldDelegate.data != data ||
+        oldDelegate.is3D != is3D ||
+        oldDelegate.showOriginCrosshair != showOriginCrosshair;
   }
 }
 
 
-/// شاشة الكتابة بالعربي والإنجليزي (فونطات تطريز فستون أصلية Ink/Stitch + خطوط عامة + معاينة 3D + محاكاة وتصدير)
+/// شاشة الكتابة والتطريز المبسّطة: 5 فونطات عربي (A1–A5) + 5 فونطات إنجليزي (E1–E5) بدون أسماء + جدول طول وعرض بالأرقام + Auto-Branching بدون جنبات
 class TextToEmbroideryScreen extends StatefulWidget {
   const TextToEmbroideryScreen({super.key});
   @override
@@ -3237,49 +3934,37 @@ class TextToEmbroideryScreen extends StatefulWidget {
 
 class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   final TextEditingController _textCtrl = TextEditingController(text: 'طارق');
+  final TextEditingController _widthCmCtrl = TextEditingController(text: '12.0');
+  final TextEditingController _heightCmCtrl = TextEditingController(text: '3.5');
+
   VectorDesignData? _vec;
   bool _generating = false;
   bool _saving = false;
   bool _loadingCatalog = true;
-  bool _is3DPreview = true;
+  bool _is3DPreview = false; // العرض العادي بخيط رفيع وواضح افتراضياً مع زر 3D
 
-  // مكتبة فونطات التطريز الأصلية (Ink/Stitch & StitchFoundry Satin)
-  List<EmbFontMeta> _proFonts = const [];
-  EmbFontMeta? _selectedProFont;
-  bool _useProEmbFonts = true;
+  // اختيار مبسّط: لغة الفونط (A = عربي، E = إنجليزي) + رقم الفونط (1..5)
+  bool _arabicGroup = true;
+  int _fontNumber = 1; // 1..5 -> A1..A5 أو E1..E5
 
-  // إعدادات الفونطات الأصلية (فستون احترافي)
-  double _letterHeightCm = 2.5;
-  double _proDensityMm = 0.42;
-  double _extraSpacingMm = 0.0;
-  int _underlayMode = 1; // 0=بدون، 1=درز وسط، 2=حواف+وسط
+  // الفونطات الأصلية المحمّلة من Ink/Stitch (A1 + E1..E5)
+  EmbFontMeta? _arProFont;
+  final Map<int, EmbFontMeta> _enProFonts = {};
 
-  // إعدادات الخطوط العامة (TTF)
+  static const List<String> _arTtfFallbacks = ['Lalezar', 'Lalezar', 'ReemKufi', 'Tajawal', 'Amiri'];
+  static const List<String> _enTtfFallbacks = ['Tajawal', 'BebasNeue', 'Cinzel', 'Lobster', 'Pacifico'];
+
+  // المقاس بالأرقام (العرض × الطول بالـ سم) + قفل التناسب + شريط السحب
   double _widthCm = 12.0;
-  double _ttfDensityMm = 0.45;
+  double? _customHeightCm;
+  bool _lockAspect = true;
+  double _densityMm = 0.45;
+  double _extraSpacingMm = 0.0;
+  int _underlayMode = 1;
   bool _isSatin = true;
-  bool _isBold = true;
-  bool _isItalic = false;
-  String? _selectedFontFamily = 'Lalezar';
-
   int _selectedColor = 0xFFFF1744;
   String _exportFormat = 'DST';
   String? _hintMsg;
-
-  static const List<Map<String, String?>> _fontOptions = [
-    {'family': 'Lalezar', 'ar': 'عريض (لاليزار)', 'en': 'Lalezar'},
-    {'family': 'Amiri', 'ar': 'نسخ (أميري)', 'en': 'Amiri'},
-    {'family': 'ArefRuqaa', 'ar': 'رقعة', 'en': 'Ruqaa'},
-    {'family': 'ReemKufi', 'ar': 'كوفي', 'en': 'Kufi'},
-    {'family': 'Rakkas', 'ar': 'رقّاص عريض', 'en': 'Rakkas'},
-    {'family': 'Tajawal', 'ar': 'عصري (تجوال)', 'en': 'Tajawal'},
-    {'family': 'Lobster', 'ar': 'Lobster مشبّك', 'en': 'Lobster'},
-    {'family': 'GreatVibes', 'ar': 'Great Vibes', 'en': 'Great Vibes'},
-    {'family': 'Pacifico', 'ar': 'Pacifico', 'en': 'Pacifico'},
-    {'family': 'Cinzel', 'ar': 'Cinzel كلاسيك', 'en': 'Cinzel'},
-    {'family': 'BebasNeue', 'ar': 'Bebas عريض', 'en': 'Bebas Neue'},
-    {'family': null, 'ar': 'خط الجهاز', 'en': 'Default'},
-  ];
 
   static const List<int> _threadColors = [
     0xFFFF1744,
@@ -3300,39 +3985,46 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   Future<void> _initFontsAndGenerate() async {
     final fonts = await InkStitchFontCatalog.loadIndex();
     if (!mounted) return;
-    if (fonts.isNotEmpty) {
-      EmbFontMeta? chosen;
-      for (final f in fonts) {
-        if (f.rtl) {
-          chosen = f;
-          break;
-        }
+    EmbFontMeta? arMeta;
+    final List<EmbFontMeta> enList = [];
+    for (final f in fonts) {
+      if (f.rtl && arMeta == null) {
+        arMeta = f;
+      } else if (!f.rtl) {
+        enList.add(f);
       }
-      chosen ??= fonts.first;
-      if (!chosen.rtl && _textCtrl.text.trim() == 'طارق') {
-        _textCtrl.text = 'Tarik';
-      }
-      setState(() {
-        _proFonts = fonts;
-        _selectedProFont = chosen;
-        _useProEmbFonts = true;
-        _loadingCatalog = false;
-      });
-    } else {
-      setState(() {
-        _proFonts = const [];
-        _selectedProFont = null;
-        _useProEmbFonts = false;
-        _loadingCatalog = false;
-      });
     }
+    for (int i = 0; i < enList.length && i < 5; i++) {
+      _enProFonts[i + 1] = enList[i];
+    }
+    setState(() {
+      _arProFont = arMeta;
+      _loadingCatalog = false;
+    });
     await _generate();
   }
 
   @override
   void dispose() {
     _textCtrl.dispose();
+    _widthCmCtrl.dispose();
+    _heightCmCtrl.dispose();
     super.dispose();
+  }
+
+  String get _activeCode => '${_arabicGroup ? 'A' : 'E'}$_fontNumber';
+
+  void _syncDimFields(VectorDesignData? v) {
+    if (v == null) return;
+    final wCm = (v.widthMm ?? 0.0) / 10.0;
+    final hCm = (v.heightMm ?? 0.0) / 10.0;
+    if (wCm > 0.1) {
+      _widthCm = wCm.clamp(2.0, 35.0);
+      _widthCmCtrl.text = wCm.toStringAsFixed(1);
+    }
+    if (hCm > 0.1) {
+      _heightCmCtrl.text = hCm.toStringAsFixed(1);
+    }
   }
 
   Future<void> _generate() async {
@@ -3346,47 +4038,67 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
     try {
       VectorDesignData? v;
-      if (_useProEmbFonts && _selectedProFont != null) {
-        final bool hasAr = ArabicShaper.containsArabic(txt);
-        // إذا كتب المستخدم بالعربي وكان الخط المختار إنجليزي، نحاول التبديل الذكي أو نعرض تلميحاً واضحاً
-        if (hasAr && !_selectedProFont!.rtl) {
-          EmbFontMeta? arFont;
-          for (final f in _proFonts) {
-            if (f.rtl) {
-              arFont = f;
-              break;
-            }
-          }
-          if (arFont != null) {
-            _selectedProFont = arFont;
-          }
-        }
+      final bool useProArabic = _arabicGroup && _fontNumber == 1 && _arProFont != null && _isSatin;
+      final bool useProEnglish = !_arabicGroup && _enProFonts.containsKey(_fontNumber) && _isSatin;
 
+      if (useProArabic) {
         v = await InkStitchFontEngine.generate(
-          meta: _selectedProFont!,
+          meta: _arProFont!,
           text: txt,
-          letterHeightCm: _letterHeightCm,
-          densityMm: _proDensityMm,
+          letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.8, 12.0),
+          targetWidthCm: _widthCm,
+          targetHeightCm: _lockAspect ? null : _customHeightCm,
+          densityMm: _densityMm,
           extraSpacingMm: _extraSpacingMm,
           underlayMode: _underlayMode,
           colorArgb: _selectedColor,
         );
-
-        if (v == null && mounted) {
-          _hintMsg = _selectedProFont!.rtl
-              ? tr('اكتب حروفاً عربية أو إنجليزية مدعومة في هذا الخط', 'Type supported Arabic or Latin characters for this font')
-              : tr('هذا الخط مخصّص للحروف الإنجليزية — اكتب بالإنجليزية أو اختر «حاسوب عربي»', 'This font is for English letters — type English or select an Arabic font');
-        }
+        // إن لم يجد حرفاً مدعوماً (مثلاً تشكيل نادر)، يرجع تلقائياً للفونط العريض النظيف بدون أن يترك الشاشة فارغة
+        v ??= await TextToStitchEngine.generateFromText(
+          text: txt,
+          widthCm: _widthCm,
+          heightCm: _lockAspect ? null : _customHeightCm,
+          densityMm: _densityMm,
+          colorArgb: _selectedColor,
+          isBold: true,
+          isSatin: _isSatin,
+          fontFamily: _arTtfFallbacks[0],
+        );
+      } else if (useProEnglish) {
+        v = await InkStitchFontEngine.generate(
+          meta: _enProFonts[_fontNumber]!,
+          text: txt,
+          letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.8, 12.0),
+          targetWidthCm: _widthCm,
+          targetHeightCm: _lockAspect ? null : _customHeightCm,
+          densityMm: _densityMm,
+          extraSpacingMm: _extraSpacingMm,
+          underlayMode: _underlayMode,
+          colorArgb: _selectedColor,
+        );
+        v ??= await TextToStitchEngine.generateFromText(
+          text: txt,
+          widthCm: _widthCm,
+          heightCm: _lockAspect ? null : _customHeightCm,
+          densityMm: _densityMm,
+          colorArgb: _selectedColor,
+          isBold: true,
+          isSatin: _isSatin,
+          fontFamily: _enTtfFallbacks[(_fontNumber - 1).clamp(0, 4)],
+        );
       } else {
+        final String fam = _arabicGroup
+            ? _arTtfFallbacks[(_fontNumber - 1).clamp(0, 4)]
+            : _enTtfFallbacks[(_fontNumber - 1).clamp(0, 4)];
         v = await TextToStitchEngine.generateFromText(
           text: txt,
           widthCm: _widthCm,
-          densityMm: _ttfDensityMm,
+          heightCm: _lockAspect ? null : _customHeightCm,
+          densityMm: _densityMm,
           colorArgb: _selectedColor,
-          isBold: _isBold,
+          isBold: true,
           isSatin: _isSatin,
-          isItalic: _isItalic,
-          fontFamily: _selectedFontFamily,
+          fontFamily: fam,
         );
       }
 
@@ -3395,17 +4107,39 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           _vec = v;
           _generating = false;
         });
+        _syncDimFields(v);
       }
     } catch (_) {
       if (mounted) setState(() => _generating = false);
     }
   }
 
+  void _applyWidthInput(String txt) {
+    final double? w = double.tryParse(txt.trim().replaceAll(',', '.'));
+    if (w == null || w < 2.0 || w > 40.0) return;
+    _widthCm = w;
+    if (_lockAspect) _customHeightCm = null;
+    _generate();
+  }
+
+  void _applyHeightInput(String txt) {
+    final double? h = double.tryParse(txt.trim().replaceAll(',', '.'));
+    if (h == null || h < 0.8 || h > 25.0) return;
+    if (_lockAspect && _vec != null && (_vec!.widthMm ?? 0) > 0 && (_vec!.heightMm ?? 0) > 0) {
+      final ratio = _vec!.widthMm! / _vec!.heightMm!;
+      _widthCm = (h * ratio).clamp(2.0, 40.0);
+      _customHeightCm = null;
+    } else {
+      _customHeightCm = h;
+    }
+    _generate();
+  }
+
   Future<void> _exportText({required bool shareAfter}) async {
     if (_vec == null || _saving) return;
     setState(() => _saving = true);
     try {
-      final safeName = 'text_${DateTime.now().millisecondsSinceEpoch}';
+      final safeName = 'text_${_activeCode}_${DateTime.now().millisecondsSinceEpoch}';
       final ext = _exportFormat.toUpperCase();
       final String outPath = shareAfter
           ? '${(await getTemporaryDirectory()).path}/$safeName.$ext'
@@ -3437,15 +4171,12 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final dimText = formatDimensionsCm(_vec?.widthMm, _vec?.heightMm);
-    final bool proActive = _useProEmbFonts && _proFonts.isNotEmpty && _selectedProFont != null;
-
     return Scaffold(
       backgroundColor: const Color(0xFF0E131D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
         title: Text(
-          tr('الكتابة والتطريز', 'Embroidery Lettering'),
+          '${tr('الكتابة والتطريز', 'Lettering')} ($_activeCode)',
           style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -3454,7 +4185,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
               onPressed: () => setState(() => _is3DPreview = !_is3DPreview),
               style: TextButton.styleFrom(
                 backgroundColor: _is3DPreview ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                 minimumSize: Size.zero,
               ),
               child: Text(
@@ -3467,7 +4198,37 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.play_circle_outline, color: Color(0xFFD4AF37)),
+              icon: const Icon(Icons.tune, color: Colors.greenAccent, size: 21),
+              tooltip: tr('تعديل الفلم (البداية والإطار)', 'Edit Film (Start & Frame)'),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => DesignEditorScreen(
+                      initialVector: _vec,
+                      defaultBaseName: 'text_$_activeCode',
+                    ),
+                  ),
+                );
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.select_all, color: Color(0xFF56CCF2), size: 21),
+              tooltip: tr('تحديد عنصر (ويلكم)', 'Select Element'),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ObjectEditorScreen(
+                      initialVector: _vec,
+                      defaultBaseName: 'text_$_activeCode',
+                    ),
+                  ),
+                );
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.play_circle_outline, color: Color(0xFFD4AF37), size: 22),
               tooltip: tr('محاكاة الغرز', 'Simulate'),
               onPressed: () {
                 Navigator.push(
@@ -3494,7 +4255,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                     textInputAction: TextInputAction.newline,
                     style: const TextStyle(color: Colors.white, fontSize: 15),
                     decoration: InputDecoration(
-                      hintText: tr('اكتب سطراً أو عدة أسطر بالعربي أو الإنجليزي...', 'Type one or more lines (Arabic / English)...'),
+                      hintText: tr('اكتب هنا...', 'Type here...'),
                       filled: true,
                       fillColor: const Color(0xFF18202E),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -3550,31 +4311,30 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                 size: Size.infinite,
                               ),
                             ),
-                            if (proActive)
-                              Positioned(
-                                top: 8,
-                                left: 8,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF0E131D).withOpacity(0.82),
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.6)),
-                                  ),
-                                  child: Text(
-                                    '★ ${isArabicNotifier.value ? _selectedProFont!.nameAr : _selectedProFont!.nameEn}',
-                                    style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 10, fontWeight: FontWeight.bold),
-                                  ),
+                            Positioned(
+                              top: 8,
+                              left: 8,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF0E131D).withOpacity(0.84),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.6)),
+                                ),
+                                child: Text(
+                                  '$_activeCode • ${_vec!.stitches} ${tr('غرزة', 'st')}',
+                                  style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11, fontWeight: FontWeight.bold),
                                 ),
                               ),
+                            ),
                           ],
                         )),
             ),
           ),
           ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.50),
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.49),
             child: Container(
-              padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
               decoration: const BoxDecoration(
                 color: Color(0xFF18202E),
                 borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -3583,361 +4343,209 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // التبديل بين مكتبة الفونطات الأصلية (فستون حقيقي) والخطوط العامة
-                    if (_proFonts.isNotEmpty) ...[
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ChoiceChip(
-                              label: Center(
-                                child: Text(
-                                  '★ ${tr('فونطات تطريز أصلية', 'Pro Satin Fonts')} (${_proFonts.length})',
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              selected: _useProEmbFonts,
-                              selectedColor: const Color(0xFFD4AF37),
-                              backgroundColor: Colors.white10,
-                              labelStyle: TextStyle(
-                                color: _useProEmbFonts ? Colors.black : Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                              onSelected: (_) {
-                                if (!_useProEmbFonts) {
-                                  setState(() => _useProEmbFonts = true);
-                                  _generate();
-                                }
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: ChoiceChip(
-                              label: Center(
-                                child: Text(
-                                  tr('خطوط عامة (TTF)', 'General Fonts'),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              selected: !_useProEmbFonts,
-                              selectedColor: const Color(0xFF56CCF2),
-                              backgroundColor: Colors.white10,
-                              labelStyle: TextStyle(
-                                color: !_useProEmbFonts ? Colors.black : Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                              onSelected: (_) {
-                                if (_useProEmbFonts) {
-                                  setState(() => _useProEmbFonts = false);
-                                  _generate();
-                                }
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-
-                    if (proActive) ...[
-                      // شريط فونطات التطريز الأصلية (Ink/Stitch + StitchFoundry)
-                      SizedBox(
-                        height: 36,
-                        child: ListView.separated(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: _proFonts.length,
-                          separatorBuilder: (_, __) => const SizedBox(width: 6),
-                          itemBuilder: (_, idx) {
-                            final f = _proFonts[idx];
-                            final bool sel = _selectedProFont?.id == f.id;
-                            final label = isArabicNotifier.value ? f.nameAr : f.nameEn;
-                            return ChoiceChip(
-                              label: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (f.rtl)
-                                    Padding(
-                                      padding: const EdgeInsetsDirectional.only(end: 4),
-                                      child: Icon(Icons.star, size: 13, color: sel ? Colors.black : const Color(0xFFD4AF37)),
-                                    ),
-                                  Text(
-                                    label,
-                                    style: TextStyle(
-                                      color: sel ? Colors.black : Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
+                    // شريط مبسّط: زر A للعربي وزر E للإنجليزي + أرقام الفونط 1..5 بدون أسماء
+                    Row(
+                      children: [
+                        ChoiceChip(
+                          label: const Text('A', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                          selected: _arabicGroup,
+                          selectedColor: const Color(0xFFD4AF37),
+                          backgroundColor: Colors.white10,
+                          labelStyle: TextStyle(color: _arabicGroup ? Colors.black : Colors.white),
+                          onSelected: (_) {
+                            if (!_arabicGroup) {
+                              setState(() {
+                                _arabicGroup = true;
+                                if (_textCtrl.text.trim() == 'Tarik') _textCtrl.text = 'طارق';
+                              });
+                              _generate();
+                            }
+                          },
+                        ),
+                        const SizedBox(width: 6),
+                        ChoiceChip(
+                          label: const Text('E', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                          selected: !_arabicGroup,
+                          selectedColor: const Color(0xFF56CCF2),
+                          backgroundColor: Colors.white10,
+                          labelStyle: TextStyle(color: !_arabicGroup ? Colors.black : Colors.white),
+                          onSelected: (_) {
+                            if (_arabicGroup) {
+                              setState(() {
+                                _arabicGroup = false;
+                                if (_textCtrl.text.trim() == 'طارق') _textCtrl.text = 'Tarik';
+                              });
+                              _generate();
+                            }
+                          },
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [1, 2, 3, 4, 5].map((numIdx) {
+                              final bool sel = _fontNumber == numIdx;
+                              final String code = '${_arabicGroup ? 'A' : 'E'}$numIdx';
+                              final Color activeCol = _arabicGroup ? const Color(0xFFD4AF37) : const Color(0xFF56CCF2);
+                              return Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                                  child: InkWell(
+                                    onTap: () {
+                                      if (_fontNumber != numIdx) {
+                                        setState(() => _fontNumber = numIdx);
+                                        _generate();
+                                      }
+                                    },
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(vertical: 8),
+                                      decoration: BoxDecoration(
+                                        color: sel ? activeCol : Colors.white10,
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(color: sel ? activeCol : Colors.white12),
+                                      ),
+                                      child: Text(
+                                        code,
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          color: sel ? Colors.black : Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13,
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ],
-                              ),
-                              selected: sel,
-                              selectedColor: const Color(0xFFD4AF37),
-                              backgroundColor: Colors.white10,
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                              onSelected: (_) {
-                                setState(() {
-                                  _selectedProFont = f;
-                                  if (!f.rtl && _textCtrl.text.trim() == 'طارق') {
-                                    _textCtrl.text = 'Tarik';
-                                  } else if (f.rtl && _textCtrl.text.trim() == 'Tarik') {
-                                    _textCtrl.text = 'طارق';
-                                  }
-                                });
-                                _generate();
-                              },
-                            );
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+
+                    // جدول التكبير (العرض × الطول بالـ سم بالأرقام + قفل التناسب + شريط السحب)
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _widthCmCtrl,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                            decoration: InputDecoration(
+                              labelText: tr('العرض (سم)', 'Width (cm)'),
+                              labelStyle: const TextStyle(color: Colors.white60, fontSize: 11),
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                              filled: true,
+                              fillColor: const Color(0xFF0E131D),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                            ),
+                            onSubmitted: _applyWidthInput,
+                          ),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => setState(() => _lockAspect = !_lockAspect),
+                          icon: Icon(
+                            _lockAspect ? Icons.link : Icons.link_off,
+                            color: _lockAspect ? const Color(0xFFD4AF37) : Colors.white38,
+                            size: 20,
+                          ),
+                          tooltip: tr('قفل التناسب', 'Lock Ratio'),
+                        ),
+                        Expanded(
+                          child: TextField(
+                            controller: _heightCmCtrl,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                            decoration: InputDecoration(
+                              labelText: tr('الطول (سم)', 'Height (cm)'),
+                              labelStyle: const TextStyle(color: Colors.white60, fontSize: 11),
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                              filled: true,
+                              fillColor: const Color(0xFF0E131D),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                            ),
+                            onSubmitted: _applyHeightInput,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Slider(
+                      value: _widthCm.clamp(3.0, 30.0),
+                      min: 3.0,
+                      max: 30.0,
+                      divisions: 54,
+                      activeColor: const Color(0xFFD4AF37),
+                      onChanged: (v) {
+                        setState(() {
+                          _widthCm = v;
+                          _widthCmCtrl.text = v.toStringAsFixed(1);
+                          if (_lockAspect) _customHeightCm = null;
+                        });
+                      },
+                      onChangeEnd: (_) => _generate(),
+                    ),
+
+                    // فستون / تاتامي + الكثافة
+                    Row(
+                      children: [
+                        ChoiceChip(
+                          label: Text(tr('فستون', 'Satin'), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _isSatin ? Colors.black : Colors.white)),
+                          selected: _isSatin,
+                          selectedColor: const Color(0xFFD4AF37),
+                          backgroundColor: Colors.white10,
+                          visualDensity: VisualDensity.compact,
+                          onSelected: (_) {
+                            if (!_isSatin) {
+                              setState(() => _isSatin = true);
+                              _generate();
+                            }
                           },
                         ),
-                      ),
-                      const SizedBox(height: 8),
-
-                      // ارتفاع الحرف + الغرز + المقاس الكلي
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '${tr('ارتفاع الحرف', 'Height')}: ${_letterHeightCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? '  ($dimText)' : ''}',
-                            style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
-                          Text(
-                            '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
-                            style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                      Slider(
-                        value: _letterHeightCm,
-                        min: 0.8,
-                        max: 8.0,
-                        divisions: 72,
-                        activeColor: const Color(0xFFD4AF37),
-                        onChanged: (v) => setState(() => _letterHeightCm = v),
-                        onChangeEnd: (_) => _generate(),
-                      ),
-
-                      // كثافة الفستون
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '${tr('كثافة الفستون', 'Satin Density')}: ${_proDensityMm.toStringAsFixed(2)} ${tr('مم', 'mm')}',
-                            style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
-                          Text(
-                            _proDensityMm <= 0.38
-                                ? tr('كثيف', 'Dense')
-                                : (_proDensityMm >= 0.56 ? tr('خفيف', 'Light') : tr('قياسي', 'Standard')),
-                            style: const TextStyle(color: Colors.white70, fontSize: 11),
-                          ),
-                        ],
-                      ),
-                      Slider(
-                        value: _proDensityMm,
-                        min: 0.30,
-                        max: 0.80,
-                        divisions: 20,
-                        activeColor: const Color(0xFF56CCF2),
-                        onChanged: (v) => setState(() => _proDensityMm = v),
-                        onChangeEnd: (_) => _generate(),
-                      ),
-
-                      // تباعد الحروف
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '${tr('تباعد الحروف', 'Letter Spacing')}: ${_extraSpacingMm >= 0 ? '+' : ''}${_extraSpacingMm.toStringAsFixed(1)} ${tr('مم', 'mm')}',
-                            style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                      Slider(
-                        value: _extraSpacingMm,
-                        min: -1.5,
-                        max: 4.0,
-                        divisions: 22,
-                        activeColor: Colors.tealAccent,
-                        onChanged: (v) => setState(() => _extraSpacingMm = v),
-                        onChangeEnd: (_) => _generate(),
-                      ),
-
-                      // نوع التبطين (Underlay)
-                      Row(
-                        children: [
-                          Text('${tr('التبطين:', 'Underlay:')} ', style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Wrap(
-                              spacing: 6,
-                              children: [
-                                (0, tr('بدون', 'None')),
-                                (1, tr('درز وسط', 'Center')),
-                                (2, tr('حواف + وسط', 'Contour')),
-                              ].map((opt) {
-                                final sel = _underlayMode == opt.$1;
-                                return ChoiceChip(
-                                  label: Text(opt.$2, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: sel ? Colors.black : Colors.white)),
-                                  selected: sel,
-                                  selectedColor: const Color(0xFFD4AF37),
-                                  backgroundColor: Colors.white10,
-                                  visualDensity: VisualDensity.compact,
-                                  onSelected: (_) {
-                                    if (_underlayMode != opt.$1) {
-                                      setState(() => _underlayMode = opt.$1);
-                                      _generate();
-                                    }
-                                  },
-                                );
-                              }).toList(),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                    ] else ...[
-                      // شريط اختيار نوع الخط (خطوط عامة TTF)
-                      SizedBox(
-                        height: 36,
-                        child: ListView.separated(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: _fontOptions.length,
-                          separatorBuilder: (_, __) => const SizedBox(width: 6),
-                          itemBuilder: (_, idx) {
-                            final opt = _fontOptions[idx];
-                            final fam = opt['family'];
-                            final bool sel = _selectedFontFamily == fam;
-                            final label = isArabicNotifier.value ? (opt['ar'] ?? '') : (opt['en'] ?? '');
-                            return ChoiceChip(
-                              label: Text(
-                                label,
-                                style: TextStyle(
-                                  fontFamily: fam,
-                                  color: sel ? Colors.black : Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 13,
+                        const SizedBox(width: 6),
+                        ChoiceChip(
+                          label: Text(tr('تاتامي', 'Tatami'), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: !_isSatin ? Colors.black : Colors.white)),
+                          selected: !_isSatin,
+                          selectedColor: const Color(0xFFD4AF37),
+                          backgroundColor: Colors.white10,
+                          visualDensity: VisualDensity.compact,
+                          onSelected: (_) {
+                            if (_isSatin) {
+                              setState(() => _isSatin = false);
+                              _generate();
+                            }
+                          },
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Row(
+                            children: [
+                              Text(
+                                '${tr('الكثافة', 'Dens')}: ${_densityMm.toStringAsFixed(2)}',
+                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 11),
+                              ),
+                              Expanded(
+                                child: Slider(
+                                  value: _densityMm.clamp(0.30, 0.80),
+                                  min: 0.30,
+                                  max: 0.80,
+                                  divisions: 10,
+                                  activeColor: const Color(0xFF56CCF2),
+                                  onChanged: (v) => setState(() => _densityMm = v),
+                                  onChangeEnd: (_) => _generate(),
                                 ),
                               ),
-                              selected: sel,
-                              selectedColor: const Color(0xFF56CCF2),
-                              backgroundColor: Colors.white10,
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                              onSelected: (_) {
-                                setState(() => _selectedFontFamily = fam);
-                                _generate();
-                              },
-                            );
-                          },
+                            ],
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ChoiceChip(
-                              label: Center(child: Text(tr('فستون (Satin)', 'Satin'))),
-                              selected: _isSatin,
-                              selectedColor: const Color(0xFFD4AF37),
-                              labelStyle: TextStyle(
-                                color: _isSatin ? Colors.black : Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                              onSelected: (_) {
-                                if (!_isSatin) {
-                                  setState(() => _isSatin = true);
-                                  _generate();
-                                }
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: ChoiceChip(
-                              label: Center(child: Text(tr('تاتامي (Tatami)', 'Tatami'))),
-                              selected: !_isSatin,
-                              selectedColor: const Color(0xFFD4AF37),
-                              labelStyle: TextStyle(
-                                color: !_isSatin ? Colors.black : Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                              onSelected: (_) {
-                                if (_isSatin) {
-                                  setState(() => _isSatin = false);
-                                  _generate();
-                                }
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          IconButton(
-                            onPressed: () {
-                              setState(() => _isBold = !_isBold);
-                              _generate();
-                            },
-                            icon: Icon(Icons.format_bold, color: _isBold ? const Color(0xFFD4AF37) : Colors.white38),
-                            tooltip: tr('خط عريض', 'Bold'),
-                          ),
-                          IconButton(
-                            onPressed: () {
-                              setState(() => _isItalic = !_isItalic);
-                              _generate();
-                            },
-                            icon: Icon(Icons.format_italic, color: _isItalic ? const Color(0xFFD4AF37) : Colors.white38),
-                            tooltip: tr('خط مائل', 'Italic'),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '${tr('العرض', 'Width')}: ${_widthCm.toStringAsFixed(1)} ${tr('سم', 'cm')}${dimText != null ? ' ($dimText)' : ''}',
-                            style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
-                          Text(
-                            '${tr('الغرز', 'Stitches')}: ${_vec?.stitches ?? 0}',
-                            style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                      Slider(
-                        value: _widthCm,
-                        min: 4.0,
-                        max: 30.0,
-                        divisions: 26,
-                        activeColor: const Color(0xFFD4AF37),
-                        onChanged: (v) => setState(() => _widthCm = v),
-                        onChangeEnd: (_) => _generate(),
-                      ),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '${tr('كثافة الغرز (تخفيف / زيادة)', 'Stitch Density')}: ${_ttfDensityMm.toStringAsFixed(2)} ${tr('مم', 'mm')}',
-                            style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
-                          Text(
-                            _ttfDensityMm <= 0.40
-                                ? tr('كثيف', 'Dense')
-                                : (_ttfDensityMm >= 0.65 ? tr('خفيف', 'Light') : tr('متوسط', 'Normal')),
-                            style: const TextStyle(color: Colors.white70, fontSize: 11),
-                          ),
-                        ],
-                      ),
-                      Slider(
-                        value: _ttfDensityMm,
-                        min: 0.30,
-                        max: 0.90,
-                        divisions: 12,
-                        activeColor: const Color(0xFF56CCF2),
-                        onChanged: (v) => setState(() => _ttfDensityMm = v),
-                        onChangeEnd: (_) => _generate(),
-                      ),
-                    ],
+                      ],
+                    ),
 
                     // لون الخيط
                     Row(
@@ -3954,8 +4562,8 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                               },
                               child: Container(
                                 margin: const EdgeInsets.symmetric(horizontal: 4),
-                                width: 25,
-                                height: 25,
+                                width: 24,
+                                height: 24,
                                 decoration: BoxDecoration(
                                   color: Color(c),
                                   shape: BoxShape.circle,
@@ -4040,6 +4648,1255 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
       ),
     );
   }
+}
+
+enum _WilcomHandle {
+  none,
+  move,
+  topLeft,
+  topCenter,
+  topRight,
+  centerRight,
+  bottomRight,
+  bottomCenter,
+  bottomLeft,
+  centerLeft,
+  rotateKnob,
+}
+
+/// نافذة تحديد وتعديل العناصر الفردية مثل برنامج ويلكم (سحب مقابض الزوايا والحواف للتكبير، مقبض الدوران العلوي أو نقرتان للتدوير، سحب للتحريك، تكبير/تصغير/دوران بالأرقام، زوم بإصبعين، تحديد الكل، تكرار وحذف)
+class ObjectEditorScreen extends StatefulWidget {
+  final EmbDesignInfo? design;
+  final VectorDesignData? initialVector;
+  final String defaultBaseName;
+
+  const ObjectEditorScreen({
+    super.key,
+    this.design,
+    this.initialVector,
+    this.defaultBaseName = 'tarik_obj_edit',
+  });
+
+  @override
+  State<ObjectEditorScreen> createState() => _ObjectEditorScreenState();
+}
+
+class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
+  VectorDesignData? _original;
+  VectorDesignData? _composed;
+  List<DesignObject> _objects = const [];
+  List<DesignObjectTransform> _transforms = [];
+  final List<List<DesignObjectTransform>> _undoStack = [];
+
+  int? _selectedTfIndex;
+  bool _selectAllMode = false;
+  bool _rotateHandlesMode = false; // مثل ويلكم: نقرة ثانية على العنصر تبدّل بين مقابض التحجيم ومقابض الدوران
+  bool _loading = true;
+  bool _saving = false;
+  bool _lockAspect = true;
+  Size _canvasSize = Size.zero;
+
+  // كاميرا اللوحة (تكبير وتقريب بإصبعين)
+  double _viewZoom = 1.0;
+  Offset _viewPan = Offset.zero;
+  double _startViewZoom = 1.0;
+  Offset _startViewPan = Offset.zero;
+  Offset _startFocal = Offset.zero;
+  bool _isCameraGesture = false;
+
+  // حالة السحب التفاعلي المباشر للمقابض
+  _WilcomHandle _activeHandle = _WilcomHandle.none;
+  List<DesignObjectTransform>? _dragStartTransforms;
+  Offset _dragStartDesign = Offset.zero;
+  Offset _dragGroupCenter = Offset.zero;
+  String? _liveHudText;
+
+  // مربعات الإدخال الرقمية (عرض × طول بالسم + نسبة % + زاوية °)
+  final TextEditingController _objWCtrl = TextEditingController();
+  final TextEditingController _objHCtrl = TextEditingController();
+  final TextEditingController _objPctCtrl = TextEditingController(text: '100');
+  final TextEditingController _objRotCtrl = TextEditingController(text: '0');
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _objWCtrl.dispose();
+    _objHCtrl.dispose();
+    _objPctCtrl.dispose();
+    _objRotCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final v = widget.initialVector ?? (widget.design != null ? await VectorDesignLoader.load(widget.design!.filePath) : null);
+    if (!mounted) return;
+    if (v != null && v.stX.length >= 2) {
+      final objs = DesignObjectEditor.segment(v);
+      final tfs = List.generate(objs.length, (i) => DesignObjectTransform(sourceObjectId: i));
+      setState(() {
+        _original = v;
+        _objects = objs;
+        _transforms = tfs;
+        _composed = v;
+        _selectedTfIndex = tfs.isNotEmpty ? 0 : null;
+        _selectAllMode = false;
+        _loading = false;
+      });
+      _syncNumericFields();
+    } else {
+      setState(() => _loading = false);
+    }
+  }
+
+  List<int> get _targetIndices {
+    if (_selectAllMode) {
+      final res = <int>[];
+      for (int i = 0; i < _transforms.length; i++) {
+        if (!_transforms[i].deleted) res.add(i);
+      }
+      return res;
+    }
+    if (_selectedTfIndex != null && _selectedTfIndex! < _transforms.length && !_transforms[_selectedTfIndex!].deleted) {
+      return [_selectedTfIndex!];
+    }
+    return const [];
+  }
+
+  (double, double, double, double)? _selectionBoundsDesign([List<DesignObjectTransform>? tfsOverride]) {
+    final tfs = tfsOverride ?? _transforms;
+    final indices = _targetIndices;
+    if (indices.isEmpty) return null;
+    double bMinX = double.infinity, bMaxX = -double.infinity;
+    double bMinY = double.infinity, bMaxY = -double.infinity;
+    for (final idx in indices) {
+      if (idx >= tfs.length || tfs[idx].deleted) continue;
+      final tf = tfs[idx];
+      final obj = _objects[tf.sourceObjectId];
+      final b = tf.transformedBounds(obj);
+      if (b.$1 < bMinX) bMinX = b.$1;
+      if (b.$2 > bMaxX) bMaxX = b.$2;
+      if (b.$3 < bMinY) bMinY = b.$3;
+      if (b.$4 > bMaxY) bMaxY = b.$4;
+    }
+    if (!bMinX.isFinite) return null;
+    return (bMinX, bMaxX, bMinY, bMaxY);
+  }
+
+  void _pushUndo() {
+    _undoStack.add(_transforms.map((t) => t.copyWith()).toList());
+    if (_undoStack.length > 30) _undoStack.removeAt(0);
+  }
+
+  void _undo() {
+    if (_undoStack.isEmpty) return;
+    setState(() {
+      _transforms = _undoStack.removeLast();
+      if (_selectedTfIndex != null && (_selectedTfIndex! >= _transforms.length || _transforms[_selectedTfIndex!].deleted)) {
+        _selectedTfIndex = null;
+      }
+    });
+    _rebuild();
+  }
+
+  void _syncNumericFields() {
+    final b = _selectionBoundsDesign();
+    if (b == null) return;
+    final double wCm = (b.$2 - b.$1) / 10.0;
+    final double hCm = (b.$4 - b.$3) / 10.0;
+    _objWCtrl.text = wCm.toStringAsFixed(1);
+    _objHCtrl.text = hCm.toStringAsFixed(1);
+    final indices = _targetIndices;
+    if (indices.length == 1) {
+      final tf = _transforms[indices.first];
+      _objPctCtrl.text = (tf.scaleX * 100.0).round().toString();
+      _objRotCtrl.text = tf.rotationDeg.round().toString();
+    } else if (indices.isNotEmpty) {
+      double avgS = 0.0;
+      for (final idx in indices) {
+        avgS += _transforms[idx].scaleX;
+      }
+      _objPctCtrl.text = ((avgS / indices.length) * 100.0).round().toString();
+      _objRotCtrl.text = _transforms[indices.first].rotationDeg.round().toString();
+    }
+  }
+
+  void _rebuild({bool syncNums = true}) {
+    if (_original == null) return;
+    final next = DesignObjectEditor.apply(_original!, _objects, _transforms);
+    setState(() => _composed = next);
+    if (syncNums) _syncNumericFields();
+  }
+
+  /// تحويل إحداثيات التصميم <-> إحداثيات الشاشة مع دعم الزوم والتحريك بإصبعين
+  (double, double, double) _canvasTransformParams(Size size) {
+    final data = _original!;
+    final double rawW = max(1.0, data.maxX - data.minX);
+    final double rawH = max(1.0, data.maxY - data.minY);
+    const double pad = 34.0;
+    final double baseScale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
+    final double scale = baseScale * _viewZoom;
+    final double baseOffX = (size.width - rawW * baseScale) * 0.5 - data.minX * baseScale;
+    final double baseOffY = (size.height - rawH * baseScale) * 0.5 - data.minY * baseScale;
+    final double cx = size.width * 0.5;
+    final double cy = size.height * 0.5;
+    final double offX = (baseOffX - cx) * _viewZoom + cx + _viewPan.dx;
+    final double offY = (baseOffY - cy) * _viewZoom + cy + _viewPan.dy;
+    return (scale, offX, offY);
+  }
+
+  Offset _screenToDesign(Offset pt) {
+    final p = _canvasTransformParams(_canvasSize);
+    return Offset((pt.dx - p.$2) / p.$1, (pt.dy - p.$3) / p.$1);
+  }
+
+  Rect? _selectionScreenRect() {
+    if (_original == null || _canvasSize == Size.zero) return null;
+    final b = _selectionBoundsDesign();
+    if (b == null) return null;
+    final p = _canvasTransformParams(_canvasSize);
+    return Rect.fromLTRB(
+      b.$1 * p.$1 + p.$2 - 6,
+      b.$3 * p.$1 + p.$3 - 6,
+      b.$2 * p.$1 + p.$2 + 6,
+      b.$4 * p.$1 + p.$3 + 6,
+    );
+  }
+
+  _WilcomHandle _hitTestHandles(Offset screenPos) {
+    final rect = _selectionScreenRect();
+    if (rect == null) return _WilcomHandle.none;
+    const double hitR = 24.0;
+
+    // 1) مقبض الدوران العلوي الدائري (دائماً متاح فوق الصندوق!)
+    final knobPos = Offset(rect.center.dx, rect.top - 28.0);
+    if ((screenPos - knobPos).distance <= hitR + 4.0) {
+      return _WilcomHandle.rotateKnob;
+    }
+
+    // 2) المقابض الـ 8 (4 زوايا + 4 أضلاع)
+    final handleMap = <(_WilcomHandle, Offset)>[
+      (_WilcomHandle.topLeft, rect.topLeft),
+      (_WilcomHandle.topRight, rect.topRight),
+      (_WilcomHandle.bottomLeft, rect.bottomLeft),
+      (_WilcomHandle.bottomRight, rect.bottomRight),
+      (_WilcomHandle.topCenter, rect.topCenter),
+      (_WilcomHandle.bottomCenter, rect.bottomCenter),
+      (_WilcomHandle.centerLeft, rect.centerLeft),
+      (_WilcomHandle.centerRight, rect.centerRight),
+    ];
+
+    _WilcomHandle bestH = _WilcomHandle.none;
+    double bestD = hitR;
+    for (final entry in handleMap) {
+      final d = (screenPos - entry.$2).distance;
+      if (d < bestD) {
+        bestD = d;
+        bestH = entry.$1;
+      }
+    }
+    if (bestH != _WilcomHandle.none) return bestH;
+
+    // 3) داخل الصندوق المحيط = تحريك العنصر
+    if (rect.inflate(8.0).contains(screenPos)) {
+      return _WilcomHandle.move;
+    }
+    return _WilcomHandle.none;
+  }
+
+  void _onCanvasTap(Offset localPos) {
+    if (_original == null || _canvasSize == Size.zero) return;
+    final designPt = _screenToDesign(localPos);
+    final p = _canvasTransformParams(_canvasSize);
+    final hit = DesignObjectEditor.hitTest(_objects, _transforms, designPt.dx, designPt.dy, padUnits: 24.0 / p.$1);
+
+    setState(() {
+      if (hit != null) {
+        if (!_selectAllMode && hit == _selectedTfIndex) {
+          // مثل برنامج ويلكم: النقر مرة ثانية على نفس العنصر المحدد يبدّل بين مقابض التحجيم ومقابض الدوران!
+          _rotateHandlesMode = !_rotateHandlesMode;
+        } else {
+          _selectAllMode = false;
+          _selectedTfIndex = hit;
+          _rotateHandlesMode = false;
+        }
+      } else {
+        _selectAllMode = false;
+        _selectedTfIndex = null;
+        _rotateHandlesMode = false;
+      }
+    });
+    _syncNumericFields();
+  }
+
+  void _onScaleStart(ScaleStartDetails details) {
+    if (_original == null || _canvasSize == Size.zero) return;
+    if (details.pointerCount >= 2) {
+      _isCameraGesture = true;
+      _activeHandle = _WilcomHandle.none;
+      _startViewZoom = _viewZoom;
+      _startViewPan = _viewPan;
+      _startFocal = details.localFocalPoint;
+      return;
+    }
+
+    _isCameraGesture = false;
+    final pos = details.localFocalPoint;
+    _WilcomHandle h = _hitTestHandles(pos);
+
+    // إذا لم يضغط على مقبض أو داخل الصندوق الحالي، نفحص إن كان لمس عنصراً آخر فنحدده ونحرّكه فوراً
+    if (h == _WilcomHandle.none) {
+      final designPt = _screenToDesign(pos);
+      final p = _canvasTransformParams(_canvasSize);
+      final hit = DesignObjectEditor.hitTest(_objects, _transforms, designPt.dx, designPt.dy, padUnits: 22.0 / p.$1);
+      if (hit != null) {
+        setState(() {
+          _selectAllMode = false;
+          _selectedTfIndex = hit;
+          _rotateHandlesMode = false;
+        });
+        h = _WilcomHandle.move;
+      } else {
+        // سحب على المساحة الفارغة = تحريك الكاميرا
+        _isCameraGesture = true;
+        _startViewZoom = _viewZoom;
+        _startViewPan = _viewPan;
+        _startFocal = pos;
+        return;
+      }
+    }
+
+    final b = _selectionBoundsDesign();
+    if (b == null) return;
+
+    _pushUndo();
+    _activeHandle = h;
+    _dragStartTransforms = _transforms.map((t) => t.copyWith()).toList();
+    _dragStartDesign = _screenToDesign(pos);
+    _dragGroupCenter = Offset((b.$1 + b.$2) * 0.5, (b.$3 + b.$4) * 0.5);
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails details) {
+    if (_original == null || _canvasSize == Size.zero) return;
+
+    // 1) تحريك أو تكبير الكاميرا بإصبعين (أو سحب الخلفية الفارغة)
+    if (_isCameraGesture || details.pointerCount >= 2) {
+      if (!_isCameraGesture) {
+        // انتقل من إصبع واحد إلى إصبعين منتصف الحركة -> نلغي سحب العنصر ونبدأ الزوم
+        if (_dragStartTransforms != null) {
+          _transforms = _dragStartTransforms!.map((t) => t.copyWith()).toList();
+          _dragStartTransforms = null;
+          _activeHandle = _WilcomHandle.none;
+          _liveHudText = null;
+        }
+        _isCameraGesture = true;
+        _startViewZoom = _viewZoom;
+        _startViewPan = _viewPan;
+        _startFocal = details.localFocalPoint;
+      }
+      setState(() {
+        _viewZoom = (_startViewZoom * details.scale).clamp(0.5, 8.0);
+        _viewPan = _startViewPan + (details.localFocalPoint - _startFocal);
+      });
+      return;
+    }
+
+    if (_activeHandle == _WilcomHandle.none || _dragStartTransforms == null) return;
+    final indices = _targetIndices;
+    if (indices.isEmpty) return;
+
+    final curDesign = _screenToDesign(details.localFocalPoint);
+    final startTfs = _dragStartTransforms!;
+    final gCx = _dragGroupCenter.dx;
+    final gCy = _dragGroupCenter.dy;
+
+    final bool isCorner = _activeHandle == _WilcomHandle.topLeft ||
+        _activeHandle == _WilcomHandle.topRight ||
+        _activeHandle == _WilcomHandle.bottomLeft ||
+        _activeHandle == _WilcomHandle.bottomRight;
+
+    // 2) دوران مباشر (من مقبض الدوران العلوي أو من الزوايا عند تفعيل وضع الدوران مثل ويلكم)
+    if (_activeHandle == _WilcomHandle.rotateKnob || (_rotateHandlesMode && isCorner)) {
+      final double ang0 = atan2(_dragStartDesign.dy - gCy, _dragStartDesign.dx - gCx);
+      final double ang1 = atan2(curDesign.dy - gCy, curDesign.dx - gCx);
+      double deltaDeg = (ang1 - ang0) * 180.0 / pi;
+
+      // مغناطيس ناعم عند الزوايا القائمة (0 / 90 / 180 / 270)
+      if (indices.length == 1) {
+        final double rawTarget = ((startTfs[indices.first].rotationDeg + deltaDeg) % 360.0 + 360.0) % 360.0;
+        for (final snap in [0.0, 90.0, 180.0, 270.0, 360.0]) {
+          if ((rawTarget - snap).abs() < 2.5) {
+            deltaDeg += (snap - rawTarget);
+            break;
+          }
+        }
+      }
+
+      final double rad = deltaDeg * pi / 180.0;
+      final double ca = cos(rad), sa = sin(rad);
+
+      for (final idx in indices) {
+        final tf0 = startTfs[idx];
+        final obj = _objects[tf0.sourceObjectId];
+        final double rx0 = (obj.centerX + tf0.dx) - gCx;
+        final double ry0 = (obj.centerY + tf0.dy) - gCy;
+        final double newCx = gCx + rx0 * ca - ry0 * sa;
+        final double newCy = gCy + rx0 * sa + ry0 * ca;
+        _transforms[idx].dx = newCx - obj.centerX;
+        _transforms[idx].dy = newCy - obj.centerY;
+        _transforms[idx].rotationDeg = ((tf0.rotationDeg + deltaDeg) % 360.0 + 360.0) % 360.0;
+      }
+
+      final displayAngle = _transforms[indices.first].rotationDeg.round();
+      _liveHudText = '${tr('دوران', 'Rotate')}: $displayAngle°';
+      _rebuild(syncNums: true);
+      return;
+    }
+
+    // 3) تحريك العنصر بالسحب المباشر
+    if (_activeHandle == _WilcomHandle.move) {
+      final double ddx = curDesign.dx - _dragStartDesign.dx;
+      final double ddy = curDesign.dy - _dragStartDesign.dy;
+      for (final idx in indices) {
+        _transforms[idx].dx = startTfs[idx].dx + ddx;
+        _transforms[idx].dy = startTfs[idx].dy + ddy;
+      }
+      _liveHudText = 'X: ${(ddx / 10.0).toStringAsFixed(1)}  Y: ${(ddy / 10.0).toStringAsFixed(1)} ${tr('سم', 'cm')}';
+      _rebuild(syncNums: false);
+      return;
+    }
+
+    // 4) تكبير وتصغير مباشر عبر سحب الزوايا أو الحواف (مثل ويلكم)
+    double fx = 1.0;
+    double fy = 1.0;
+    if (isCorner) {
+      if (_lockAspect) {
+        final double r0 = max(10.0, (_dragStartDesign - _dragGroupCenter).distance);
+        final double r1 = (curDesign - _dragGroupCenter).distance;
+        final double f = (r1 / r0).clamp(0.15, 5.0);
+        fx = f;
+        fy = f;
+      } else {
+        final double dx0 = max(8.0, (_dragStartDesign.dx - gCx).abs());
+        final double dy0 = max(8.0, (_dragStartDesign.dy - gCy).abs());
+        fx = ((curDesign.dx - gCx).abs() / dx0).clamp(0.15, 5.0);
+        fy = ((curDesign.dy - gCy).abs() / dy0).clamp(0.15, 5.0);
+      }
+    } else if (_activeHandle == _WilcomHandle.centerLeft || _activeHandle == _WilcomHandle.centerRight) {
+      final double dx0 = max(8.0, (_dragStartDesign.dx - gCx).abs());
+      fx = ((curDesign.dx - gCx).abs() / dx0).clamp(0.15, 5.0);
+      fy = 1.0;
+    } else if (_activeHandle == _WilcomHandle.topCenter || _activeHandle == _WilcomHandle.bottomCenter) {
+      final double dy0 = max(8.0, (_dragStartDesign.dy - gCy).abs());
+      fx = 1.0;
+      fy = ((curDesign.dy - gCy).abs() / dy0).clamp(0.15, 5.0);
+    }
+
+    for (final idx in indices) {
+      final tf0 = startTfs[idx];
+      final obj = _objects[tf0.sourceObjectId];
+      final double rx0 = (obj.centerX + tf0.dx) - gCx;
+      final double ry0 = (obj.centerY + tf0.dy) - gCy;
+      _transforms[idx].dx = (gCx + rx0 * fx) - obj.centerX;
+      _transforms[idx].dy = (gCy + ry0 * fy) - obj.centerY;
+      _transforms[idx].scaleX = (tf0.scaleX * fx).clamp(0.15, 5.0);
+      _transforms[idx].scaleY = (tf0.scaleY * fy).clamp(0.15, 5.0);
+    }
+
+    final nb = _selectionBoundsDesign();
+    if (nb != null) {
+      final wCm = ((nb.$2 - nb.$1) / 10.0).toStringAsFixed(1);
+      final hCm = ((nb.$4 - nb.$3) / 10.0).toStringAsFixed(1);
+      _liveHudText = '$wCm × $hCm ${tr('سم', 'cm')}';
+    }
+    _rebuild(syncNums: true);
+  }
+
+  void _onScaleEnd(ScaleEndDetails details) {
+    if (_activeHandle != _WilcomHandle.none || _liveHudText != null) {
+      setState(() {
+        _activeHandle = _WilcomHandle.none;
+        _dragStartTransforms = null;
+        _liveHudText = null;
+      });
+      _syncNumericFields();
+    }
+    _isCameraGesture = false;
+  }
+
+  void _selectRelative(int delta) {
+    final activeIndices = <int>[];
+    for (int i = 0; i < _transforms.length; i++) {
+      if (!_transforms[i].deleted) activeIndices.add(i);
+    }
+    if (activeIndices.isEmpty) return;
+    int pos = _selectedTfIndex != null ? activeIndices.indexOf(_selectedTfIndex!) : -1;
+    pos = (pos + delta) % activeIndices.length;
+    if (pos < 0) pos += activeIndices.length;
+    setState(() {
+      _selectAllMode = false;
+      _selectedTfIndex = activeIndices[pos];
+      _rotateHandlesMode = false;
+    });
+    _syncNumericFields();
+  }
+
+  void _scaleSelectionByFactors(double fx, double fy) {
+    final indices = _targetIndices;
+    final b = _selectionBoundsDesign();
+    if (indices.isEmpty || b == null) return;
+    _pushUndo();
+    final double gCx = (b.$1 + b.$2) * 0.5;
+    final double gCy = (b.$3 + b.$4) * 0.5;
+    for (final idx in indices) {
+      final tf = _transforms[idx];
+      final obj = _objects[tf.sourceObjectId];
+      final double rx = (obj.centerX + tf.dx) - gCx;
+      final double ry = (obj.centerY + tf.dy) - gCy;
+      tf.dx = (gCx + rx * fx) - obj.centerX;
+      tf.dy = (gCy + ry * fy) - obj.centerY;
+      tf.scaleX = (tf.scaleX * fx).clamp(0.15, 5.0);
+      tf.scaleY = (tf.scaleY * fy).clamp(0.15, 5.0);
+    }
+    _rebuild(syncNums: true);
+  }
+
+  void _applyNumericWidth(String txt) {
+    final b = _selectionBoundsDesign();
+    final double? targetW = double.tryParse(txt.trim().replaceAll(',', '.'));
+    if (b == null || targetW == null || targetW < 0.2 || targetW > 120.0) return;
+    final double curW = (b.$2 - b.$1) / 10.0;
+    if (curW <= 0.05) return;
+    final double fx = (targetW / curW).clamp(0.15, 5.0);
+    _scaleSelectionByFactors(fx, _lockAspect ? fx : 1.0);
+  }
+
+  void _applyNumericHeight(String txt) {
+    final b = _selectionBoundsDesign();
+    final double? targetH = double.tryParse(txt.trim().replaceAll(',', '.'));
+    if (b == null || targetH == null || targetH < 0.2 || targetH > 120.0) return;
+    final double curH = (b.$4 - b.$3) / 10.0;
+    if (curH <= 0.05) return;
+    final double fy = (targetH / curH).clamp(0.15, 5.0);
+    _scaleSelectionByFactors(_lockAspect ? fy : 1.0, fy);
+  }
+
+  void _applyNumericPercent(String txt) {
+    final indices = _targetIndices;
+    final double? pct = double.tryParse(txt.trim().replaceAll(',', '.').replaceAll('%', ''));
+    if (indices.isEmpty || pct == null || pct < 15.0 || pct > 400.0) return;
+    final double targetScale = (pct / 100.0).clamp(0.15, 4.0);
+    final double curScale = _transforms[indices.first].scaleX;
+    if (curScale <= 0.01) return;
+    final double f = (targetScale / curScale).clamp(0.15, 5.0);
+    _scaleSelectionByFactors(f, f);
+  }
+
+  void _applyNumericRotation(String txt) {
+    final indices = _targetIndices;
+    final b = _selectionBoundsDesign();
+    final double? targetDeg = double.tryParse(txt.trim().replaceAll(',', '.').replaceAll('°', ''));
+    if (indices.isEmpty || b == null || targetDeg == null) return;
+    final double curDeg = _transforms[indices.first].rotationDeg;
+    final double deltaDeg = targetDeg - curDeg;
+    if (deltaDeg.abs() < 0.05) return;
+    _pushUndo();
+    final double gCx = (b.$1 + b.$2) * 0.5;
+    final double gCy = (b.$3 + b.$4) * 0.5;
+    final double rad = deltaDeg * pi / 180.0;
+    final double ca = cos(rad), sa = sin(rad);
+    for (final idx in indices) {
+      final tf = _transforms[idx];
+      final obj = _objects[tf.sourceObjectId];
+      final double rx = (obj.centerX + tf.dx) - gCx;
+      final double ry = (obj.centerY + tf.dy) - gCy;
+      tf.dx = (gCx + rx * ca - ry * sa) - obj.centerX;
+      tf.dy = (gCy + rx * sa + ry * ca) - obj.centerY;
+      tf.rotationDeg = ((tf.rotationDeg + deltaDeg) % 360.0 + 360.0) % 360.0;
+    }
+    _rebuild(syncNums: true);
+  }
+
+  void _applyAllNumericInputs() {
+    FocusScope.of(context).unfocus();
+    final b = _selectionBoundsDesign();
+    if (b == null) return;
+    final curW = ((b.$2 - b.$1) / 10.0).toStringAsFixed(1);
+    final curH = ((b.$4 - b.$3) / 10.0).toStringAsFixed(1);
+    final indices = _targetIndices;
+    final curPct = indices.isNotEmpty ? (_transforms[indices.first].scaleX * 100.0).round().toString() : '100';
+    final curRot = indices.isNotEmpty ? _transforms[indices.first].rotationDeg.round().toString() : '0';
+
+    if (_objWCtrl.text.trim() != curW) {
+      _applyNumericWidth(_objWCtrl.text);
+    } else if (_objHCtrl.text.trim() != curH) {
+      _applyNumericHeight(_objHCtrl.text);
+    } else if (_objPctCtrl.text.trim() != curPct) {
+      _applyNumericPercent(_objPctCtrl.text);
+    }
+    if (_objRotCtrl.text.trim() != curRot) {
+      _applyNumericRotation(_objRotCtrl.text);
+    }
+  }
+
+  Future<void> _saveDesign() async {
+    if (_composed == null || _saving) return;
+    setState(() => _saving = true);
+    try {
+      String targetExt = 'DST';
+      String baseName = widget.defaultBaseName;
+      String outDir = '/storage/emulated/0/Download';
+
+      if (widget.design != null) {
+        final origExt = widget.design!.filePath.split('.').last.toUpperCase();
+        if (UniversalExporter.supportedFormats.any((f) => f['ext'] == origExt)) {
+          targetExt = origExt;
+        }
+        baseName = '${widget.design!.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_wilcom';
+        outDir = File(widget.design!.filePath).parent.path;
+      } else {
+        baseName = '${widget.defaultBaseName}_${DateTime.now().millisecondsSinceEpoch}';
+      }
+
+      String? res = await VectorDesignEditor.exportVectorToFile(_composed!, '$outDir/$baseName.$targetExt', targetExt, baseName: baseName);
+      res ??= await VectorDesignEditor.exportVectorToFile(_composed!, '/storage/emulated/0/Download/$baseName.$targetExt', targetExt, baseName: baseName);
+
+      if (res != null && await File(res).exists()) {
+        await DesignCacheManager.getOrParse(res);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${tr('تم حفظ التصميم المعدّل:', 'Saved modified design:')}\n$res'),
+              backgroundColor: const Color(0xFF2E7D32),
+            ),
+          );
+          Navigator.of(context).pop(res);
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final activeCount = _transforms.where((t) => !t.deleted).length;
+    final indices = _targetIndices;
+    final bool hasSelection = indices.isNotEmpty;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E131D),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E131D),
+        title: Text(
+          tr('تعديل العناصر (ويلكم)', 'Wilcom Object Editor'),
+          style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 15, fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          IconButton(
+            onPressed: () => setState(() {
+              _viewZoom = 1.0;
+              _viewPan = Offset.zero;
+            }),
+            icon: const Icon(Icons.fit_screen, color: Colors.white70, size: 20),
+            tooltip: tr('إعادة ضبط العرض', 'Fit View'),
+          ),
+          IconButton(
+            onPressed: _undoStack.isEmpty ? null : _undo,
+            icon: const Icon(Icons.undo, color: Colors.white, size: 21),
+            tooltip: tr('تراجع', 'Undo'),
+          ),
+          TextButton.icon(
+            onPressed: _saving || _composed == null ? null : _saveDesign,
+            icon: _saving
+                ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)))
+                : const Icon(Icons.save, color: Color(0xFFD4AF37), size: 19),
+            label: Text(tr('حفظ', 'Save'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
+          : (_original == null || _objects.isEmpty)
+              ? Center(child: Text(tr('لا توجد عناصر قابلة للتحديد', 'No selectable elements'), style: const TextStyle(color: Colors.white70)))
+              : Column(
+                  children: [
+                    // شريط اختيار العنصر + تبديل (عنصر / الكل) + تبديل مقابض (تحجيم / دوران)
+                    Container(
+                      margin: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF18202E),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Row(
+                        children: [
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                            padding: EdgeInsets.zero,
+                            onPressed: () => _selectRelative(-1),
+                            icon: const Icon(Icons.chevron_left, color: Color(0xFFD4AF37)),
+                          ),
+                          Expanded(
+                            child: Text(
+                              _selectAllMode
+                                  ? '${tr('الكل محدد', 'All Selected')} ($activeCount)'
+                                  : (hasSelection
+                                      ? '${tr('عنصر', 'Obj')} #${_selectedTfIndex! + 1}/$activeCount'
+                                      : tr('اضغط على عنصر', 'Tap element')),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                            padding: EdgeInsets.zero,
+                            onPressed: () => _selectRelative(1),
+                            icon: const Icon(Icons.chevron_right, color: Color(0xFFD4AF37)),
+                          ),
+                          const SizedBox(width: 4),
+                          ChoiceChip(
+                            label: Text(
+                              tr('الكل', 'All'),
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _selectAllMode ? Colors.black : Colors.white),
+                            ),
+                            selected: _selectAllMode,
+                            selectedColor: const Color(0xFFD4AF37),
+                            backgroundColor: Colors.white10,
+                            visualDensity: VisualDensity.compact,
+                            onSelected: (v) {
+                              setState(() {
+                                _selectAllMode = v;
+                                if (!v && _selectedTfIndex == null && _transforms.isNotEmpty) {
+                                  _selectedTfIndex = 0;
+                                }
+                              });
+                              _syncNumericFields();
+                            },
+                          ),
+                          const SizedBox(width: 4),
+                          ChoiceChip(
+                            label: Icon(
+                              _rotateHandlesMode ? Icons.rotate_right : Icons.open_with,
+                              size: 16,
+                              color: _rotateHandlesMode ? Colors.black : const Color(0xFF56CCF2),
+                            ),
+                            selected: _rotateHandlesMode,
+                            selectedColor: const Color(0xFF56CCF2),
+                            backgroundColor: Colors.white10,
+                            visualDensity: VisualDensity.compact,
+                            onSelected: (v) => setState(() => _rotateHandlesMode = v),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // شاشة العمل التفاعلية بمقابض ويلكم المباشرة (تحريك + تكبير بالزوايا والحواف + مقبض الدوران العلوي + زوم بإصبعين)
+                    Expanded(
+                      child: Container(
+                        margin: const EdgeInsets.fromLTRB(12, 2, 12, 6),
+                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+                        clipBehavior: Clip.antiAlias,
+                        child: LayoutBuilder(
+                          builder: (ctx, constraints) {
+                            _canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
+                            return Stack(
+                              children: [
+                                GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTapUp: (d) => _onCanvasTap(d.localPosition),
+                                  onScaleStart: _onScaleStart,
+                                  onScaleUpdate: _onScaleUpdate,
+                                  onScaleEnd: _onScaleEnd,
+                                  child: CustomPaint(
+                                    painter: _ObjectEditorCanvasPainter(
+                                      original: _original!,
+                                      objects: _objects,
+                                      transforms: _transforms,
+                                      selectedIndices: indices.toSet(),
+                                      selectionBounds: _selectionBoundsDesign(),
+                                      rotateHandlesMode: _rotateHandlesMode,
+                                      activeHandle: _activeHandle,
+                                      viewZoom: _viewZoom,
+                                      viewPan: _viewPan,
+                                    ),
+                                    size: Size.infinite,
+                                  ),
+                                ),
+                                if (_liveHudText != null)
+                                  Positioned(
+                                    top: 10,
+                                    left: 0,
+                                    right: 0,
+                                    child: Center(
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF0E131D).withOpacity(0.90),
+                                          borderRadius: BorderRadius.circular(14),
+                                          border: Border.all(color: const Color(0xFFD4AF37)),
+                                        ),
+                                        child: Text(
+                                          _liveHudText!,
+                                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 13),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                Positioned(
+                                  bottom: 6,
+                                  left: 8,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF0E131D).withOpacity(0.75),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Text(
+                                      tr('اسحب الزوايا للتكبير • الدائرة الخضراء للدوران • إصبعين للتقريب', 'Drag corners: Resize • Green knob: Rotate • 2 fingers: Zoom'),
+                                      style: const TextStyle(color: Colors.white, fontSize: 10),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+
+                    // لوحة الأرقام والأدوات السريعة (ويلكم)
+                    if (hasSelection)
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.40),
+                        child: Container(
+                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF18202E),
+                            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                          ),
+                          child: SingleChildScrollView(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // الصف 1: جدول الأرقام (عرض سم × طول سم + قفل التناسب + زر تطبيق ✓)
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: TextField(
+                                        controller: _objWCtrl,
+                                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                                        decoration: InputDecoration(
+                                          labelText: tr('العرض (سم)', 'W (cm)'),
+                                          labelStyle: const TextStyle(color: Colors.white60, fontSize: 10),
+                                          isDense: true,
+                                          contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+                                          filled: true,
+                                          fillColor: const Color(0xFF0E131D),
+                                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                        ),
+                                        onSubmitted: _applyNumericWidth,
+                                      ),
+                                    ),
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                      padding: EdgeInsets.zero,
+                                      onPressed: () => setState(() => _lockAspect = !_lockAspect),
+                                      icon: Icon(
+                                        _lockAspect ? Icons.link : Icons.link_off,
+                                        color: _lockAspect ? const Color(0xFFD4AF37) : Colors.white38,
+                                        size: 19,
+                                      ),
+                                      tooltip: tr('قفل التناسب', 'Lock Aspect'),
+                                    ),
+                                    Expanded(
+                                      child: TextField(
+                                        controller: _objHCtrl,
+                                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                                        decoration: InputDecoration(
+                                          labelText: tr('الطول (سم)', 'H (cm)'),
+                                          labelStyle: const TextStyle(color: Colors.white60, fontSize: 10),
+                                          isDense: true,
+                                          contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+                                          filled: true,
+                                          fillColor: const Color(0xFF0E131D),
+                                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                        ),
+                                        onSubmitted: _applyNumericHeight,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    SizedBox(
+                                      width: 58,
+                                      child: TextField(
+                                        controller: _objPctCtrl,
+                                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 13),
+                                        decoration: InputDecoration(
+                                          labelText: '%',
+                                          labelStyle: const TextStyle(color: Colors.greenAccent, fontSize: 10),
+                                          isDense: true,
+                                          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 7),
+                                          filled: true,
+                                          fillColor: const Color(0xFF0E131D),
+                                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                        ),
+                                        onSubmitted: _applyNumericPercent,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    SizedBox(
+                                      width: 54,
+                                      child: TextField(
+                                        controller: _objRotCtrl,
+                                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 13),
+                                        decoration: InputDecoration(
+                                          labelText: '°',
+                                          labelStyle: const TextStyle(color: Color(0xFF56CCF2), fontSize: 11),
+                                          isDense: true,
+                                          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 7),
+                                          filled: true,
+                                          fillColor: const Color(0xFF0E131D),
+                                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                                        ),
+                                        onSubmitted: _applyNumericRotation,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    ElevatedButton(
+                                      onPressed: _applyAllNumericInputs,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(0xFFD4AF37),
+                                        foregroundColor: Colors.black,
+                                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 9),
+                                        minimumSize: Size.zero,
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                      ),
+                                      child: const Icon(Icons.check, size: 17),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+
+                                // الصف 2: أزرار تكبير/تصغير سريعة + دوران +90° + قلب + تكرار + حذف
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  alignment: WrapAlignment.center,
+                                  children: [
+                                    OutlinedButton(
+                                      onPressed: () => _scaleSelectionByFactors(0.90, 0.90),
+                                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                      child: const Text('-10%', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+                                    ),
+                                    OutlinedButton(
+                                      onPressed: () => _scaleSelectionByFactors(1.10, 1.10),
+                                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                      child: const Text('+10%', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 11)),
+                                    ),
+                                    OutlinedButton(
+                                      onPressed: () {
+                                        final cur = _transforms[indices.first].rotationDeg;
+                                        _applyNumericRotation(((cur + 90.0) % 360.0).toStringAsFixed(0));
+                                      },
+                                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                      child: const Text('+90°', style: TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 11)),
+                                    ),
+                                    OutlinedButton.icon(
+                                      onPressed: () {
+                                        _pushUndo();
+                                        for (final idx in indices) {
+                                          _transforms[idx].flipH = !_transforms[idx].flipH;
+                                        }
+                                        _rebuild();
+                                      },
+                                      icon: const Icon(Icons.flip, size: 15, color: Color(0xFFD4AF37)),
+                                      label: Text(tr('أفقي', 'H'), style: const TextStyle(color: Colors.white, fontSize: 11)),
+                                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                    ),
+                                    OutlinedButton.icon(
+                                      onPressed: () {
+                                        _pushUndo();
+                                        for (final idx in indices) {
+                                          _transforms[idx].flipV = !_transforms[idx].flipV;
+                                        }
+                                        _rebuild();
+                                      },
+                                      icon: const Icon(Icons.swap_vert, size: 15, color: Color(0xFFD4AF37)),
+                                      label: Text(tr('عمودي', 'V'), style: const TextStyle(color: Colors.white, fontSize: 11)),
+                                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                    ),
+                                    if (!_selectAllMode && _selectedTfIndex != null) ...[
+                                      OutlinedButton.icon(
+                                        onPressed: () {
+                                          _pushUndo();
+                                          final selTf = _transforms[_selectedTfIndex!];
+                                          final dup = selTf.copyWith(dx: selTf.dx + 45.0, dy: selTf.dy + 45.0);
+                                          _transforms.add(dup);
+                                          _selectedTfIndex = _transforms.length - 1;
+                                          _rebuild();
+                                        },
+                                        icon: const Icon(Icons.copy, size: 15, color: Colors.greenAccent),
+                                        label: Text(tr('تكرار', 'Dup'), style: const TextStyle(color: Colors.greenAccent, fontSize: 11)),
+                                        style: OutlinedButton.styleFrom(side: BorderSide(color: Colors.greenAccent.withOpacity(0.5)), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                      ),
+                                      OutlinedButton.icon(
+                                        onPressed: activeCount > 1
+                                            ? () {
+                                                _pushUndo();
+                                                _transforms[_selectedTfIndex!].deleted = true;
+                                                _selectedTfIndex = null;
+                                                _rebuild(syncNums: false);
+                                              }
+                                            : null,
+                                        icon: const Icon(Icons.delete_outline, size: 15, color: Colors.redAccent),
+                                        label: Text(tr('حذف', 'Del'), style: const TextStyle(color: Colors.redAccent, fontSize: 11)),
+                                        style: OutlinedButton.styleFrom(side: BorderSide(color: Colors.redAccent.withOpacity(0.5)), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+    );
+  }
+}
+
+class _ObjectEditorCanvasPainter extends CustomPainter {
+  final VectorDesignData original;
+  final List<DesignObject> objects;
+  final List<DesignObjectTransform> transforms;
+  final Set<int> selectedIndices;
+  final (double, double, double, double)? selectionBounds;
+  final bool rotateHandlesMode;
+  final _WilcomHandle activeHandle;
+  final double viewZoom;
+  final Offset viewPan;
+
+  _ObjectEditorCanvasPainter({
+    required this.original,
+    required this.objects,
+    required this.transforms,
+    required this.selectedIndices,
+    required this.selectionBounds,
+    required this.rotateHandlesMode,
+    required this.activeHandle,
+    required this.viewZoom,
+    required this.viewPan,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (!original.hasBounds || original.stX.length < 2) return;
+    final double rawW = max(1.0, original.maxX - original.minX);
+    final double rawH = max(1.0, original.maxY - original.minY);
+    const double pad = 34.0;
+    final double baseScale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
+    final double scale = baseScale * viewZoom;
+    final double baseOffX = (size.width - rawW * baseScale) * 0.5 - original.minX * baseScale;
+    final double baseOffY = (size.height - rawH * baseScale) * 0.5 - original.minY * baseScale;
+    final double scx = size.width * 0.5;
+    final double scy = size.height * 0.5;
+    final double offX = (baseOffX - scx) * viewZoom + scx + viewPan.dx;
+    final double offY = (baseOffY - scy) * viewZoom + scy + viewPan.dy;
+
+    final int palLen = original.paletteArgb.length;
+    final bool hasAnySel = selectedIndices.isNotEmpty;
+
+    for (int tIdx = 0; tIdx < transforms.length; tIdx++) {
+      final tf = transforms[tIdx];
+      if (tf.deleted) continue;
+      final obj = objects[tf.sourceObjectId];
+      final bool isSel = selectedIndices.contains(tIdx);
+
+      final double cx = obj.centerX;
+      final double cy = obj.centerY;
+      final double rad = tf.rotationDeg * pi / 180.0;
+      final double ca = cos(rad);
+      final double sa = sin(rad);
+
+      final path = Path();
+      bool hasMove = false;
+      for (final rng in obj.ranges) {
+        final int s = rng.$1.clamp(0, original.stX.length);
+        final int e = rng.$2.clamp(s, original.stX.length);
+        for (int i = s; i < e; i++) {
+          final double lx = (original.stX[i] - cx) * tf.scaleX * (tf.flipH ? -1.0 : 1.0);
+          final double ly = (original.stY[i] - cy) * tf.scaleY * (tf.flipV ? -1.0 : 1.0);
+          final double rx = lx * ca - ly * sa + cx + tf.dx;
+          final double ry = lx * sa + ly * ca + cy + tf.dy;
+          final double sx = rx * scale + offX;
+          final double sy = ry * scale + offY;
+          if (i == s || original.stMove[i] != 0 || !hasMove) {
+            path.moveTo(sx, sy);
+            hasMove = true;
+          } else {
+            path.lineTo(sx, sy);
+          }
+        }
+      }
+
+      final Color col = Color(original.paletteArgb[obj.colorIndex % palLen]);
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = isSel ? col : col.withOpacity(hasAnySel ? 0.38 : 1.0)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = isSel ? 0.80 : 0.55
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true,
+      );
+    }
+
+    // إطار تحديد تفاعلي مثل برنامج ويلكم بمقابض زوايا وأضلاع ومقبض دوران علوي ومركز الدوران ⊕
+    if (selectionBounds != null) {
+      final b = selectionBounds!;
+      final rect = Rect.fromLTRB(
+        b.$1 * scale + offX - 6,
+        b.$3 * scale + offY - 6,
+        b.$2 * scale + offX + 6,
+        b.$4 * scale + offY + 6,
+      );
+
+      // خلفية خفيفة وإطار أزرق/ذهبي
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = (rotateHandlesMode ? const Color(0xFF00ACC1) : const Color(0xFF007BFF)).withOpacity(0.06)
+          ..style = PaintingStyle.fill,
+      );
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = rotateHandlesMode ? const Color(0xFF00ACC1) : const Color(0xFF007BFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6,
+      );
+
+      // علامة مركز العنصر (Pivot ⊕)
+      final center = rect.center;
+      final pivotPaint = Paint()
+        ..color = Colors.black54
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2;
+      canvas.drawCircle(center, 4.0, pivotPaint);
+      canvas.drawLine(Offset(center.dx - 7, center.dy), Offset(center.dx + 7, center.dy), pivotPaint);
+      canvas.drawLine(Offset(center.dx, center.dy - 7), Offset(center.dx, center.dy + 7), pivotPaint);
+
+      // مقبض الدوران العلوي الدائري (أخضر/ذهبي بارز)
+      final knobPos = Offset(rect.center.dx, rect.top - 28.0);
+      canvas.drawLine(
+        rect.topCenter,
+        knobPos,
+        Paint()
+          ..color = const Color(0xFF2E7D32)
+          ..strokeWidth = 1.8,
+      );
+      final bool knobActive = activeHandle == _WilcomHandle.rotateKnob;
+      canvas.drawCircle(
+        knobPos,
+        knobActive ? 11.0 : 9.0,
+        Paint()..color = knobActive ? const Color(0xFFD4AF37) : const Color(0xFF2E7D32),
+      );
+      canvas.drawCircle(
+        knobPos,
+        knobActive ? 11.0 : 9.0,
+        Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.8,
+      );
+      // رمز سهم دائري صغير داخل مقبض الدوران
+      canvas.drawArc(
+        Rect.fromCircle(center: knobPos, radius: 4.2),
+        -pi * 0.7,
+        pi * 1.4,
+        false,
+        Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
+      );
+
+      // المقابض الـ 8 (زوايا + أضلاع)
+      final corners = [
+        (_WilcomHandle.topLeft, rect.topLeft),
+        (_WilcomHandle.topRight, rect.topRight),
+        (_WilcomHandle.bottomLeft, rect.bottomLeft),
+        (_WilcomHandle.bottomRight, rect.bottomRight),
+      ];
+      final edges = [
+        (_WilcomHandle.topCenter, rect.topCenter),
+        (_WilcomHandle.bottomCenter, rect.bottomCenter),
+        (_WilcomHandle.centerLeft, rect.centerLeft),
+        (_WilcomHandle.centerRight, rect.centerRight),
+      ];
+
+      for (final c in corners) {
+        final bool isAct = activeHandle == c.$1;
+        if (rotateHandlesMode) {
+          // مقابض دوران دائرية مفرّغة مثل ويلكم
+          canvas.drawCircle(c.$2, isAct ? 9.0 : 7.0, Paint()..color = isAct ? const Color(0xFF56CCF2) : Colors.white);
+          canvas.drawCircle(
+            c.$2,
+            isAct ? 9.0 : 7.0,
+            Paint()
+              ..color = const Color(0xFF007BFF)
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2.0,
+          );
+        } else {
+          // مقابض تحجيم مربعة مثل ويلكم (أكبر وأسهل للمس بالأصبع)
+          final hRect = Rect.fromCenter(center: c.$2, width: isAct ? 14.0 : 11.0, height: isAct ? 14.0 : 11.0);
+          canvas.drawRect(hRect, Paint()..color = isAct ? const Color(0xFF56CCF2) : const Color(0xFFD4AF37));
+          canvas.drawRect(
+            hRect,
+            Paint()
+              ..color = Colors.black
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.5,
+          );
+        }
+      }
+
+      for (final e in edges) {
+        final bool isAct = activeHandle == e.$1;
+        final hRect = Rect.fromCenter(center: e.$2, width: isAct ? 12.0 : 9.5, height: isAct ? 12.0 : 9.5);
+        canvas.drawRect(hRect, Paint()..color = isAct ? const Color(0xFF56CCF2) : Colors.white);
+        canvas.drawRect(
+          hRect,
+          Paint()
+            ..color = const Color(0xFF007BFF)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ObjectEditorCanvasPainter oldDelegate) => true;
 }
 
 /// شاشة حساب التطريز المبسطة (حساب مباشر للغرز والترتر والخرز والخيط والوقت + سعر الـ 1000 غرزة الافتراضي 0.09$ + عدد القطع)
