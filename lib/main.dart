@@ -18,6 +18,12 @@ import 'parsers/emb_parser.dart';
 final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
 
 String tr(String ar, String en) => isArabicNotifier.value ? ar : en;
+
+String joinCleanPath(String dir, String name) {
+  final cleanDir = dir.replaceAll(RegExp(r'/+$'), '');
+  final cleanName = name.replaceAll(RegExp(r'^/+'), '');
+  return '$cleanDir/$cleanName';
+}
 final validExtensions = ['.emb', '.dst', '.dhp', '.dha', '.dhe', '.tbf', '.dsb', '.exp', '.pes', '.pec', '.jef', '.ef', '.vp3', '.xxx', '.u01'];
 
 int compareNatural(String a, String b) {
@@ -537,26 +543,27 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   @override
   void initState() {
     super.initState();
-    _setupIncomingFileHandler();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (widget.license['activated'] != true) _showTrialToast();
-      _showSignatureDialog();
-      _startBackgroundScan();
-    });
-  }
-
-  Future<void> _setupIncomingFileHandler() async {
     _intentChannel.setMethodCallHandler((call) async {
       if (call.method == 'onFileOpened' && call.arguments is String) {
         await _openIncomingEmbFile(call.arguments as String);
       }
     });
-    try {
-      final initialPath = await _intentChannel.invokeMethod('getInitialFile');
-      if (initialPath is String && initialPath.isNotEmpty) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      String? initialPath;
+      try {
+        final res = await _intentChannel.invokeMethod('getInitialFile');
+        if (res is String && res.isNotEmpty) initialPath = res;
+      } catch (_) {}
+
+      if (initialPath != null) {
         await _openIncomingEmbFile(initialPath);
+        _startBackgroundScan();
+      } else {
+        if (widget.license['activated'] != true) _showTrialToast();
+        _showSignatureDialog();
+        _startBackgroundScan();
       }
-    } catch (_) {}
+    });
   }
 
   Future<void> _openIncomingEmbFile(String path) async {
@@ -1050,8 +1057,9 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                         itemBuilder: (context, index) {
                           final folder = _folders[index];
                           return GestureDetector(
-                            onTap: () {
-                              Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: folder)));
+                            onTap: () async {
+                              await Navigator.push(context, MaterialPageRoute(builder: (_) => FolderDetailsScreen(folderGroup: folder)));
+                              if (mounted) setState(() {});
                             },
                             child: Container(
                               decoration: BoxDecoration(
@@ -1366,21 +1374,42 @@ class _DesignGridCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(
-              child: Container(
-                color: Colors.white,
-                padding: const EdgeInsets.all(6),
-                child: hasPreview
-                    ? Image.memory(design.previewJpeg!, fit: BoxFit.contain, filterQuality: FilterQuality.high)
-                    : Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.architecture, size: 50, color: Color(0xFF3E522B)),
-                            const SizedBox(height: 8),
-                            Text(ext, style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 16)),
-                          ],
-                        ),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.all(6),
+                    child: hasPreview
+                        ? Image.memory(design.previewJpeg!, fit: BoxFit.contain, filterQuality: FilterQuality.high)
+                        : Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(Icons.architecture, size: 50, color: Color(0xFF3E522B)),
+                                const SizedBox(height: 8),
+                                Text(ext, style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 16)),
+                              ],
+                            ),
+                          ),
+                  ),
+                  Positioned(
+                    top: 6,
+                    left: 6,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0E131D).withOpacity(0.84),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.75), width: 0.9),
                       ),
+                      child: Text(
+                        '.$ext',
+                        style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 10),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
             Padding(
@@ -1508,10 +1537,10 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
       String outPath;
       if (shareAfter) {
         final tempDir = await getTemporaryDirectory();
-        outPath = '${tempDir.path}/$baseName.$chosenExt';
+        outPath = joinCleanPath(tempDir.path, '$baseName.$chosenExt');
       } else {
         final parentDir = File(widget.design.filePath).parent.path;
-        outPath = '$parentDir/$baseName.$chosenExt';
+        outPath = joinCleanPath(parentDir, '$baseName.$chosenExt');
       }
 
       String? resultPath = await UniversalExporter.exportToFormat(widget.design.filePath, outPath, chosenExt);
@@ -2889,7 +2918,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
 
     setState(() => _saving = true);
     try {
-      String outPath = '$outDir/$baseName.$targetExt';
+      String outPath = joinCleanPath(outDir, '$baseName.$targetExt');
       String? res = await VectorDesignEditor.exportVectorToFile(_edited!, outPath, targetExt, baseName: baseName);
       res ??= await VectorDesignEditor.exportVectorToFile(
         _edited!,
@@ -3947,8 +3976,8 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   bool _arabicGroup = true;
   int _fontNumber = 1; // 1..5 -> A1..A5 أو E1..E5
 
-  // الفونطات الأصلية المحمّلة من Ink/Stitch (A1 + E1..E5)
-  EmbFontMeta? _arProFont;
+  // الفونطات الأصلية المحمّلة من Wilcom (.DST) و Ink/Stitch (A1..A5 + E1..E5)
+  final Map<int, EmbFontMeta> _arProFonts = {};
   final Map<int, EmbFontMeta> _enProFonts = {};
 
   static const List<String> _arTtfFallbacks = ['Lalezar', 'Lalezar', 'ReemKufi', 'Tajawal', 'Amiri'];
@@ -3985,20 +4014,45 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   Future<void> _initFontsAndGenerate() async {
     final fonts = await InkStitchFontCatalog.loadIndex();
     if (!mounted) return;
-    EmbFontMeta? arMeta;
-    final List<EmbFontMeta> enList = [];
+    _arProFonts.clear();
+    _enProFonts.clear();
+    final List<EmbFontMeta> extraAr = [];
+    final List<EmbFontMeta> extraEn = [];
+    final arCodeRe = RegExp(r'^A([1-5])$', caseSensitive: false);
+    final enCodeRe = RegExp(r'^E([1-5])$', caseSensitive: false);
     for (final f in fonts) {
-      if (f.rtl && arMeta == null) {
-        arMeta = f;
-      } else if (!f.rtl) {
-        enList.add(f);
+      final code = f.nameEn.trim();
+      final mAr = arCodeRe.firstMatch(code);
+      final mEn = enCodeRe.firstMatch(code);
+      if (mAr != null) {
+        final slot = int.parse(mAr.group(1)!);
+        _arProFonts[slot] = f;
+      } else if (mEn != null) {
+        final slot = int.parse(mEn.group(1)!);
+        _enProFonts[slot] = f;
+      } else if (f.rtl) {
+        extraAr.add(f);
+      } else {
+        extraEn.add(f);
       }
     }
-    for (int i = 0; i < enList.length && i < 5; i++) {
-      _enProFonts[i + 1] = enList[i];
+    for (final f in extraAr) {
+      for (int s = 1; s <= 5; s++) {
+        if (!_arProFonts.containsKey(s)) {
+          _arProFonts[s] = f;
+          break;
+        }
+      }
+    }
+    for (final f in extraEn) {
+      for (int s = 1; s <= 5; s++) {
+        if (!_enProFonts.containsKey(s)) {
+          _enProFonts[s] = f;
+          break;
+        }
+      }
     }
     setState(() {
-      _arProFont = arMeta;
       _loadingCatalog = false;
     });
     await _generate();
@@ -4038,12 +4092,12 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
     try {
       VectorDesignData? v;
-      final bool useProArabic = _arabicGroup && _fontNumber == 1 && _arProFont != null && _isSatin;
+      final bool useProArabic = _arabicGroup && _arProFonts.containsKey(_fontNumber) && _isSatin;
       final bool useProEnglish = !_arabicGroup && _enProFonts.containsKey(_fontNumber) && _isSatin;
 
       if (useProArabic) {
         v = await InkStitchFontEngine.generate(
-          meta: _arProFont!,
+          meta: _arProFonts[_fontNumber]!,
           text: txt,
           letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.8, 12.0),
           targetWidthCm: _widthCm,
@@ -4062,7 +4116,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           colorArgb: _selectedColor,
           isBold: true,
           isSatin: _isSatin,
-          fontFamily: _arTtfFallbacks[0],
+          fontFamily: _arTtfFallbacks[(_fontNumber - 1).clamp(0, 4)],
         );
       } else if (useProEnglish) {
         v = await InkStitchFontEngine.generate(
@@ -4139,11 +4193,14 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
     if (_vec == null || _saving) return;
     setState(() => _saving = true);
     try {
-      final safeName = 'text_${_activeCode}_${DateTime.now().millisecondsSinceEpoch}';
+      final rawAscii = _textCtrl.text.trim().replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+      final prefix = rawAscii.isNotEmpty ? rawAscii.substring(0, min(8, rawAscii.length)) : 'text';
+      final shortId = (DateTime.now().millisecondsSinceEpoch % 10000).toString().padLeft(4, '0');
+      final safeName = '${prefix}_${_activeCode}_$shortId';
       final ext = _exportFormat.toUpperCase();
       final String outPath = shareAfter
-          ? '${(await getTemporaryDirectory()).path}/$safeName.$ext'
-          : '/storage/emulated/0/Download/$safeName.$ext';
+          ? joinCleanPath((await getTemporaryDirectory()).path, '$safeName.$ext')
+          : joinCleanPath('/storage/emulated/0/Download', '$safeName.$ext');
 
       final res = await VectorDesignEditor.exportVectorToFile(
         _vec!,
@@ -5262,7 +5319,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
         baseName = '${widget.defaultBaseName}_${DateTime.now().millisecondsSinceEpoch}';
       }
 
-      String? res = await VectorDesignEditor.exportVectorToFile(_composed!, '$outDir/$baseName.$targetExt', targetExt, baseName: baseName);
+      String? res = await VectorDesignEditor.exportVectorToFile(_composed!, joinCleanPath(outDir, '$baseName.$targetExt'), targetExt, baseName: baseName);
       res ??= await VectorDesignEditor.exportVectorToFile(_composed!, '/storage/emulated/0/Download/$baseName.$targetExt', targetExt, baseName: baseName);
 
       if (res != null && await File(res).exists()) {

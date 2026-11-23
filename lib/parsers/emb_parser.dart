@@ -2421,6 +2421,115 @@ class UniversalFormatParser {
     }
   }
 
+  /// كشف الصيغة الحقيقية من البايتات الداخلية للملف (يحل مشكلة ملفات واتساب .BIN بشكل جذري)
+  static String detectFormatByContent(Uint8List bytes) {
+    final int len = bytes.length;
+    if (len < 16) return '';
+    final bd = ByteData.sublistView(bytes);
+
+    // 1) Wilcom OLE2 (.EMB)
+    if (bytes[0] == 0xD0 && bytes[1] == 0xCF && bytes[2] == 0x11 && bytes[3] == 0xE0) {
+      return '.emb';
+    }
+    // 2) Tajima (.DST)
+    if (len >= 512) {
+      final hdr = latin1.decode(bytes.sublist(0, 512), allowInvalid: true);
+      if (hdr.startsWith('LA:') || (hdr.contains('ST:') && hdr.contains('+X:') && hdr.contains('-X:'))) {
+        return '.dst';
+      }
+    }
+    // 3) Brother (.PES / .PEC)
+    if (bytes[0] == 0x23 && bytes[1] == 0x50 && bytes[2] == 0x45) {
+      if (bytes[3] == 0x53) return '.pes';
+      if (bytes[3] == 0x43) return '.pec';
+    }
+    // 4) Dahao (.DHP): UTF-16LE "Default" in emCAD header
+    if (len >= 0x2000) {
+      const defUtf16 = [0x44, 0x00, 0x65, 0x00, 0x66, 0x00, 0x61, 0x00, 0x75, 0x00, 0x6C, 0x00, 0x74, 0x00];
+      final int lim = math.min(len - defUtf16.length, 0x1F00);
+      for (int i = 0x1000; i <= lim; i++) {
+        bool ok = true;
+        for (int j = 0; j < defUtf16.length; j++) {
+          if (bytes[i + j] != defUtf16[j]) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) return '.dhp';
+      }
+    }
+    // 5) Dahao (.DHE / .DHA): sync markers 0x32 0x23 or 0x06 0x35
+    if (len > 0x200) {
+      final int lim = math.min(len - 4, 0x900);
+      for (int i = 0x1B0; i < lim; i++) {
+        if ((bytes[i] == 0x32 && bytes[i + 1] == 0x23 && bytes[i + 2] == 0x32 && bytes[i + 3] == 0x23) ||
+            (bytes[i] == 0x06 && bytes[i + 1] == 0x35 && bytes[i + 2] == 0x06 && bytes[i + 3] == 0x35)) {
+          return '.dhe';
+        }
+      }
+    }
+    // 6) Janome (.JEF)
+    if (len >= 120) {
+      final int stOff = bd.getUint32(0, Endian.little);
+      final int flg = bd.getUint32(4, Endian.little);
+      final int cols = bd.getUint32(24, Endian.little);
+      if (stOff >= 116 && stOff < len - 4 && cols >= 1 && cols <= 127) {
+        if (stOff == 116 + cols * 8 || flg == 0x0A) {
+          return '.jef';
+        }
+      }
+    }
+    // 7) Singer (.XXX): 256-byte zero-padded header + 0x7F 0x7F end marker or stitch/color fields
+    if (len >= 260) {
+      int zeroHdr = 0;
+      for (int i = 0; i < 24; i++) {
+        if (bytes[i] == 0) zeroHdr++;
+      }
+      final int xxxStitches = bd.getUint32(0x1B, Endian.little);
+      final int xxxColors = bd.getUint16(0x27, Endian.little);
+      bool hasXxxEnd = false;
+      final int tailStart = math.max(256, len - 1024);
+      for (int i = tailStart; i < len - 1; i++) {
+        if (bytes[i] == 0x7F && bytes[i + 1] == 0x7F) {
+          hasXxxEnd = true;
+          break;
+        }
+      }
+      if (zeroHdr >= 18 && (hasXxxEnd || (xxxStitches >= 1 && xxxStitches <= 5000000 && xxxColors >= 1 && xxxColors <= 128))) {
+        return '.xxx';
+      }
+    }
+    // 8) Tajima Modern (.TBF): 0x600 header + 0x8F end control byte
+    if (len >= 0x606) {
+      int hdrZeroOrAscii = 0;
+      for (int i = 0; i < 256; i++) {
+        final int v = bytes[i];
+        if (v == 0 || (v >= 0x20 && v <= 0x7E)) hdrZeroOrAscii++;
+      }
+      if (hdrZeroOrAscii >= 245 && (bytes[len - 1] == 0x8F || bytes[len - 3] == 0x8F)) {
+        return '.tbf';
+      }
+    }
+    // 9) Barudan (.DSB): 512-byte space/ASCII header + 0x80+ ctrl bytes
+    if (len >= 518) {
+      int asciiHdr = 0;
+      for (int i = 0; i < 512; i++) {
+        final int v = bytes[i];
+        if (v == 0x20 || v == 0x00 || (v >= 0x21 && v <= 0x7E)) asciiHdr++;
+      }
+      int ctrlOk = 0, checked = 0;
+      for (int p = 512; p + 2 < len && checked < 20; p += 3) {
+        if ((bytes[p] & 0x80) != 0) ctrlOk++;
+        checked++;
+      }
+      if (asciiHdr >= 500 && checked > 5 && ctrlOk == checked) {
+        return '.dsb';
+      }
+    }
+    // 10) Melco (.EXP) — الملاذ الأخير لأن EXP لا يحتوي على ترويسة
+    return '.exp';
+  }
+
   /// فحص ذكي لمحتوى الملف عند فتحه من واتساب بلاحقة مختلفة أو .bin
   static Future<EmbDesignInfo?> parseByContentFallback(String filePath, {double maxCanvas = 640.0}) async {
     try {
@@ -2429,41 +2538,40 @@ class UniversalFormatParser {
       final bytes = await file.readAsBytes();
       if (bytes.length < 16) return null;
 
-      // 1) Wilcom OLE2 (.EMB)
-      if (bytes[0] == 0xD0 && bytes[1] == 0xCF && bytes[2] == 0x11 && bytes[3] == 0xE0) {
+      final String detected = detectFormatByContent(bytes);
+      if (detected == '.emb') {
         return await EmbParser.parseFile(filePath);
       }
-      // 2) Tajima (.DST)
-      if (bytes.length >= 512 && bytes[0] == 0x4C && bytes[1] == 0x41 && bytes[2] == 0x3A) {
+      if (detected == '.dst') {
         return await DstParser.parseFile(filePath, maxCanvas: maxCanvas);
       }
-      // 3) Brother (.PES / .PEC)
-      if (bytes[0] == 0x23 && bytes[1] == 0x50 && bytes[2] == 0x45 && bytes[3] == 0x53) {
-        final vec = await Isolate.run(() => _decodePesSync(bytes));
+      if (detected == '.dhp' || detected == '.dhe') {
+        final vec = await Isolate.run(() {
+          if (detected == '.dhp') return DahaoParser._decodeDhpSync(filePath);
+          return DahaoParser._decodeDheDhaSync(filePath, true);
+        });
         if (vec != null && vec.stX.length > 2) return await _vecToInfo(filePath, vec, maxCanvas);
       }
-      if (bytes[0] == 0x23 && bytes[1] == 0x50 && bytes[2] == 0x45 && bytes[3] == 0x43) {
-        final vec = await Isolate.run(() => _decodePecSync(bytes, 8, 'Brother (PEC)'));
-        if (vec != null && vec.stX.length > 2) return await _vecToInfo(filePath, vec, maxCanvas);
-      }
-      // 4) Try Singer (.XXX), Melco (.EXP), Janome (.JEF), Barudan (.DSB), Tajima (.TBF)
+
       final VectorDesignData? vec = await Isolate.run(() {
-        final lower = filePath.toLowerCase();
-        if (lower.endsWith('.xxx')) return _decodeXxxSync(bytes);
-        if (lower.endsWith('.exp')) return _decodeExpSync(bytes);
-        if (lower.endsWith('.jef')) return _decodeJefSync(bytes);
-        if (lower.endsWith('.dsb')) return _decodeDsbSync(bytes);
-        if (lower.endsWith('.tbf')) return _decodeTbfSync(bytes);
-        // تجربة تلقائية للصيغ القياسية
-        final vExp = _decodeExpSync(bytes);
-        if (vExp != null && vExp.stitches > 10) return vExp;
-        final vXxx = _decodeXxxSync(bytes);
-        if (vXxx != null && vXxx.stitches > 10) return vXxx;
-        final vJef = _decodeJefSync(bytes);
-        if (vJef != null && vJef.stitches > 10) return vJef;
-        final vDsb = _decodeDsbSync(bytes);
-        if (vDsb != null && vDsb.stitches > 10) return vDsb;
-        return null;
+        switch (detected) {
+          case '.pes':
+            return _decodePesSync(bytes);
+          case '.pec':
+            return _decodePecSync(bytes, 8, 'Brother (PEC)');
+          case '.jef':
+            return _decodeJefSync(bytes);
+          case '.xxx':
+            return _decodeXxxSync(bytes);
+          case '.tbf':
+            return _decodeTbfSync(bytes);
+          case '.dsb':
+            return _decodeDsbSync(bytes);
+          case '.exp':
+            return _decodeExpSync(bytes);
+          default:
+            return null;
+        }
       });
       if (vec != null && vec.stX.length > 2) {
         return await _vecToInfo(filePath, vec, maxCanvas);
@@ -3100,10 +3208,10 @@ class UniversalFormatParser {
           needMove = true;
         }
       } else if (b0 == 0x7D || b0 == 0x7E) {
-        if (i + 1 < bytes.length) {
-          x += _s8(bytes[i]);
-          y += _s8(bytes[i + 1]);
-          i += 2;
+        if (i < bytes.length) {
+          x += _s8(b1);
+          y += _s8(bytes[i]);
+          i += 1;
         }
         jumpCount++;
         needMove = true;
@@ -3360,16 +3468,35 @@ class VectorDesignLoader {
     try {
       return await Isolate.run(() {
         final lower = filePath.toLowerCase();
+        VectorDesignData? v;
         if (lower.endsWith('.dhp')) {
-          return DahaoParser._decodeDhpSync(filePath);
+          v = DahaoParser._decodeDhpSync(filePath);
         } else if (lower.endsWith('.dhe') || lower.endsWith('.dha')) {
-          return DahaoParser._decodeDheDhaSync(filePath, lower.endsWith('.dhe'));
+          v = DahaoParser._decodeDheDhaSync(filePath, lower.endsWith('.dhe'));
         } else if (lower.endsWith('.dst')) {
-          return DstParser._decodeDstSync(filePath)?.$1;
+          v = DstParser._decodeDstSync(filePath)?.$1;
         } else if (UniversalFormatParser.isSupported(lower)) {
-          return UniversalFormatParser._decodeAnySync(filePath);
+          v = UniversalFormatParser._decodeAnySync(filePath);
         }
-        return null;
+        if (v != null && v.stX.length >= 2) return v;
+        // كشف ذكي بالبايتات عند فتح ملفات واتساب (.bin) أو لاحقة مختلفة
+        final f = File(filePath);
+        if (!f.existsSync()) return null;
+        final bytes = f.readAsBytesSync();
+        final det = UniversalFormatParser.detectFormatByContent(bytes);
+        switch (det) {
+          case '.dst': return DstParser._decodeDstSync(filePath)?.$1;
+          case '.dhp': return DahaoParser._decodeDhpSync(filePath);
+          case '.dhe': return DahaoParser._decodeDheDhaSync(filePath, true);
+          case '.pes': return UniversalFormatParser._decodePesSync(bytes);
+          case '.pec': return UniversalFormatParser._decodePecSync(bytes, 8, 'Brother (PEC)');
+          case '.jef': return UniversalFormatParser._decodeJefSync(bytes);
+          case '.xxx': return UniversalFormatParser._decodeXxxSync(bytes);
+          case '.tbf': return UniversalFormatParser._decodeTbfSync(bytes);
+          case '.dsb': return UniversalFormatParser._decodeDsbSync(bytes);
+          case '.exp': return UniversalFormatParser._decodeExpSync(bytes);
+          default: return null;
+        }
       });
     } catch (_) {
       return null;
@@ -6111,16 +6238,24 @@ class InkStitchFontEngine {
         colorArgb: colorArgb,
       );
       if (raw == null) return null;
+      double sx = 1.0, sy = 1.0;
       if (targetWidthCm != null || targetHeightCm != null) {
         final double curW = (raw.widthMm ?? 0.0) / 10.0;
         final double curH = (raw.heightMm ?? 0.0) / 10.0;
         if (curW > 0.1 && curH > 0.1) {
-          final double sx = targetWidthCm != null ? (targetWidthCm / curW).clamp(0.25, 4.0) : (targetHeightCm! / curH).clamp(0.25, 4.0);
-          final double sy = targetHeightCm != null ? (targetHeightCm / curH).clamp(0.25, 4.0) : sx;
-          if ((sx - 1.0).abs() > 0.015 || (sy - 1.0).abs() > 0.015) {
-            return VectorDesignEditor.transform(raw, scaleX: sx, scaleY: sy);
-          }
+          sx = targetWidthCm != null ? (targetWidthCm / curW).clamp(0.25, 4.0) : (targetHeightCm! / curH).clamp(0.25, 4.0);
+          sy = targetHeightCm != null ? (targetHeightCm / curH).clamp(0.25, 4.0) : sx;
         }
+      }
+      final bool isWilcomNative = raw.machineType.contains('Wilcom');
+      final double dFactor = isWilcomNative ? (0.45 / densityMm.clamp(0.25, 1.0)).clamp(0.5, 2.0) : 1.0;
+      if ((sx - 1.0).abs() > 0.015 || (sy - 1.0).abs() > 0.015 || (dFactor - 1.0).abs() > 0.04) {
+        return VectorDesignEditor.transform(
+          raw,
+          scaleX: sx,
+          scaleY: sy,
+          densityFactor: dFactor,
+        );
       }
       return raw;
     });
@@ -6152,7 +6287,8 @@ class InkStitchFontEngine {
     final double extraSpUnits = extraSpacingMm * 10.0;
     final double lineH = ((font['lineH'] as num?)?.toDouble() ?? (capH * 1.45)) * scale;
     final double densityUnits = (densityMm * 10.0).clamp(2.5, 10.0);
-    final double arabicJoinOverlap = (2.2 * scale).clamp(1.0, 4.5);
+    final double rawJoinOv = (font['joinOverlap'] as num?)?.toDouble() ?? 2.2;
+    final double arabicJoinOverlap = (rawJoinOv * scale).clamp(1.0, 28.0);
 
     Map<String, dynamic>? lookupGlyph(_ShapedGlyphToken tok) {
       if (tok.dotForm.isNotEmpty && glyphs.containsKey(tok.dotForm)) {
@@ -6299,6 +6435,14 @@ class InkStitchFontEngine {
               densityUnits: densityUnits,
               addPt: addPt,
             );
+          } else if (type == 'd') {
+            _emitDigitizedRun(
+              el: el,
+              ox: ox,
+              oy: oy,
+              scale: scale,
+              addPt: addPt,
+            );
           }
         }
 
@@ -6308,6 +6452,7 @@ class InkStitchFontEngine {
 
     if (stX.length < 2) return null;
 
+    final bool isWilcomNative = font['nativeStitch'] == true;
     final String fontName = (font['nameEn'] ?? 'Ink/Stitch Satin').toString();
     return VectorDesignData(
       stX: stX.finish(),
@@ -6333,7 +6478,7 @@ class InkStitchFontEngine {
       minY: minY,
       maxY: maxY,
       hasBounds: hasBounds,
-      machineType: '$fontName (Satin)',
+      machineType: isWilcomNative ? '$fontName (Wilcom)' : '$fontName (Satin)',
     );
   }
 
@@ -6608,6 +6753,23 @@ class InkStitchFontEngine {
       }
       px = nx;
       py = ny;
+    }
+  }
+
+  static void _emitDigitizedRun({
+    required Map<String, dynamic> el,
+    required double ox,
+    required double oy,
+    required double scale,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final List<dynamic>? rawP = el['p'] as List<dynamic>?;
+    if (rawP == null || rawP.length < 4) return;
+    final int n = rawP.length ~/ 2;
+    for (int i = 0; i < n; i++) {
+      final double px = ox + (rawP[i * 2] as num).toDouble() * scale;
+      final double py = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
+      addPt(px, py, i == 0);
     }
   }
 
