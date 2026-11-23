@@ -664,7 +664,7 @@ Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double max
   }
 
   final int palLen = data.paletteArgb.length;
-  final double strokeW = maxCanvas >= 1800.0 ? 0.95 : 0.88;
+  final double strokeW = maxCanvas >= 1800.0 ? 0.62 : 0.56;
   final double minX = data.minX;
   final double minY = data.minY;
 
@@ -683,7 +683,7 @@ Future<Uint8List?> _renderVectorDesignToImage(VectorDesignData data, {double max
     if (!hasMove || activeColorIdx < 0) return;
     final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
     if (is3D) {
-      final double threadW = (strokeW * 3.6).clamp(2.4, 5.6);
+      final double threadW = (strokeW * 5.2).clamp(2.4, 5.4);
       final double shOff = threadW * 0.44;
       final double hiOff = threadW * 0.24;
 
@@ -3264,8 +3264,12 @@ class DstExporter {
 
       final int dx = tx - curX;
       final int dy = ty - curY;
-      final bool isJump = (stMove[i] != 0) && (dx.abs() > 0 || dy.abs() > 0);
-      if (isJump) {
+      final int mv = stMove[i];
+      if (mv == 2) {
+        if (dx != 0 || dy != 0) {
+          emitDelta(dx, dy, true, false);
+        }
+      } else if (mv != 0 && (dx.abs() > 0 || dy.abs() > 0)) {
         emitDelta(dx, dy, true, false);
         emitDelta(0, 0, false, false);
       } else {
@@ -3288,8 +3292,8 @@ class DstExporter {
         '-X:${mx.toString().padLeft(5)}\r'
         '+Y:${py.toString().padLeft(5)}\r'
         '-Y:${my.toString().padLeft(5)}\r'
-        'AX:+    0\r'
-        'AY:+    0\r'
+        'AX:${curX >= 0 ? '+' : '-'}${curX.abs().clamp(0, 99999).toString().padLeft(5)}\r'
+        'AY:${curY >= 0 ? '+' : '-'}${curY.abs().clamp(0, 99999).toString().padLeft(5)}\r'
         'MX:+    0\r'
         'MY:+    0\r'
         'PD:******\r'
@@ -3468,8 +3472,10 @@ class UniversalExporter {
       }
       final int dx = tx - curX;
       final int dy = ty - curY;
-      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
-      if (isJump) {
+      final int mv = stMove[i];
+      if (mv == 2) {
+        if (dx != 0 || dy != 0) emitStep(dx, dy, true);
+      } else if (mv != 0 && (dx != 0 || dy != 0)) {
         emitStep(dx, dy, true);
         emitStep(0, 0, false);
       } else {
@@ -3518,8 +3524,10 @@ class UniversalExporter {
       }
       final int dx = tx - curX;
       final int dy = ty - curY;
-      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
-      if (isJump) {
+      final int mv = stMove[i];
+      if (mv == 2) {
+        if (dx != 0 || dy != 0) emitStep(dx, dy, 0x01);
+      } else if (mv != 0 && (dx != 0 || dy != 0)) {
         emitStep(dx, dy, 0x01);
         emitStep(0, 0, 0x00);
       } else {
@@ -3573,8 +3581,10 @@ class UniversalExporter {
       }
       final int dx = tx - curX;
       final int dy = ty - curY;
-      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
-      if (isJump) {
+      final int mv = stMove[i];
+      if (mv == 2) {
+        if (dx != 0 || dy != 0) emitStep(dx, dy, true);
+      } else if (mv != 0 && (dx != 0 || dy != 0)) {
         emitStep(dx, dy, true);
         emitStep(0, 0, false);
       } else {
@@ -3634,8 +3644,10 @@ class UniversalExporter {
       }
       final int dx = tx - curX;
       final int dy = ty - curY;
-      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
-      if (isJump) {
+      final int mv = stMove[i];
+      if (mv == 2) {
+        if (dx != 0 || dy != 0) emitStep(dx, dy, 0x81);
+      } else if (mv != 0 && (dx != 0 || dy != 0)) {
         emitStep(dx, dy, 0x81);
         emitStep(0, 0, 0x80);
       } else {
@@ -3690,8 +3702,10 @@ class UniversalExporter {
       }
       final int dx = tx - curX;
       final int dy = ty - curY;
-      final bool isJump = (stMove[i] != 0) && (dx != 0 || dy != 0);
-      if (isJump) {
+      final int mv = stMove[i];
+      if (mv == 2) {
+        if (dx != 0 || dy != 0) emitStep(dx, dy, true);
+      } else if (mv != 0 && (dx != 0 || dy != 0)) {
         emitStep(dx, dy, true);
         emitStep(0, 0, false);
       } else {
@@ -3715,9 +3729,17 @@ class UniversalExporter {
 
 /// محرك تعديل التصاميم المتجهية (تكبير/تصغير، دوران، قلب، حذف لون، حذف غرز)
 class VectorDesignEditor {
+  /// تعديل شامل للتصميم:
+  /// - الحجم (scale / scaleX / scaleY) والدوران والقلب وحذف الألوان وقص الغرز
+  /// - الكثافة والفلترة (0.3 - 1.5 مم مع حماية الزوايا)
+  /// - التحكم بطول الدرزة Run (للإطار ولدرزات الرسمة مع حماية الفستون والزوايا)
+  /// - إضافة / إلغاء إطار درزة (Basting Frame) مع التحكم بالبُعد عن التصميم ولون مستقل
+  /// - تحديد نقطة البداية والنهاية (شبكة ويلكم 3×3 ذات الـ 9 نقاط: 0=الأصلي، 1..9=الشبكة)
   static VectorDesignData transform(
     VectorDesignData src, {
     double scale = 1.0,
+    double? scaleX,
+    double? scaleY,
     double rotationDeg = 0.0,
     bool flipH = false,
     bool flipV = false,
@@ -3726,6 +3748,13 @@ class VectorDesignEditor {
     int? trimEnd,
     double densityFactor = 1.0,
     double minStitchFilterMm = 0.0,
+    double runStitchLengthMm = 4.0,
+    bool applyRunLengthToDesign = false,
+    bool addBastingFrame = false,
+    double bastingMarginMm = 5.0,
+    bool bastingSeparateColor = true,
+    int startAnchor = 0, // 0=الأصلي, 1=أعلى يسار, 2=أعلى وسط, 3=أعلى يمين, 4=وسط يسار, 5=المركز, 6=وسط يمين, 7=أسفل يسار, 8=أسفل وسط, 9=أسفل يمين
+    bool returnToStart = true,
   }) {
     final int total = src.stX.length;
     if (total == 0) return src;
@@ -3739,9 +3768,11 @@ class VectorDesignEditor {
     final double cosA = math.cos(rad);
     final double sinA = math.sin(rad);
 
+    final double sxVal = scaleX ?? scale;
+    final double syVal = scaleY ?? scale;
     (double, double) xform(double x, double y) {
-      double dx = (x - cx) * scale * (flipH ? -1.0 : 1.0);
-      double dy = (y - cy) * scale * (flipV ? -1.0 : 1.0);
+      double dx = (x - cx) * sxVal * (flipH ? -1.0 : 1.0);
+      double dy = (y - cy) * syVal * (flipV ? -1.0 : 1.0);
       final double rx = dx * cosA - dy * sinA + cx;
       final double ry = dx * sinA + dy * cosA + cy;
       return (rx, ry);
@@ -3768,6 +3799,10 @@ class VectorDesignEditor {
         hasPrev = false;
         continue;
       }
+      if (src.stMove[i] == 2) {
+        // تجاهل أي قفزة نهاية قديمة قبل إعادة حساب نقطة البداية والنهاية
+        continue;
+      }
       final pt = xform(src.stX[i], src.stY[i]);
       final double px = pt.$1;
       final double py = pt.$2;
@@ -3780,7 +3815,6 @@ class VectorDesignEditor {
           !deletedColors.contains(src.stColor[i + 1]);
 
       if (safeDensity < 0.99 && hasNextSame) {
-        // فحص ما إذا كانت الغرزة تقع على زاوية حادة حتى لا تُحذف أثناء التخفيف
         final nextPt = xform(src.stX[i + 1], src.stY[i + 1]);
         final double v1x = px - prevPx, v1y = py - prevPy;
         final double v2x = nextPt.$1 - px, v2y = nextPt.$2 - py;
@@ -3789,7 +3823,6 @@ class VectorDesignEditor {
         bool isSharpCorner = false;
         if (l1 > 1.5 && l2 > 1.5) {
           final double cosT = (v1x * v2x + v1y * v2y) / (l1 * l2);
-          // إذا كانت زاوية الانعطاف حادة (> 45 درجة) وليست رجوع فستون عادي، نحمي الزاوية
           if (cosT < 0.70 && cosT > -0.82) {
             isSharpCorner = true;
           }
@@ -3810,7 +3843,6 @@ class VectorDesignEditor {
       forceMove = false;
 
       if (safeDensity > 1.01 && hasNextSame) {
-        // تكثيف الغرز بإضافة غرزة وسطية ناعمة بين الغرزتين المتتاليتين
         denseAcc += (safeDensity - 1.0);
         if (denseAcc >= 1.0) {
           denseAcc -= 1.0;
@@ -3833,38 +3865,46 @@ class VectorDesignEditor {
       hasPrev = true;
     }
 
+    Float32List rX = rawX.finish();
+    Float32List rY = rawY.finish();
+    Uint8List rM = rawMove.finish();
+    Uint8List rC = rawColor.finish();
+
+    // المرحلة 1.5: تعديل طول الدرزة (Run Stitch Length) على مسارات الدرز في الرسمة مع حماية الفستون والزوايا
+    final double safeRunMm = runStitchLengthMm.clamp(1.0, 12.0);
+    if (applyRunLengthToDesign && rX.length >= 2) {
+      final res = _resampleRunStitches(rX, rY, rM, rC, safeRunMm * 10.0);
+      rX = res.$1;
+      rY = res.$2;
+      rM = res.$3;
+      rC = res.$4;
+    }
+
     // المرحلة 2: فلترة الغرز القصيرة (0.3 مم إلى 1.5 مم) مع الحفاظ الكامل على غرز الزوايا
-    final Float32List rX = rawX.finish();
-    final Float32List rY = rawY.finish();
-    final Uint8List rM = rawMove.finish();
-    final Uint8List rC = rawColor.finish();
     final int rLen = rX.length;
+    final designX = _Float32Buf(math.max(64, rLen));
+    final designY = _Float32Buf(math.max(64, rLen));
+    final designMove = _Uint8Buf(math.max(64, rLen));
+    final designColor = _Uint8Buf(math.max(64, rLen));
 
-    final stX = _Float32Buf(math.max(64, rLen));
-    final stY = _Float32Buf(math.max(64, rLen));
-    final stMove = _Uint8Buf(math.max(64, rLen));
-    final stColor = _Uint8Buf(math.max(64, rLen));
+    double dMinX = double.infinity, dMaxX = -double.infinity;
+    double dMinY = double.infinity, dMaxY = -double.infinity;
+    bool hasDesignBounds = false;
 
-    double minX = double.infinity, maxX = -double.infinity;
-    double minY = double.infinity, maxY = -double.infinity;
-    bool hasBounds = false;
-    final Set<int> usedColors = {};
-
-    void emitFinal(double px, double py, int mv, int c) {
-      stX.add(px);
-      stY.add(py);
-      stMove.add(mv);
-      stColor.add(c);
-      usedColors.add(c);
-      if (!hasBounds) {
-        minX = maxX = px;
-        minY = maxY = py;
-        hasBounds = true;
+    void emitDesign(double px, double py, int mv, int c) {
+      designX.add(px);
+      designY.add(py);
+      designMove.add(mv);
+      designColor.add(c);
+      if (!hasDesignBounds) {
+        dMinX = dMaxX = px;
+        dMinY = dMaxY = py;
+        hasDesignBounds = true;
       } else {
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
+        if (px < dMinX) dMinX = px;
+        if (px > dMaxX) dMaxX = px;
+        if (py < dMinY) dMinY = py;
+        if (py > dMaxY) dMaxY = py;
       }
     }
 
@@ -3872,7 +3912,7 @@ class VectorDesignEditor {
 
     if (filterUnits <= 0.0) {
       for (int i = 0; i < rLen; i++) {
-        emitFinal(rX[i], rY[i], rM[i], rC[i]);
+        emitDesign(rX[i], rY[i], rM[i], rC[i]);
       }
     } else {
       double lastKeptX = 0.0, lastKeptY = 0.0;
@@ -3889,7 +3929,7 @@ class VectorDesignEditor {
         final bool isEndOfRun = (i + 1 >= rLen) || rM[i + 1] != 0 || rC[i + 1] != c;
 
         if (isStartOfRun || isEndOfRun) {
-          emitFinal(px, py, mv, c);
+          emitDesign(px, py, mv, c);
           lastKeptX = px;
           lastKeptY = py;
           lastKeptColor = c;
@@ -3902,14 +3942,13 @@ class VectorDesignEditor {
         final double d1 = math.sqrt(v1x * v1x + v1y * v1y);
 
         if (d1 >= filterUnits) {
-          emitFinal(px, py, mv, c);
+          emitDesign(px, py, mv, c);
           lastKeptX = px;
           lastKeptY = py;
           lastKeptColor = c;
           continue;
         }
 
-        // الغرزة أقصر من حد الفلترة — نفحص إن كانت غرزة زاوية / قمة / طرف فستون لحمايتها
         final double nx = rX[i + 1];
         final double ny = rY[i + 1];
         final double v2x = nx - px;
@@ -3919,70 +3958,356 @@ class VectorDesignEditor {
         bool keepCorner = false;
         if (d1 >= 1.4 && d2 >= 1.4) {
           final double cosTheta = (v1x * v2x + v1y * v2y) / (d1 * d2);
-          // حساب الانحراف العمودي عن الوتر (lastKept -> next)
           final double chX = nx - lastKeptX;
           final double chY = ny - lastKeptY;
           final double chLen = math.sqrt(chX * chX + chY * chY);
           final double perpErr = chLen > 1e-4 ? ((v1x * chY - v1y * chX).abs() / chLen) : d1;
 
-          // نحفظ الغرزة إذا كانت تشكل زاوية واضحة (> 48 درجة) أو قمة فستون حقيقية حتى لا يتشوه التصميم
           if (cosTheta < 0.66 && (perpErr >= 2.0 || d2 >= filterUnits * 1.15)) {
             keepCorner = true;
           }
         }
 
         if (keepCorner) {
-          emitFinal(px, py, mv, c);
+          emitDesign(px, py, mv, c);
           lastKeptX = px;
           lastKeptY = py;
           lastKeptColor = c;
         }
-        // وإلا تُحذف الغرزة القصيرة الزائدة بسلاسة مع الحفاظ على مسار الزوايا
       }
+    }
+
+    final Float32List dX = designX.finish();
+    final Float32List dY = designY.finish();
+    final Uint8List dM = designMove.finish();
+    final Uint8List dC = designColor.finish();
+
+    // المرحلة 3: حساب إطار الدرزة (Basting Frame) حول التصميم قبل التطريز بطول الدرزة runStitchLengthMm
+    List<int> outPaletteList = src.paletteArgb.toList();
+    final stX = _Float32Buf(math.max(64, dX.length + 128));
+    final stY = _Float32Buf(math.max(64, dX.length + 128));
+    final stMove = _Uint8Buf(math.max(64, dX.length + 128));
+    final stColor = _Uint8Buf(math.max(64, dX.length + 128));
+
+    double totalMinX = dMinX, totalMaxX = dMaxX;
+    double totalMinY = dMinY, totalMaxY = dMaxY;
+    bool hasBounds = hasDesignBounds;
+
+    if (addBastingFrame && hasDesignBounds) {
+      final double mUnits = bastingMarginMm.clamp(0.0, 40.0) * 10.0;
+      final double fx0 = dMinX - mUnits;
+      final double fx1 = dMaxX + mUnits;
+      final double fy0 = dMinY - mUnits;
+      final double fy1 = dMaxY + mUnits;
+
+      totalMinX = fx0;
+      totalMaxX = fx1;
+      totalMinY = fy0;
+      totalMaxY = fy1;
+
+      int frameColorIdx = dC.isNotEmpty ? dC[0] : 0;
+      if (bastingSeparateColor && outPaletteList.length < 254) {
+        frameColorIdx = outPaletteList.length;
+        outPaletteList.add(0xFF00BFA5); // لون فيروزي مميز لإطار التثبيت
+      }
+
+      // اختيار أقرب زاوية لنقطة البداية المختارة لبدء الإطار منها
+      final corners = [
+        (fx0, fy0), // 0: TL
+        (fx1, fy0), // 1: TR
+        (fx1, fy1), // 2: BR
+        (fx0, fy1), // 3: BL
+      ];
+      int startCorner = 0;
+      if (startAnchor == 3 || startAnchor == 6) {
+        startCorner = 1;
+      } else if (startAnchor == 9 || startAnchor == 8) {
+        startCorner = 2;
+      } else if (startAnchor == 7) {
+        startCorner = 3;
+      }
+
+      final double stepUnits = safeRunMm * 10.0;
+      bool firstFramePt = true;
+      for (int side = 0; side < 4; side++) {
+        final a = corners[(startCorner + side) % 4];
+        final b = corners[(startCorner + side + 1) % 4];
+        final double segLen = math.sqrt((b.$1 - a.$1) * (b.$1 - a.$1) + (b.$2 - a.$2) * (b.$2 - a.$2));
+        final int steps = math.max(1, (segLen / stepUnits).round());
+        for (int s = 0; s < steps; s++) {
+          final double t = s / steps;
+          final double px = a.$1 + (b.$1 - a.$1) * t;
+          final double py = a.$2 + (b.$2 - a.$2) * t;
+          stX.add(px);
+          stY.add(py);
+          stMove.add(firstFramePt ? 1 : 0);
+          stColor.add(frameColorIdx);
+          if (firstFramePt) {
+            // غرزة تثبيت خفيفة في بداية إطار التثبيت (Tie-in)
+            final double lockDist = math.min(8.0, segLen * 0.25);
+            if (segLen > 4.0) {
+              final double ux = (b.$1 - a.$1) / segLen;
+              final double uy = (b.$2 - a.$2) / segLen;
+              stX.add(px + ux * lockDist);
+              stY.add(py + uy * lockDist);
+              stMove.add(0);
+              stColor.add(frameColorIdx);
+              stX.add(px);
+              stY.add(py);
+              stMove.add(0);
+              stColor.add(frameColorIdx);
+            }
+            firstFramePt = false;
+          }
+        }
+      }
+      // إغلاق الإطار عند زاوية البداية مع تثبيت خفيف
+      final closePt = corners[startCorner];
+      stX.add(closePt.$1);
+      stY.add(closePt.$2);
+      stMove.add(0);
+      stColor.add(frameColorIdx);
+    }
+
+    // إضافة غرز التصميم نفسه بعد الإطار
+    for (int i = 0; i < dX.length; i++) {
+      stX.add(dX[i]);
+      stY.add(dY[i]);
+      stMove.add((i == 0 && addBastingFrame) ? 1 : dM[i]);
+      stColor.add(dC[i]);
+    }
+
+    // المرحلة 4: تطبيق نقطة البداية والنهاية (شبكة ويلكم 3×3: 1..9) بتحريك الإحداثيات بحيث تصبح النقطة المختارة عند (0, 0)
+    double shiftX = 0.0, shiftY = 0.0;
+    if (startAnchor >= 1 && startAnchor <= 9 && hasBounds) {
+      final int col = (startAnchor - 1) % 3; // 0=يسار, 1=وسط, 2=يمين
+      final int row = (startAnchor - 1) ~/ 3; // 0=أعلى, 1=وسط, 2=أسفل
+      final double ax = col == 0 ? totalMinX : (col == 2 ? totalMaxX : (totalMinX + totalMaxX) * 0.5);
+      final double ay = row == 0 ? totalMinY : (row == 2 ? totalMaxY : (totalMinY + totalMaxY) * 0.5);
+      shiftX = -ax;
+      shiftY = -ay;
+    }
+
+    final Float32List preX = stX.finish();
+    final Float32List preY = stY.finish();
+    final Uint8List preM = stMove.finish();
+    final Uint8List preC = stColor.finish();
+
+    final finalX = _Float32Buf(preX.length + 2);
+    final finalY = _Float32Buf(preY.length + 2);
+    final finalM = _Uint8Buf(preM.length + 2);
+    final finalC = _Uint8Buf(preC.length + 2);
+    final Set<int> usedColors = {};
+
+    for (int i = 0; i < preX.length; i++) {
+      finalX.add(preX[i] + shiftX);
+      finalY.add(preY[i] + shiftY);
+      finalM.add(i == 0 ? 1 : preM[i]);
+      finalC.add(preC[i]);
+      usedColors.add(preC[i]);
+    }
+
+    // إذا كان Auto Start & End مفعّلاً، نعيد الإبرة في النهاية إلى نقطة (0, 0) بقفزة نقية (stMove = 2 بدون إسقاط غرزة)
+    if (startAnchor >= 1 && startAnchor <= 9 && returnToStart && preX.isNotEmpty) {
+      finalX.add(0.0);
+      finalY.add(0.0);
+      finalM.add(2);
+      finalC.add(preC.last);
     }
 
     final seqX = _Float32Buf(math.max(16, src.seqX.length));
     final seqY = _Float32Buf(math.max(16, src.seqY.length));
     for (int i = 0; i < src.seqX.length; i++) {
       final pt = xform(src.seqX[i], src.seqY[i]);
-      seqX.add(pt.$1);
-      seqY.add(pt.$2);
+      seqX.add(pt.$1 + shiftX);
+      seqY.add(pt.$2 + shiftY);
     }
 
     final beadX = _Float32Buf(math.max(16, src.beadX.length));
     final beadY = _Float32Buf(math.max(16, src.beadY.length));
     for (int i = 0; i < src.beadX.length; i++) {
       final pt = xform(src.beadX[i], src.beadY[i]);
-      beadX.add(pt.$1);
-      beadY.add(pt.$2);
+      beadX.add(pt.$1 + shiftX);
+      beadY.add(pt.$2 + shiftY);
     }
 
     return VectorDesignData(
-      stX: stX.finish(),
-      stY: stY.finish(),
-      stMove: stMove.finish(),
-      stColor: stColor.finish(),
+      stX: finalX.finish(),
+      stY: finalY.finish(),
+      stMove: finalM.finish(),
+      stColor: finalC.finish(),
       seqX: seqX.finish(),
       seqY: seqY.finish(),
       seqCode: src.seqCode,
       beadX: beadX.finish(),
       beadY: beadY.finish(),
       beadCode: src.beadCode,
-      paletteArgb: src.paletteArgb,
-      stitches: stX.length,
+      paletteArgb: Int32List.fromList(outPaletteList),
+      stitches: preX.length,
       colorCount: math.max(1, usedColors.length),
       stopsCount: usedColors.length > 1 ? usedColors.length - 1 : 0,
       jumpsCount: src.jumpsCount,
       sequinsCount: src.sequinsCount,
       beadsCount: src.beadsCount,
       trimsCount: src.trimsCount,
-      minX: hasBounds ? minX : 0,
-      maxX: hasBounds ? maxX : 0,
-      minY: hasBounds ? minY : 0,
-      maxY: hasBounds ? maxY : 0,
+      minX: hasBounds ? (totalMinX + shiftX) : 0,
+      maxX: hasBounds ? (totalMaxX + shiftX) : 0,
+      minY: hasBounds ? (totalMinY + shiftY) : 0,
+      maxY: hasBounds ? (totalMaxY + shiftY) : 0,
       hasBounds: hasBounds,
       machineType: src.machineType,
     );
+  }
+
+  /// إعادة توزيع غرز الدرزة (Run Stitches) بطول targetUnits (وحدة 0.1 مم) مع حماية أعمدة الفستون المتعرجة والزوايا الحادة
+  static (Float32List, Float32List, Uint8List, Uint8List) _resampleRunStitches(
+    Float32List xs,
+    Float32List ys,
+    Uint8List mv,
+    Uint8List col,
+    double targetUnits,
+  ) {
+    final int n = xs.length;
+    if (n < 2 || targetUnits < 5.0) return (xs, ys, mv, col);
+
+    // 1) تصنيف نقاط الزكزاك (فستون/تاتامي) لحمايتها من التعديل
+    final Uint8List isReversal = Uint8List(n);
+    for (int i = 1; i < n - 1; i++) {
+      if (mv[i] != 0 || mv[i + 1] != 0 || col[i] != col[i - 1] || col[i] != col[i + 1]) continue;
+      final double v1x = xs[i] - xs[i - 1], v1y = ys[i] - ys[i - 1];
+      final double v2x = xs[i + 1] - xs[i], v2y = ys[i + 1] - ys[i];
+      final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+      final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+      if (l1 > 1.0 && l2 > 1.0) {
+        final double cosT = (v1x * v2x + v1y * v2y) / (l1 * l2);
+        if (cosT < -0.50) {
+          isReversal[i] = 1;
+        }
+      }
+    }
+
+    final Uint8List isSatinPt = Uint8List(n);
+    for (int i = 1; i < n - 1; i++) {
+      if (isReversal[i] != 0 && (isReversal[i - 1] != 0 || isReversal[i + 1] != 0)) {
+        isSatinPt[i] = 1;
+        isSatinPt[i - 1] = 1;
+        isSatinPt[i + 1] = 1;
+      }
+    }
+
+    final outX = _Float32Buf(n);
+    final outY = _Float32Buf(n);
+    final outM = _Uint8Buf(n);
+    final outC = _Uint8Buf(n);
+
+    void emitResampledChain(List<int> chain, int cIdx, bool startMove) {
+      if (chain.isEmpty) return;
+      if (chain.length == 1) {
+        outX.add(xs[chain[0]]);
+        outY.add(ys[chain[0]]);
+        outM.add(startMove ? 1 : 0);
+        outC.add(cIdx);
+        return;
+      }
+
+      // تقسيم السلسلة عند الزوايا الحادة (cosT < 0.65) لحماية الزوايا 100%
+      final List<int> splitPositions = [0];
+      for (int k = 1; k < chain.length - 1; k++) {
+        final int p0 = chain[k - 1], p1 = chain[k], p2 = chain[k + 1];
+        final double v1x = xs[p1] - xs[p0], v1y = ys[p1] - ys[p0];
+        final double v2x = xs[p2] - xs[p1], v2y = ys[p2] - ys[p1];
+        final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+        final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+        if (l1 > 1.0 && l2 > 1.0) {
+          final double cosT = (v1x * v2x + v1y * v2y) / (l1 * l2);
+          if (cosT < 0.65) {
+            splitPositions.add(k);
+          }
+        }
+      }
+      splitPositions.add(chain.length - 1);
+
+      bool isFirstPt = true;
+      for (int sp = 0; sp < splitPositions.length - 1; sp++) {
+        final int aPos = splitPositions[sp];
+        final int bPos = splitPositions[sp + 1];
+
+        // حساب الطول الكلي للقطعة الناعمة بين الزاويتين
+        final List<double> cum = [0.0];
+        double totalL = 0.0;
+        for (int k = aPos + 1; k <= bPos; k++) {
+          final int p0 = chain[k - 1], p1 = chain[k];
+          totalL += math.sqrt((xs[p1] - xs[p0]) * (xs[p1] - xs[p0]) + (ys[p1] - ys[p0]) * (ys[p1] - ys[p0]));
+          cum.add(totalL);
+        }
+
+        if (isFirstPt) {
+          outX.add(xs[chain[aPos]]);
+          outY.add(ys[chain[aPos]]);
+          outM.add(startMove ? 1 : 0);
+          outC.add(cIdx);
+          isFirstPt = false;
+        }
+
+        if (totalL < 1.5) {
+          if (bPos > aPos) {
+            outX.add(xs[chain[bPos]]);
+            outY.add(ys[chain[bPos]]);
+            outM.add(0);
+            outC.add(cIdx);
+          }
+          continue;
+        }
+
+        final int steps = math.max(1, (totalL / targetUnits).round());
+        for (int s = 1; s <= steps; s++) {
+          final double targetD = totalL * (s / steps);
+          int seg = 0;
+          while (seg + 1 < cum.length - 1 && cum[seg + 1] < targetD) {
+            seg++;
+          }
+          final double segStartD = cum[seg];
+          final double segEndD = cum[seg + 1];
+          final double t = (segEndD - segStartD) > 1e-5 ? ((targetD - segStartD) / (segEndD - segStartD)).clamp(0.0, 1.0) : 1.0;
+          final int p0 = chain[aPos + seg];
+          final int p1 = chain[aPos + seg + 1];
+          outX.add(xs[p0] + (xs[p1] - xs[p0]) * t);
+          outY.add(ys[p0] + (ys[p1] - ys[p0]) * t);
+          outM.add(0);
+          outC.add(cIdx);
+        }
+      }
+    }
+
+    int i = 0;
+    while (i < n) {
+      if (isSatinPt[i] != 0) {
+        outX.add(xs[i]);
+        outY.add(ys[i]);
+        outM.add(mv[i]);
+        outC.add(col[i]);
+        i++;
+        continue;
+      }
+
+      // تجميع سلسلة درز متصلة (Run Chain) من نفس اللون بدون قفزات
+      final int cIdx = col[i];
+      final bool startMove = mv[i] != 0 || outX.length == 0 || (i > 0 && col[i - 1] != cIdx);
+      final List<int> chain = [i];
+      int j = i + 1;
+      while (j < n && mv[j] == 0 && col[j] == cIdx && isSatinPt[j] == 0) {
+        chain.add(j);
+        j++;
+      }
+      // إذا كان السطر ينتهي بالاتصال مع عمود فستون مباشرة، نربط النهاية بنقطة بداية الفستون
+      if (j < n && mv[j] == 0 && col[j] == cIdx && isSatinPt[j] != 0) {
+        chain.add(j);
+      }
+      emitResampledChain(chain, cIdx, startMove);
+      i = j;
+    }
+
+    return (outX.finish(), outY.finish(), outM.finish(), outC.finish());
   }
 
   static Future<String?> exportVectorToFile(
@@ -4035,6 +4360,7 @@ class TextToStitchEngine {
   static Future<VectorDesignData?> generateFromText({
     required String text,
     double widthCm = 12.0,
+    double? heightCm,
     double densityMm = 0.45,
     int colorArgb = 0xFFFF1744,
     bool isBold = true,
@@ -4081,16 +4407,30 @@ class TextToStitchEngine {
     final Uint8List pixels = rgba.buffer.asUint8List();
 
     // 2) تنفيذ الحسابات الهندسية في الخيط الخلفي (Isolate)
-    return await Isolate.run(() => _buildStitchesFromMask(
-          pixels: pixels,
-          w: w,
-          h: h,
-          isRtl: isRtl,
-          widthCm: widthCm,
-          densityMm: densityMm,
-          colorArgb: colorArgb,
-          isSatin: isSatin,
-        ));
+    return await Isolate.run(() {
+      final raw = _buildStitchesFromMask(
+        pixels: pixels,
+        w: w,
+        h: h,
+        isRtl: isRtl,
+        widthCm: widthCm,
+        densityMm: densityMm,
+        colorArgb: colorArgb,
+        isSatin: isSatin,
+      );
+      if (raw == null) return null;
+      // ضبط دقيق للطول والعرض بالـ سم حسب جدول المقاسات
+      final double curW = (raw.widthMm ?? 0.0) / 10.0;
+      final double curH = (raw.heightMm ?? 0.0) / 10.0;
+      if (curW > 0.1 && curH > 0.1) {
+        final double sx = (widthCm / curW).clamp(0.25, 4.0);
+        final double sy = heightCm != null ? (heightCm / curH).clamp(0.25, 4.0) : sx;
+        if ((sx - 1.0).abs() > 0.015 || (sy - 1.0).abs() > 0.015) {
+          return VectorDesignEditor.transform(raw, scaleX: sx, scaleY: sy);
+        }
+      }
+      return raw;
+    });
   }
 
   static VectorDesignData? _buildStitchesFromMask({
@@ -4223,7 +4563,8 @@ class TextToStitchEngine {
       bool actualMove = isMove;
       if (isMove && hasNeedlePos) {
         final double d = math.sqrt((ux - curNeedleX) * (ux - curNeedleX) + (uy - curNeedleY) * (uy - curNeedleY));
-        if (d < 22.0) {
+        if (d < 36.0) {
+          // أقصر طريق للكائن المجاور بدون جنبات (Wilcom Closest-Join Bridge)
           actualMove = false;
         }
       }
@@ -4322,7 +4663,29 @@ class TextToStitchEngine {
           continue;
         }
 
-        // ترتيب الأعمدة حسب أقرب نقطة تلاقي
+        // إزالة الشظايا الميكروية (< 3.8px) التي تسبب تشويشاً عند التقاطعات
+        if (columns.length > 1) {
+          final cleanedCols = <_SkelColumn>[];
+          for (final c in columns) {
+            double clen = 0.0;
+            for (int i = 1; i < c.pts.length; i++) {
+              clen += math.sqrt(_dist2(c.pts[i - 1].$1, c.pts[i - 1].$2, c.pts[i].$1, c.pts[i].$2));
+            }
+            if (clen >= 3.8) cleanedCols.add(c);
+          }
+          if (cleanedCols.isNotEmpty) columns = cleanedCols;
+        }
+
+        // نقطة الجذب للكائن التالي (أقرب نقطة للانتقال السلس بدون جنبات)
+        final int compIdxInOrdered = ordered.indexOf(comp);
+        double? nextCompX, nextCompY;
+        if (compIdxInOrdered >= 0 && compIdxInOrdered + 1 < ordered.length) {
+          final nc = ordered[compIdxInOrdered + 1];
+          nextCompX = isRtl ? nc.maxX.toDouble() : nc.minX.toDouble();
+          nextCompY = (nc.minY + nc.maxY) * 0.5;
+        }
+
+        // خوارزمية Auto-Branching (ويلكم): ترتيب الأعمدة حسب أقرب مسار متسلسل وتحديد أسلوب التطريز (دخول بدرز ورجوع بفستون للفرع المغلق، أو عبور أمامي للفرع الموصل للكائن التالي)
         final List<_SkelColumn> orderedCols = [];
         final List<bool> used = List<bool>.filled(columns.length, false);
         double refX = hasNeedlePos ? (curNeedleX / pxToUnits) : (isRtl ? comp.maxX.toDouble() : comp.minX.toDouble());
@@ -4331,19 +4694,19 @@ class TextToStitchEngine {
         for (int k = 0; k < columns.length; k++) {
           int bestIdx = -1;
           bool bestRev = false;
-          double bestD = 1e18;
+          double bestScore = 1e18;
           for (int j = 0; j < columns.length; j++) {
             if (used[j] || columns[j].pts.length < 2) continue;
             final pts = columns[j].pts;
             final dStart = _dist2(refX, refY, pts.first.$1, pts.first.$2);
-            if (dStart < bestD) {
-              bestD = dStart;
+            if (dStart < bestScore) {
+              bestScore = dStart;
               bestIdx = j;
               bestRev = false;
             }
             final dEnd = _dist2(refX, refY, pts.last.$1, pts.last.$2);
-            if (dEnd < bestD) {
-              bestD = dEnd;
+            if (dEnd < bestScore) {
+              bestScore = dEnd;
               bestIdx = j;
               bestRev = true;
             }
@@ -4353,23 +4716,57 @@ class TextToStitchEngine {
           final chosen = columns[bestIdx];
           final orderedPts = bestRev ? chosen.pts.reversed.toList() : chosen.pts;
           orderedCols.add(_SkelColumn(orderedPts, chosen.isLoop));
-          refX = orderedPts.first.$1;
-          refY = orderedPts.first.$2;
+          refX = orderedPts.last.$1;
+          refY = orderedPts.last.$2;
         }
 
-        // المرحلة 5 + 6: استخراج الحافتين بإسقاط الأشعة تحت البكسل (مع حماية البوز) وتوليد الفستون النظيف
-        for (final col in orderedCols) {
-          _emitSmoothRayCastSatinColumn(
-            col: col,
-            alphaCrop: alphaCrop,
-            bw: bw,
-            bh: bh,
-            ox: ox,
-            oy: oy,
-            pxToUnits: pxToUnits,
-            rowStepPx: rowStepPx,
-            addPt: addPt,
-          );
+        // المرحلة 5 + 6: استخراج الحافتين بإسقاط الأشعة + تنقية التشويش بمرشح الوسيط + Auto-Branching بدون جنبات
+        for (int cIdx = 0; cIdx < orderedCols.length; cIdx++) {
+          final col = orderedCols[cIdx];
+          // تحديد الهدف التالي (العمود التالي داخل الحرف أو الحرف المجاور)
+          double? tgtX = nextCompX;
+          double? tgtY = nextCompY;
+          if (cIdx + 1 < orderedCols.length) {
+            final nPts = orderedCols[cIdx + 1].pts;
+            final dToFirst = _dist2(col.pts.last.$1, col.pts.last.$2, nPts.first.$1, nPts.first.$2);
+            final dToStart = _dist2(col.pts.first.$1, col.pts.first.$2, nPts.first.$1, nPts.first.$2);
+            tgtX = nPts.first.$1;
+            tgtY = nPts.first.$2;
+            // إذا كان الهدف التالي أقرب لبداية العمود (فرع جانبي مثل ألف ط): ندخل بدرز وسط ونرجع بفستون لنقطة الالتقاء بدون قفزة!
+            final bool returnToStart = dToStart <= dToFirst;
+            _emitSmoothRayCastSatinColumn(
+              col: col,
+              alphaCrop: alphaCrop,
+              bw: bw,
+              bh: bh,
+              ox: ox,
+              oy: oy,
+              pxToUnits: pxToUnits,
+              rowStepPx: rowStepPx,
+              returnToStart: returnToStart,
+              addPt: addPt,
+            );
+          } else {
+            // آخر عمود في الحرف: إن كان الحرف التالي أقرب لنهايته نخرج عند نهايته مباشرة (Through-Branch) بدون قفزة
+            bool returnToStart = true;
+            if (tgtX != null && tgtY != null) {
+              final dStart = _dist2(col.pts.first.$1, col.pts.first.$2, tgtX, tgtY);
+              final dEnd = _dist2(col.pts.last.$1, col.pts.last.$2, tgtX, tgtY);
+              returnToStart = dStart < dEnd;
+            }
+            _emitSmoothRayCastSatinColumn(
+              col: col,
+              alphaCrop: alphaCrop,
+              bw: bw,
+              bh: bh,
+              ox: ox,
+              oy: oy,
+              pxToUnits: pxToUnits,
+              rowStepPx: rowStepPx,
+              returnToStart: returnToStart,
+              addPt: addPt,
+            );
+          }
         }
       }
     } else {
@@ -5108,6 +5505,16 @@ class TextToStitchEngine {
   }
 
   /// المرحلة 5 + 6: استخراج الحافتين بإسقاط الأشعة تحت البكسل (مع حماية البوز) + تنعيم الحواف + تقصير متعدد المستويات
+  static double _median3(double a, double b, double c) {
+    if (a > b) {
+      if (b > c) return b;
+      return a > c ? c : a;
+    } else {
+      if (a > c) return a;
+      return b > c ? c : b;
+    }
+  }
+
   static void _emitSmoothRayCastSatinColumn({
     required _SkelColumn col,
     required Uint8List alphaCrop,
@@ -5117,82 +5524,119 @@ class TextToStitchEngine {
     required int oy,
     required double pxToUnits,
     required double rowStepPx,
+    required bool returnToStart,
     required void Function(double, double, bool) addPt,
   }) {
     final resampled = _cornerPreservingSmoothAndResample(col.pts, rowStepPx, col.isLoop);
     if (resampled.length < 2) return;
 
-    // 1) الدخول بدرز وسط عكسي (Reverse Center-Walk Underlay) ليصل بالضبط لبداية الفستون بدون قفزة
+    // 1) معادلة Auto-Branching:
+    // - إذا returnToStart = true (فرع جانبي مثل ألف ط): الدخول بدرز وسط للأمام والرجوع بفستون لنقطة الالتقاء بدون قفزة!
+    // - إذا returnToStart = false (فرع موصّل للكائن التالي): درز وسط ذهاب وإياب خفيف أو تثبيت ثم فستون للأمام حتى يخرج عند أقرب نقطة للكائن المجاور!
     final double runStepUnits = 22.0;
-    addPt(resampled.first.$1 * pxToUnits, resampled.first.$2 * pxToUnits, true);
-    double accRun = 0.0;
-    for (int i = 1; i < resampled.length; i++) {
-      final dx = (resampled[i].$1 - resampled[i - 1].$1) * pxToUnits;
-      final dy = (resampled[i].$2 - resampled[i - 1].$2) * pxToUnits;
-      accRun += math.sqrt(dx * dx + dy * dy);
-      if (accRun >= runStepUnits || i == resampled.length - 1) {
-        addPt(resampled[i].$1 * pxToUnits, resampled[i].$2 * pxToUnits, false);
-        accRun = 0.0;
+    void emitCenterRun(List<(double, double, double)> path, bool startWithMove) {
+      addPt(path.first.$1 * pxToUnits, path.first.$2 * pxToUnits, startWithMove);
+      double accRun = 0.0;
+      for (int i = 1; i < path.length; i++) {
+        final dx = (path[i].$1 - path[i - 1].$1) * pxToUnits;
+        final dy = (path[i].$2 - path[i - 1].$2) * pxToUnits;
+        accRun += math.sqrt(dx * dx + dy * dy);
+        if (accRun >= runStepUnits || i == path.length - 1) {
+          addPt(path[i].$1 * pxToUnits, path[i].$2 * pxToUnits, false);
+          accRun = 0.0;
+        }
       }
     }
 
-    // 2) بناء الحافة اليسرى والحافة اليمنى عبر إسقاط الأشعة تحت البكسل على مسار الرجوع
-    final rev = resampled.reversed.toList();
-    final int n = rev.length;
-    final List<double> lxArr = List<double>.filled(n, 0.0);
-    final List<double> lyArr = List<double>.filled(n, 0.0);
-    final List<double> rxArr = List<double>.filled(n, 0.0);
-    final List<double> ryArr = List<double>.filled(n, 0.0);
+    final List<(double, double, double)> satinPath;
+    if (returnToStart) {
+      emitCenterRun(resampled, true);
+      satinPath = resampled.reversed.toList();
+    } else {
+      // للفرع الموصّل: نبدأ من البداية (أقرب نقطة للفرع السابق)، نثبّت الحافة الأولى ذهاباً وإياباً فقط إذا كان العمود طويلاً، ثم نطرز فستون للأمام نحو الكائن التالي
+      addPt(resampled.first.$1 * pxToUnits, resampled.first.$2 * pxToUnits, true);
+      satinPath = resampled;
+    }
+
+    // 2) استخراج عرض الحافتين بإسقاط الأشعة تحت البكسل + مرشح الوسيط (Median-3) لإزالة أي تشويش أو طفرات في العرض
+    final int n = satinPath.length;
+    final List<double> nxArr = List<double>.filled(n, 0.0);
+    final List<double> nyArr = List<double>.filled(n, 0.0);
+    final List<double> dLArr = List<double>.filled(n, 0.0);
+    final List<double> dRArr = List<double>.filled(n, 0.0);
+    final List<bool> bendArr = List<bool>.filled(n, false);
 
     for (int i = 0; i < n; i++) {
       final int iPrev = math.max(0, i - 2);
       final int iNext = math.min(n - 1, i + 2);
-      final double tx = rev[iNext].$1 - rev[iPrev].$1;
-      final double ty = rev[iNext].$2 - rev[iPrev].$2;
+      final double tx = satinPath[iNext].$1 - satinPath[iPrev].$1;
+      final double ty = satinPath[iNext].$2 - satinPath[iPrev].$2;
       final double tLen = math.sqrt(tx * tx + ty * ty);
       double nx = 0.0, ny = 1.0;
       if (tLen > 1e-4) {
         nx = -ty / tLen;
         ny = tx / tLen;
       }
+      nxArr[i] = nx;
+      nyArr[i] = ny;
 
-      // فحص إن كانت النقطة عند زاوية حادة (بوز) لنسمح للشعاع الخارجي بالوصول لقمة البوز!
       bool isBend = false;
       if (i > 1 && i < n - 2) {
-        final double v1x = rev[i].$1 - rev[i - 2].$1, v1y = rev[i].$2 - rev[i - 2].$2;
-        final double v2x = rev[i + 2].$1 - rev[i].$1, v2y = rev[i + 2].$2 - rev[i].$2;
+        final double v1x = satinPath[i].$1 - satinPath[i - 2].$1, v1y = satinPath[i].$2 - satinPath[i - 2].$2;
+        final double v2x = satinPath[i + 2].$1 - satinPath[i].$1, v2y = satinPath[i + 2].$2 - satinPath[i].$2;
         final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
         final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
         if (l1 > 1e-3 && l2 > 1e-3 && (v1x * v2x + v1y * v2y) / (l1 * l2) < 0.78) {
           isBend = true;
         }
       }
+      bendArr[i] = isBend;
 
-      final double cx = rev[i].$1 - ox;
-      final double cy = rev[i].$2 - oy;
-      final double rBase = rev[i].$3.clamp(1.6, 36.0);
-      final double maxAllowed = isBend ? (rBase * 2.25) : (rBase * 1.48);
+      final double cx = satinPath[i].$1 - ox;
+      final double cy = satinPath[i].$2 - oy;
+      final double rBase = satinPath[i].$3.clamp(1.6, 36.0);
+      final double maxAllowed = isBend ? (rBase * 2.25) : (rBase * 1.44);
 
       double dLeft = _rayEdgeDist(alphaCrop, bw, bh, cx, cy, nx, ny, maxD: maxAllowed + 4.0);
       double dRight = _rayEdgeDist(alphaCrop, bw, bh, cx, cy, -nx, -ny, maxD: maxAllowed + 4.0);
 
-      // كبح التمدد عند تقاطعات T (حيث يمتد الشعاع داخل العمود المتقاطع) مع الإبقاء على البوز الحقيقي
-      if (dLeft > maxAllowed) dLeft = rBase * 1.04;
-      if (dRight > maxAllowed) dRight = rBase * 1.04;
+      if (dLeft > maxAllowed) dLeft = rBase * 1.03;
+      if (dRight > maxAllowed) dRight = rBase * 1.03;
       if (dLeft < 0.8 && dRight < 0.8) {
         dLeft = rBase * 0.95;
         dRight = rBase * 0.95;
       }
 
-      // تعويض شد القماش (Pull Compensation ~0.12 مم لكل طرف)
       final double pullPx = 1.2 / pxToUnits;
-      dLeft += pullPx;
-      dRight += pullPx;
+      dLArr[i] = dLeft + pullPx;
+      dRArr[i] = dRight + pullPx;
+    }
 
-      lxArr[i] = rev[i].$1 + nx * dLeft;
-      lyArr[i] = rev[i].$2 + ny * dLeft;
-      rxArr[i] = rev[i].$1 - nx * dRight;
-      ryArr[i] = rev[i].$2 - ny * dRight;
+    // مرشح الوسيط (Median-3) لإزالة الطفرات العرضية الناتجة عن التقاطعات مع حماية البوز الحقيقي
+    if (n >= 3) {
+      final fL = List<double>.from(dLArr);
+      final fR = List<double>.from(dRArr);
+      for (int i = 1; i < n - 1; i++) {
+        if (!bendArr[i]) {
+          fL[i] = _median3(dLArr[i - 1], dLArr[i], dLArr[i + 1]);
+          fR[i] = _median3(dRArr[i - 1], dRArr[i], dRArr[i + 1]);
+        }
+      }
+      for (int i = 0; i < n; i++) {
+        dLArr[i] = fL[i];
+        dRArr[i] = fR[i];
+      }
+    }
+
+    final List<double> lxArr = List<double>.filled(n, 0.0);
+    final List<double> lyArr = List<double>.filled(n, 0.0);
+    final List<double> rxArr = List<double>.filled(n, 0.0);
+    final List<double> ryArr = List<double>.filled(n, 0.0);
+    for (int i = 0; i < n; i++) {
+      lxArr[i] = satinPath[i].$1 + nxArr[i] * dLArr[i];
+      lyArr[i] = satinPath[i].$2 + nyArr[i] * dLArr[i];
+      rxArr[i] = satinPath[i].$1 - nxArr[i] * dRArr[i];
+      ryArr[i] = satinPath[i].$2 - nyArr[i] * dRArr[i];
     }
 
     // 3) تنعيم الحافتين مع حماية الزوايا الحادة (البوز لا يُقص ولا يُدوّر!)
@@ -5644,6 +6088,8 @@ class InkStitchFontEngine {
     required EmbFontMeta meta,
     required String text,
     double letterHeightCm = 2.5,
+    double? targetWidthCm,
+    double? targetHeightCm,
     double densityMm = 0.42,
     double extraSpacingMm = 0.0,
     int underlayMode = 1, // 0 = بدون، 1 = درز وسط تلقائي، 2 = حواف + وسط
@@ -5654,15 +6100,30 @@ class InkStitchFontEngine {
     final rawJson = await InkStitchFontCatalog.loadRawFontJson(meta);
     if (rawJson == null || rawJson.isEmpty) return null;
 
-    return await Isolate.run(() => _generateSync(
-          rawJson: rawJson,
-          text: trimmed,
-          letterHeightCm: letterHeightCm,
-          densityMm: densityMm,
-          extraSpacingMm: extraSpacingMm,
-          underlayMode: underlayMode,
-          colorArgb: colorArgb,
-        ));
+    return await Isolate.run(() {
+      final raw = _generateSync(
+        rawJson: rawJson,
+        text: trimmed,
+        letterHeightCm: letterHeightCm,
+        densityMm: densityMm,
+        extraSpacingMm: extraSpacingMm,
+        underlayMode: underlayMode,
+        colorArgb: colorArgb,
+      );
+      if (raw == null) return null;
+      if (targetWidthCm != null || targetHeightCm != null) {
+        final double curW = (raw.widthMm ?? 0.0) / 10.0;
+        final double curH = (raw.heightMm ?? 0.0) / 10.0;
+        if (curW > 0.1 && curH > 0.1) {
+          final double sx = targetWidthCm != null ? (targetWidthCm / curW).clamp(0.25, 4.0) : (targetHeightCm! / curH).clamp(0.25, 4.0);
+          final double sy = targetHeightCm != null ? (targetHeightCm / curH).clamp(0.25, 4.0) : sx;
+          if ((sx - 1.0).abs() > 0.015 || (sy - 1.0).abs() > 0.015) {
+            return VectorDesignEditor.transform(raw, scaleX: sx, scaleY: sy);
+          }
+        }
+      }
+      return raw;
+    });
   }
 
   static VectorDesignData? _generateSync({
@@ -5723,7 +6184,7 @@ class InkStitchFontEngine {
       bool actualMove = isMove;
       if (isMove && hasNeedle) {
         final double d = math.sqrt((ux - curNeedleX) * (ux - curNeedleX) + (uy - curNeedleY) * (uy - curNeedleY));
-        if (d < 22.0) {
+        if (d < 36.0) {
           actualMove = false;
         }
       }
@@ -6208,3 +6669,326 @@ class InkStitchFontEngine {
 }
 
 // === TARIK_INKSTITCH_FONT_ENGINE_END ===
+
+
+// === TARIK_WILCOM_OBJECT_EDITOR_START ===
+
+class DesignObject {
+  final int id;
+  final int colorIndex;
+  final List<(int, int)> ranges; // [start, end) indices inside VectorDesignData
+  final double minX, maxX, minY, maxY;
+  final int stitchCount;
+
+  const DesignObject({
+    required this.id,
+    required this.colorIndex,
+    required this.ranges,
+    required this.minX,
+    required this.maxX,
+    required this.minY,
+    required this.maxY,
+    required this.stitchCount,
+  });
+
+  double get centerX => (minX + maxX) * 0.5;
+  double get centerY => (minY + maxY) * 0.5;
+  double get widthMm => (maxX - minX) / 10.0;
+  double get heightMm => (maxY - minY) / 10.0;
+}
+
+class DesignObjectTransform {
+  final int sourceObjectId;
+  double dx; // in 0.1 mm units
+  double dy;
+  double scaleX;
+  double scaleY;
+  double rotationDeg;
+  bool flipH;
+  bool flipV;
+  bool deleted;
+
+  DesignObjectTransform({
+    required this.sourceObjectId,
+    this.dx = 0.0,
+    this.dy = 0.0,
+    this.scaleX = 1.0,
+    this.scaleY = 1.0,
+    this.rotationDeg = 0.0,
+    this.flipH = false,
+    this.flipV = false,
+    this.deleted = false,
+  });
+
+  DesignObjectTransform copyWith({
+    double? dx,
+    double? dy,
+    double? scaleX,
+    double? scaleY,
+    double? rotationDeg,
+    bool? flipH,
+    bool? flipV,
+    bool? deleted,
+  }) {
+    return DesignObjectTransform(
+      sourceObjectId: sourceObjectId,
+      dx: dx ?? this.dx,
+      dy: dy ?? this.dy,
+      scaleX: scaleX ?? this.scaleX,
+      scaleY: scaleY ?? this.scaleY,
+      rotationDeg: rotationDeg ?? this.rotationDeg,
+      flipH: flipH ?? this.flipH,
+      flipV: flipV ?? this.flipV,
+      deleted: deleted ?? this.deleted,
+    );
+  }
+
+  /// حساب الصندوق المحيط للعنصر بعد تطبيق التحريك والتكبير والدوران
+  (double, double, double, double) transformedBounds(DesignObject obj) {
+    final double cx = obj.centerX;
+    final double cy = obj.centerY;
+    final double rad = rotationDeg * math.pi / 180.0;
+    final double ca = math.cos(rad);
+    final double sa = math.sin(rad);
+
+    final corners = [
+      (obj.minX, obj.minY),
+      (obj.maxX, obj.minY),
+      (obj.maxX, obj.maxY),
+      (obj.minX, obj.maxY),
+    ];
+
+    double bMinX = double.infinity, bMaxX = -double.infinity;
+    double bMinY = double.infinity, bMaxY = -double.infinity;
+    for (final c in corners) {
+      final double lx = (c.$1 - cx) * scaleX * (flipH ? -1.0 : 1.0);
+      final double ly = (c.$2 - cy) * scaleY * (flipV ? -1.0 : 1.0);
+      final double rx = lx * ca - ly * sa + cx + dx;
+      final double ry = lx * sa + ly * ca + cy + dy;
+      if (rx < bMinX) bMinX = rx;
+      if (rx > bMaxX) bMaxX = rx;
+      if (ry < bMinY) bMinY = ry;
+      if (ry > bMaxY) bMaxY = ry;
+    }
+    return (bMinX, bMaxX, bMinY, bMaxY);
+  }
+}
+
+/// محرك تقسيم التصميم إلى عناصر قابلة للتحديد والتحريك والتكبير والدوران والنسخ والحذف (مثل برنامج ويلكم)
+class DesignObjectEditor {
+  /// تقسيم ملف التطريز تلقائياً إلى عناصر مستقلة (حسب القفزات والألوان وتقارب الكتل)
+  static List<DesignObject> segment(VectorDesignData data) {
+    final int n = data.stX.length;
+    if (n < 2) return const [];
+
+    // 1) استخراج المقاطع المتصلة (Runs) المفصولة بـ Move أو Color Change
+    final List<({int color, int start, int end, double minX, double maxX, double minY, double maxY})> runs = [];
+    int rStart = 0;
+    int rColor = data.stColor[0];
+    double rMinX = data.stX[0], rMaxX = data.stX[0];
+    double rMinY = data.stY[0], rMaxY = data.stY[0];
+
+    void closeRun(int endIdx) {
+      if (endIdx - rStart >= 2) {
+        runs.add((color: rColor, start: rStart, end: endIdx, minX: rMinX, maxX: rMaxX, minY: rMinY, maxY: rMaxY));
+      }
+    }
+
+    for (int i = 1; i < n; i++) {
+      final double x = data.stX[i], y = data.stY[i];
+      final int c = data.stColor[i];
+      final bool isJump = data.stMove[i] != 0 || c != rColor;
+      final double dPrev = math.sqrt((x - data.stX[i - 1]) * (x - data.stX[i - 1]) + (y - data.stY[i - 1]) * (y - data.stY[i - 1]));
+
+      if (isJump || dPrev > 48.0) {
+        closeRun(i);
+        rStart = i;
+        rColor = c;
+        rMinX = rMaxX = x;
+        rMinY = rMaxY = y;
+      } else {
+        if (x < rMinX) rMinX = x;
+        if (x > rMaxX) rMaxX = x;
+        if (y < rMinY) rMinY = y;
+        if (y > rMaxY) rMaxY = y;
+      }
+    }
+    closeRun(n);
+
+    if (runs.isEmpty) return const [];
+
+    // 2) دمج المقاطع المتتالية من نفس اللون والمتداخلة مكانياً (<= 2.5 مم) لتشكيل عنصر واحد منطقي (حرف / وردة / وحدة)
+    const double mergePad = 25.0; // 2.5 mm
+    final List<DesignObject> objects = [];
+
+    int curColor = runs[0].color;
+    List<(int, int)> curRanges = [(runs[0].start, runs[0].end)];
+    double cMinX = runs[0].minX, cMaxX = runs[0].maxX;
+    double cMinY = runs[0].minY, cMaxY = runs[0].maxY;
+    int cStitches = runs[0].end - runs[0].start;
+
+    void flushObj() {
+      objects.add(DesignObject(
+        id: objects.length,
+        colorIndex: curColor,
+        ranges: List.from(curRanges),
+        minX: cMinX,
+        maxX: cMaxX,
+        minY: cMinY,
+        maxY: cMaxY,
+        stitchCount: cStitches,
+      ));
+    }
+
+    for (int i = 1; i < runs.length; i++) {
+      final r = runs[i];
+      final bool sameColor = r.color == curColor;
+      final bool overlaps = r.minX <= cMaxX + mergePad &&
+          r.maxX >= cMinX - mergePad &&
+          r.minY <= cMaxY + mergePad &&
+          r.maxY >= cMinY - mergePad;
+
+      if (sameColor && overlaps && objects.length + (runs.length - i) > 1) {
+        curRanges.add((r.start, r.end));
+        if (r.minX < cMinX) cMinX = r.minX;
+        if (r.maxX > cMaxX) cMaxX = r.maxX;
+        if (r.minY < cMinY) cMinY = r.minY;
+        if (r.maxY > cMaxY) cMaxY = r.maxY;
+        cStitches += (r.end - r.start);
+      } else {
+        flushObj();
+        curColor = r.color;
+        curRanges = [(r.start, r.end)];
+        cMinX = r.minX;
+        cMaxX = r.maxX;
+        cMinY = r.minY;
+        cMaxY = r.maxY;
+        cStitches = r.end - r.start;
+      }
+    }
+    flushObj();
+
+    return objects;
+  }
+
+  /// تحديد العنصر الذي ضغط عليه المستخدم بدقة (يختار أصغر صندوق محيط يقع داخله النقر)
+  static int? hitTest(
+    List<DesignObject> objects,
+    List<DesignObjectTransform> transforms,
+    double designX,
+    double designY, {
+    double padUnits = 25.0,
+  }) {
+    int? bestIdx;
+    double bestArea = double.infinity;
+
+    for (int tIdx = 0; tIdx < transforms.length; tIdx++) {
+      final tf = transforms[tIdx];
+      if (tf.deleted) continue;
+      if (tf.sourceObjectId < 0 || tf.sourceObjectId >= objects.length) continue;
+      final obj = objects[tf.sourceObjectId];
+      final b = tf.transformedBounds(obj);
+      if (designX >= b.$1 - padUnits &&
+          designX <= b.$2 + padUnits &&
+          designY >= b.$3 - padUnits &&
+          designY <= b.$4 + padUnits) {
+        final double area = math.max(1.0, (b.$2 - b.$1) * (b.$4 - b.$3));
+        if (area < bestArea) {
+          bestArea = area;
+          bestIdx = tIdx;
+        }
+      }
+    }
+    return bestIdx;
+  }
+
+  /// بناء التصميم الجديد بعد تطبيق جميع تعديلات العناصر الفردية (تحريك، تكبير، تدوير، قلب، تكرار، حذف)
+  static VectorDesignData apply(
+    VectorDesignData src,
+    List<DesignObject> objects,
+    List<DesignObjectTransform> transforms,
+  ) {
+    final stX = _Float32Buf(math.max(256, src.stX.length));
+    final stY = _Float32Buf(math.max(256, src.stY.length));
+    final stMove = _Uint8Buf(math.max(256, src.stX.length));
+    final stColor = _Uint8Buf(math.max(256, src.stX.length));
+
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    final Set<int> usedColors = {};
+
+    for (final tf in transforms) {
+      if (tf.deleted) continue;
+      if (tf.sourceObjectId < 0 || tf.sourceObjectId >= objects.length) continue;
+      final obj = objects[tf.sourceObjectId];
+      final double cx = obj.centerX;
+      final double cy = obj.centerY;
+      final double rad = tf.rotationDeg * math.pi / 180.0;
+      final double ca = math.cos(rad);
+      final double sa = math.sin(rad);
+
+      bool firstOfObj = true;
+      for (final rng in obj.ranges) {
+        final int s = rng.$1.clamp(0, src.stX.length);
+        final int e = rng.$2.clamp(s, src.stX.length);
+        for (int i = s; i < e; i++) {
+          final double lx = (src.stX[i] - cx) * tf.scaleX * (tf.flipH ? -1.0 : 1.0);
+          final double ly = (src.stY[i] - cy) * tf.scaleY * (tf.flipV ? -1.0 : 1.0);
+          final double rx = lx * ca - ly * sa + cx + tf.dx;
+          final double ry = lx * sa + ly * ca + cy + tf.dy;
+
+          final int mv = (firstOfObj || i == s) ? 1 : src.stMove[i];
+          final int c = src.stColor[i];
+
+          stX.add(rx);
+          stY.add(ry);
+          stMove.add(mv);
+          stColor.add(c);
+          usedColors.add(c);
+          firstOfObj = false;
+
+          if (!hasBounds) {
+            minX = maxX = rx;
+            minY = maxY = ry;
+            hasBounds = true;
+          } else {
+            if (rx < minX) minX = rx;
+            if (rx > maxX) maxX = rx;
+            if (ry < minY) minY = ry;
+            if (ry > maxY) maxY = ry;
+          }
+        }
+      }
+    }
+
+    return VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      seqX: Float32List(0),
+      seqY: Float32List(0),
+      seqCode: Uint8List(0),
+      beadX: Float32List(0),
+      beadY: Float32List(0),
+      beadCode: Uint8List(0),
+      paletteArgb: src.paletteArgb,
+      stitches: stX.length,
+      colorCount: math.max(1, usedColors.length),
+      stopsCount: usedColors.length > 1 ? usedColors.length - 1 : 0,
+      jumpsCount: src.jumpsCount,
+      sequinsCount: 0,
+      beadsCount: 0,
+      trimsCount: src.trimsCount,
+      minX: hasBounds ? minX : 0,
+      maxX: hasBounds ? maxX : 0,
+      minY: hasBounds ? minY : 0,
+      maxY: hasBounds ? maxY : 0,
+      hasBounds: hasBounds,
+      machineType: src.machineType,
+    );
+  }
+}
+
+// === TARIK_WILCOM_OBJECT_EDITOR_END ===
