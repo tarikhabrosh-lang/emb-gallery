@@ -180,41 +180,25 @@ fonts_dir = "assets/fonts"
 os.makedirs(fonts_dir, exist_ok=True)
 
 FONT_SPECS = [
-    ("Amiri", "Amiri-Bold.ttf", [
-        "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Bold.ttf",
-        "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Bold.ttf",
-    ]),
-    ("ArefRuqaa", "ArefRuqaa-Bold.ttf", [
-        "https://github.com/google/fonts/raw/main/ofl/arefruqaa/ArefRuqaa-Bold.ttf",
-        "https://raw.githubusercontent.com/google/fonts/main/ofl/arefruqaa/ArefRuqaa-Bold.ttf",
-    ]),
-    ("Tajawal", "Tajawal-Bold.ttf", [
-        "https://github.com/google/fonts/raw/main/ofl/tajawal/Tajawal-Bold.ttf",
-        "https://raw.githubusercontent.com/google/fonts/main/ofl/tajawal/Tajawal-Bold.ttf",
-    ]),
     ("Lalezar", "Lalezar-Regular.ttf", [
         "https://github.com/google/fonts/raw/main/ofl/lalezar/Lalezar-Regular.ttf",
         "https://raw.githubusercontent.com/google/fonts/main/ofl/lalezar/Lalezar-Regular.ttf",
-    ]),
-    ("Rakkas", "Rakkas-Regular.ttf", [
-        "https://github.com/google/fonts/raw/main/ofl/rakkas/Rakkas-Regular.ttf",
-        "https://raw.githubusercontent.com/google/fonts/main/ofl/rakkas/Rakkas-Regular.ttf",
     ]),
     ("ReemKufi", "ReemKufi-Bold.ttf", [
         "https://github.com/google/fonts/raw/main/ofl/reemkufi/static/ReemKufi-Bold.ttf",
         "https://raw.githubusercontent.com/google/fonts/main/ofl/reemkufi/static/ReemKufi-Bold.ttf",
     ]),
+    ("Tajawal", "Tajawal-Bold.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/tajawal/Tajawal-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/tajawal/Tajawal-Bold.ttf",
+    ]),
+    ("Amiri", "Amiri-Bold.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Bold.ttf",
+    ]),
     ("Lobster", "Lobster-Regular.ttf", [
         "https://github.com/google/fonts/raw/main/ofl/lobster/Lobster-Regular.ttf",
         "https://raw.githubusercontent.com/google/fonts/main/ofl/lobster/Lobster-Regular.ttf",
-    ]),
-    ("GreatVibes", "GreatVibes-Regular.ttf", [
-        "https://github.com/google/fonts/raw/main/ofl/greatvibes/GreatVibes-Regular.ttf",
-        "https://raw.githubusercontent.com/google/fonts/main/ofl/greatvibes/GreatVibes-Regular.ttf",
-    ]),
-    ("Pacifico", "Pacifico-Regular.ttf", [
-        "https://github.com/google/fonts/raw/main/ofl/pacifico/Pacifico-Regular.ttf",
-        "https://raw.githubusercontent.com/google/fonts/main/ofl/pacifico/Pacifico-Regular.ttf",
     ]),
     ("BebasNeue", "BebasNeue-Regular.ttf", [
         "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf",
@@ -223,6 +207,10 @@ FONT_SPECS = [
     ("Cinzel", "Cinzel-Bold.ttf", [
         "https://github.com/google/fonts/raw/main/ofl/cinzel/static/Cinzel-Bold.ttf",
         "https://raw.githubusercontent.com/google/fonts/main/ofl/cinzel/static/Cinzel-Bold.ttf",
+    ]),
+    ("Pacifico", "Pacifico-Regular.ttf", [
+        "https://github.com/google/fonts/raw/main/ofl/pacifico/Pacifico-Regular.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/pacifico/Pacifico-Regular.ttf",
     ]),
 ]
 
@@ -278,6 +266,12 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 EMB_FONTS_DIR = "assets/emb_fonts"
+if os.path.isdir(EMB_FONTS_DIR):
+    for _old_f in glob.glob(os.path.join(EMB_FONTS_DIR, "*.json")):
+        try:
+            os.remove(_old_f)
+        except Exception:
+            pass
 os.makedirs(EMB_FONTS_DIR, exist_ok=True)
 
 def _emb_parse_len_mm(val):
@@ -964,30 +958,22 @@ def _emb_compile_svg_font(svg_bytes, font_meta, font_id, name_ar, name_en):
     return out_data
 
 def _emb_build_open_source_fonts():
-    # Priority list of diverse open-source satin fonts: (slug_keyword, ar_label, en_label)
+    # Top 5 cleanest, highest-quality English satin embroidery fonts (no weird/spiky fonts!)
     PRIORITY_ENGLISH = [
-        ("chopin", "Chopin مخطوط", "Chopin Script"),
-        ("bluenesia", "Bluenesia مشبّك", "Bluenesia Satin"),
-        ("great_vibes", "Great Vibes", "Great Vibes"),
-        ("pacifico", "Pacifico عريض", "Pacifico"),
-        ("lobster", "Lobster مشبّك", "Lobster"),
-        ("allura", "Allura ناعم", "Allura"),
-        ("garamond", "Garamond كلاسيك", "Garamond"),
-        ("cinzel", "Cinzel روماني", "Cinzel"),
-        ("geneva", "Geneva حديث", "Geneva"),
-        ("glacier", "Glacier نظيف", "Glacier"),
-        ("apex", "Apex رياضي", "Apex Block"),
-        ("anton", "Anton عريض", "Anton Bold"),
-        ("barstitch", "Barstitch كلاسيك", "Barstitch"),
-        ("montserrat", "Montserrat عصري", "Montserrat"),
-        ("oswald", "Oswald طويل", "Oswald"),
-        ("inkstitch_small", "Small صغير", "Ink/Stitch Small"),
-        ("courgette", "Courgette", "Courgette"),
-        ("times", "Times كلاسيك", "Times Satin"),
+        ("geneva", "E1", "E1"),
+        ("glacier", "E1", "E1"),
+        ("montserrat", "E1", "E1"),
+        ("apex", "E2", "E2"),
+        ("anton", "E2", "E2"),
+        ("garamond", "E3", "E3"),
+        ("cinzel", "E3", "E3"),
+        ("lobster", "E4", "E4"),
+        ("pacifico", "E4", "E4"),
+        ("barstitch", "E5", "E5"),
+        ("oswald", "E5", "E5"),
     ]
     ARABIC_NAMES = {
-        "computer": ("حاسوب (فستون عربي)", "Computer Arabic"),
-        "computer_small": ("حاسوب صغير (فستون)", "Computer Small Arabic"),
+        "computer": ("A1", "A1"),
     }
 
     REPO_ZIPS = [
@@ -1063,7 +1049,9 @@ def _emb_build_open_source_fonts():
             clean_id = re.sub(r'[^a-z0-9_]', '_', slug)
             if clean_id in seen_ids:
                 continue
-            if not is_ar_cand and en_count >= 16:
+            if is_ar_cand and slug != "computer":
+                continue
+            if not is_ar_cand and (en_count >= 5 or any(item["nameEn"] == en_lbl for item in compiled_index)):
                 continue
 
             # Pick best SVG variant
