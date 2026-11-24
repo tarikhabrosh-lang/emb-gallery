@@ -84,7 +84,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v4');
+    final dir = Directory('${supportDir.path}/design_cache_v6');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -3974,7 +3974,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   // اختيار مبسّط: لغة الفونط (A = عربي، E = إنجليزي) + رقم الفونط (1..5)
   bool _arabicGroup = true;
-  int _fontNumber = 1; // 1..5 -> A1..A5 أو E1..E5
+  int _fontNumber = 2; // يبدأ تلقائياً على A2 (خط ويلكم العربي الأصلي) وعند التحويل لـ E ينتقل لـ E1
 
   // الفونطات الأصلية المحمّلة من Wilcom (.DST) و Ink/Stitch (A1..A5 + E1..E5)
   final Map<int, EmbFontMeta> _arProFonts = {};
@@ -4379,7 +4379,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                   border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.6)),
                                 ),
                                 child: Text(
-                                  '$_activeCode • ${_vec!.stitches} ${tr('غرزة', 'st')}',
+                                  '$_activeCode${_vec!.machineType.contains('Wilcom') ? ' • Wilcom' : ''} • ${_vec!.stitches} ${tr('غرزة', 'st')}',
                                   style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11, fontWeight: FontWeight.bold),
                                 ),
                               ),
@@ -4413,6 +4413,9 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                             if (!_arabicGroup) {
                               setState(() {
                                 _arabicGroup = true;
+                                if (!_arProFonts.containsKey(_fontNumber) && _arProFonts.containsKey(2)) {
+                                  _fontNumber = 2;
+                                }
                                 if (_textCtrl.text.trim() == 'Tarik') _textCtrl.text = 'طارق';
                               });
                               _generate();
@@ -4430,6 +4433,9 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                             if (_arabicGroup) {
                               setState(() {
                                 _arabicGroup = false;
+                                if (!_enProFonts.containsKey(_fontNumber) && _enProFonts.containsKey(1)) {
+                                  _fontNumber = 1;
+                                }
                                 if (_textCtrl.text.trim() == 'طارق') _textCtrl.text = 'Tarik';
                               });
                               _generate();
@@ -4444,6 +4450,8 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                               final bool sel = _fontNumber == numIdx;
                               final String code = '${_arabicGroup ? 'A' : 'E'}$numIdx';
                               final Color activeCol = _arabicGroup ? const Color(0xFFD4AF37) : const Color(0xFF56CCF2);
+                              final EmbFontMeta? slotMeta = _arabicGroup ? _arProFonts[numIdx] : _enProFonts[numIdx];
+                              final bool isWilcomSlot = slotMeta != null && slotMeta.id.startsWith('wilcom_');
                               return Expanded(
                                 child: Padding(
                                   padding: const EdgeInsets.symmetric(horizontal: 2),
@@ -4456,20 +4464,38 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                     },
                                     borderRadius: BorderRadius.circular(10),
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(vertical: 8),
+                                      padding: const EdgeInsets.symmetric(vertical: 7),
                                       decoration: BoxDecoration(
                                         color: sel ? activeCol : Colors.white10,
                                         borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(color: sel ? activeCol : Colors.white12),
-                                      ),
-                                      child: Text(
-                                        code,
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          color: sel ? Colors.black : Colors.white,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 13,
+                                        border: Border.all(
+                                          color: sel ? activeCol : (isWilcomSlot ? activeCol.withOpacity(0.55) : Colors.white12),
+                                          width: isWilcomSlot ? 1.4 : 1.0,
                                         ),
+                                      ),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            code,
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              color: sel ? Colors.black : Colors.white,
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                            ),
+                                          ),
+                                          if (isWilcomSlot)
+                                            Container(
+                                              margin: const EdgeInsets.only(top: 2),
+                                              width: 5,
+                                              height: 5,
+                                              decoration: BoxDecoration(
+                                                color: sel ? Colors.black : activeCol,
+                                                shape: BoxShape.circle,
+                                              ),
+                                            ),
+                                        ],
                                       ),
                                     ),
                                   ),
