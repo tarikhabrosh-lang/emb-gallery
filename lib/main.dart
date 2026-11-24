@@ -1617,7 +1617,6 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
     return ValueListenableBuilder<bool>(
       valueListenable: isArabicNotifier,
       builder: (context, isAr, _) {
-        final fullDimText = formatDimensionsCm(d.widthMm, d.heightMm, includeMm: true);
         final shortCmText = formatDimensionsCm(d.widthMm, d.heightMm, includeMm: false);
 
         return PopScope(
@@ -1655,12 +1654,12 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
             ],
           ),
           body: ListView(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
             children: [
               Container(
                 decoration: BoxDecoration(
                   color: const Color(0xFF18202E),
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: Colors.white12),
                 ),
                 clipBehavior: Clip.antiAlias,
@@ -1671,7 +1670,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                       child: Stack(
                         children: [
                           Container(
-                            height: 360,
+                            height: (MediaQuery.of(context).size.height * 0.34).clamp(210.0, 285.0),
                             width: double.infinity,
                             color: Colors.white,
                             child: d.previewJpeg != null
@@ -1691,13 +1690,13 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                     child: Column(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        const Icon(Icons.architecture, size: 80, color: Color(0xFF3E522B)),
-                                        const SizedBox(height: 12),
-                                        Text('$ext Format', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 22)),
-                                        const SizedBox(height: 4),
+                                        const Icon(Icons.architecture, size: 64, color: Color(0xFF3E522B)),
+                                        const SizedBox(height: 8),
+                                        Text('$ext Format', style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.bold, fontSize: 18)),
+                                        const SizedBox(height: 2),
                                         Text(
-                                          tr('صيغة تشغيل ماكينة (معلومات التصميم بالأسفل)', 'Machine Format (Design Specs Below)'),
-                                          style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                                          tr('صيغة تشغيل ماكينة', 'Machine Format'),
+                                          style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
                                         ),
                                       ],
                                     ),
@@ -1705,22 +1704,22 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                           ),
                           if (d.previewJpeg != null)
                             Positioned(
-                              bottom: 10,
-                              left: 10,
+                              bottom: 8,
+                              left: 8,
                               child: Material(
-                                color: const Color(0xFF0E131D).withOpacity(0.88),
-                                borderRadius: BorderRadius.circular(20),
+                                color: const Color(0xFF0E131D).withOpacity(0.86),
+                                borderRadius: BorderRadius.circular(18),
                                 child: InkWell(
                                   onTap: _openFullScreenViewer,
-                                  borderRadius: BorderRadius.circular(20),
+                                  borderRadius: BorderRadius.circular(18),
                                   child: Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        const Icon(Icons.zoom_in, size: 18, color: Color(0xFFD4AF37)),
+                                        const Icon(Icons.zoom_in, size: 16, color: Color(0xFFD4AF37)),
                                         const SizedBox(width: 4),
-                                        Text(tr('تكبير بوضوح', 'HD Zoom'), style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                                        Text(tr('تكبير', 'Zoom'), style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
                                       ],
                                     ),
                                   ),
@@ -1731,59 +1730,37 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.all(14),
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                       child: Column(
                         children: [
-                          Directionality(
-                            textDirection: TextDirection.ltr,
-                            child: Text(d.fileName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          ),
-                          const SizedBox(height: 6),
+                          // مسار الملف مضغوط بسطر واحد
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                             decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
                             child: Row(
                               children: [
-                                const Icon(Icons.folder_open, size: 15, color: Color(0xFFD4AF37)),
-                                const SizedBox(width: 6),
+                                const Icon(Icons.folder_open, size: 13, color: Color(0xFFD4AF37)),
+                                const SizedBox(width: 5),
                                 Expanded(
                                   child: Directionality(
                                     textDirection: TextDirection.ltr,
-                                    child: SelectableText(d.filePath, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                                    child: Text(
+                                      d.filePath,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(color: Colors.white60, fontSize: 10.5),
+                                    ),
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                          if (fullDimText != null) ...[
-                            const SizedBox(height: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF3E522B).withOpacity(0.45),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.greenAccent.withOpacity(0.4)),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.straighten, size: 16, color: Colors.greenAccent),
-                                  const SizedBox(width: 6),
-                                  Flexible(
-                                    child: Text(
-                                      '${tr('المقاس', 'Size')}: $fullDimText',
-                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 8),
+                          // شريط البيانات مضغوط وموحّد بدون تكرار المقاس
                           Wrap(
-                            spacing: 16,
-                            runSpacing: 10,
-                            alignment: WrapAlignment.spaceAround,
+                            spacing: 14,
+                            runSpacing: 6,
+                            alignment: WrapAlignment.spaceEvenly,
                             children: [
                               if (d.stitches > 0) _StatBadge(label: tr('الغرز', 'Stitches'), value: numFmt.format(d.stitches), color: const Color(0xFF56CCF2)),
                               if (shortCmText != null) _StatBadge(label: tr('المقاس (سم)', 'Size (cm)'), value: shortCmText, color: Colors.lightGreenAccent),
@@ -1793,34 +1770,9 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                               _StatBadge(label: tr('الماكينة', 'Machine'), value: d.machineType, color: Colors.purpleAccent),
                             ],
                           ),
-                          if (d.stitches > 0) ...[
-                            const SizedBox(height: 12),
-                            SizedBox(
-                              width: double.infinity,
-                              child: OutlinedButton.icon(
-                                onPressed: () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => EmbroideryCalculatorScreen(design: d),
-                                    ),
-                                  );
-                                },
-                                icon: const Icon(Icons.calculate, size: 19, color: Colors.greenAccent),
-                                label: Text(
-                                  tr('حساب التطريز (الغرز والخيط والسعر)', 'Calculate Embroidery (Price & Thread)'),
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.greenAccent),
-                                ),
-                                style: OutlinedButton.styleFrom(
-                                  side: BorderSide(color: Colors.greenAccent.withOpacity(0.55)),
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                ),
-                              ),
-                            ),
-                          ],
+                          const SizedBox(height: 9),
+                          // صف الأوامر 1: محاكاة الغرز + تعديل التصميم
                           if (VectorDesignLoader.supportsVectorView(d.filePath)) ...[
-                            const SizedBox(height: 14),
                             Row(
                               children: [
                                 Expanded(
@@ -1831,20 +1783,24 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                         MaterialPageRoute(builder: (_) => StitchSimulatorScreen(design: d)),
                                       );
                                     },
-                                    icon: const Icon(Icons.play_circle_outline, size: 19),
+                                    icon: const Icon(Icons.play_circle_outline, size: 17),
                                     label: Text(
                                       tr('محاكاة الغرز', 'Simulate'),
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
                                     ),
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: const Color(0xFF283852),
                                       foregroundColor: Colors.white,
-                                      padding: const EdgeInsets.symmetric(vertical: 11),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                      padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+                                      minimumSize: const Size(0, 38),
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                     ),
                                   ),
                                 ),
-                                const SizedBox(width: 10),
+                                const SizedBox(width: 8),
                                 Expanded(
                                   child: ElevatedButton.icon(
                                     onPressed: () async {
@@ -1856,51 +1812,96 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                         _lastExportedPath = editedPath;
                                       }
                                     },
-                                    icon: const Icon(Icons.tune, size: 19),
+                                    icon: const Icon(Icons.tune, size: 17),
                                     label: Text(
                                       tr('تعديل التصميم', 'Edit Design'),
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
                                     ),
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: const Color(0xFF3E522B),
                                       foregroundColor: Colors.white,
-                                      padding: const EdgeInsets.symmetric(vertical: 11),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                      padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+                                      minimumSize: const Size(0, 38),
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                     ),
                                   ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 8),
-                            SizedBox(
-                              width: double.infinity,
-                              child: ElevatedButton.icon(
-                                onPressed: () async {
-                                  final editedPath = await Navigator.push<String>(
-                                    context,
-                                    MaterialPageRoute(builder: (_) => ObjectEditorScreen(design: d)),
-                                  );
-                                  if (editedPath != null && editedPath.isNotEmpty) {
-                                    _lastExportedPath = editedPath;
-                                  }
-                                },
-                                icon: const Icon(Icons.select_all, size: 19, color: Color(0xFFD4AF37)),
-                                label: Text(
-                                  tr('تحديد عنصر من الرسمة (تكبير / دوران / تحريك)', 'Select Element (Resize / Rotate / Move)'),
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                                ),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF1F2B3E),
-                                  foregroundColor: Colors.white,
-                                  side: BorderSide(color: const Color(0xFFD4AF37).withOpacity(0.55)),
-                                  padding: const EdgeInsets.symmetric(vertical: 11),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                ),
-                              ),
-                            ),
+                            const SizedBox(height: 7),
                           ],
-                          if (UniversalExporter.canExport(d.filePath)) ...[
-                            const SizedBox(height: 10),
+                          // صف الأوامر 2: تحديد عنصر + حساب التطريز (بجانب بعض لعدم التمرير)
+                          if (VectorDesignLoader.supportsVectorView(d.filePath) || d.stitches > 0) ...[
+                            Row(
+                              children: [
+                                if (VectorDesignLoader.supportsVectorView(d.filePath))
+                                  Expanded(
+                                    child: ElevatedButton.icon(
+                                      onPressed: () async {
+                                        final editedPath = await Navigator.push<String>(
+                                          context,
+                                          MaterialPageRoute(builder: (_) => ObjectEditorScreen(design: d)),
+                                        );
+                                        if (editedPath != null && editedPath.isNotEmpty) {
+                                          _lastExportedPath = editedPath;
+                                        }
+                                      },
+                                      icon: const Icon(Icons.select_all, size: 17, color: Color(0xFFD4AF37)),
+                                      label: Text(
+                                        tr('تحديد عنصر', 'Select Element'),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                      ),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(0xFF1F2B3E),
+                                        foregroundColor: Colors.white,
+                                        side: BorderSide(color: const Color(0xFFD4AF37).withOpacity(0.55)),
+                                        padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+                                        minimumSize: const Size(0, 38),
+                                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                      ),
+                                    ),
+                                  ),
+                                if (VectorDesignLoader.supportsVectorView(d.filePath) && d.stitches > 0)
+                                  const SizedBox(width: 8),
+                                if (d.stitches > 0)
+                                  Expanded(
+                                    child: OutlinedButton.icon(
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) => EmbroideryCalculatorScreen(design: d),
+                                          ),
+                                        );
+                                      },
+                                      icon: const Icon(Icons.calculate, size: 17, color: Colors.greenAccent),
+                                      label: Text(
+                                        tr('حساب التطريز', 'Calculator'),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.greenAccent),
+                                      ),
+                                      style: OutlinedButton.styleFrom(
+                                        side: BorderSide(color: Colors.greenAccent.withOpacity(0.55)),
+                                        padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+                                        minimumSize: const Size(0, 38),
+                                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 7),
+                          ],
+                          // صف الأوامر 3: تصدير وحفظ + تصدير ومشاركة (ظاهر دائماً بدون رفع الشاشة)
+                          if (UniversalExporter.canExport(d.filePath))
                             Row(
                               children: [
                                 Expanded(
@@ -1908,48 +1909,55 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                     onPressed: _isExportingDst ? null : () => _showFormatPickerAndExport(shareAfter: false),
                                     icon: _isExportingDst
                                         ? const SizedBox(
-                                            width: 15,
-                                            height: 15,
+                                            width: 14,
+                                            height: 14,
                                             child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)),
                                           )
-                                        : const Icon(Icons.save_alt, size: 18, color: Color(0xFFD4AF37)),
+                                        : const Icon(Icons.save_alt, size: 17, color: Color(0xFFD4AF37)),
                                     label: Text(
-                                      tr('تصدير وحفظ', 'Export Only'),
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFFD4AF37)),
+                                      tr('تصدير وحفظ', 'Export & Save'),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5, color: Color(0xFFD4AF37)),
                                     ),
                                     style: OutlinedButton.styleFrom(
                                       side: const BorderSide(color: Color(0xFFD4AF37), width: 1.3),
-                                      padding: const EdgeInsets.symmetric(vertical: 11),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                      padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+                                      minimumSize: const Size(0, 40),
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                     ),
                                   ),
                                 ),
-                                const SizedBox(width: 10),
+                                const SizedBox(width: 8),
                                 Expanded(
                                   child: ElevatedButton.icon(
                                     onPressed: _isExportingDst ? null : () => _showFormatPickerAndExport(shareAfter: true),
                                     icon: _isExportingDst
                                         ? const SizedBox(
-                                            width: 15,
-                                            height: 15,
+                                            width: 14,
+                                            height: 14,
                                             child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
                                           )
-                                        : const Icon(Icons.ios_share, size: 18),
+                                        : const Icon(Icons.ios_share, size: 17),
                                     label: Text(
                                       tr('تصدير ومشاركة', 'Export & Share'),
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5),
                                     ),
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: const Color(0xFFD4AF37),
                                       foregroundColor: Colors.black,
-                                      padding: const EdgeInsets.symmetric(vertical: 11),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                      padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+                                      minimumSize: const Size(0, 40),
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                     ),
                                   ),
                                 ),
                               ],
                             ),
-                          ],
                         ],
                       ),
                     ),
@@ -2270,10 +2278,11 @@ class _StatBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: color)),
-        const SizedBox(height: 2),
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.white60)),
+        Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5, color: color)),
+        const SizedBox(height: 1),
+        Text(label, style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
       ],
     );
   }
