@@ -1145,24 +1145,25 @@ def _wilcom_segment_row(sub, is_rtl=False, merge_tol=30):
     cur = []
     for p in sub:
         if p[2] and cur:
-            runs.append(cur)
+            runs.append((len(runs), cur))
             cur = [p]
         else:
-            if cur and math.hypot(p[0] - cur[-1][0], p[1] - cur[-1][1]) > 75:
-                runs.append(cur)
+            # Split only on real DST jumps or jumps > 13.0mm (130 units), preserving internal Wilcom underlay/travel stitches up to 12.1mm
+            if cur and math.hypot(p[0] - cur[-1][0], p[1] - cur[-1][1]) > 130:
+                runs.append((len(runs), cur))
                 cur = [p]
             else:
                 cur.append(p)
     if cur:
-        runs.append(cur)
+        runs.append((len(runs), cur))
 
     boxes = []
-    for r in runs:
+    for ridx, r in runs:
         if len(r) < 2:
             continue
         xs = [p[0] for p in r]
         ys = [p[1] for p in r]
-        boxes.append({"runs": [r], "x0": min(xs), "x1": max(xs), "y0": min(ys), "y1": max(ys)})
+        boxes.append({"runs": [(ridx, r)], "x0": min(xs), "x1": max(xs), "y0": min(ys), "y1": max(ys)})
     boxes.sort(key=lambda b: (-b["x1"] if is_rtl else b["x0"]))
 
     glyphs = []
@@ -1183,6 +1184,12 @@ def _wilcom_segment_row(sub, is_rtl=False, merge_tol=30):
                 "x0": bx["x0"], "x1": bx["x1"],
                 "y0": bx["y0"], "y1": bx["y1"],
             })
+
+    # CRITICAL: Restore original digitized Wilcom stitch order inside every glyph!
+    for g in glyphs:
+        g["runs"].sort(key=lambda pair: pair[0])
+        g["runs"] = [r for _, r in g["runs"]]
+
     glyphs.sort(key=lambda g: (-g["x1"] if is_rtl else g["x0"]))
     return glyphs
 
