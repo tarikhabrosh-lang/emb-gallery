@@ -6807,7 +6807,7 @@ class _EmbeddedWilcomFonts {
       minScale: 0.45,
       maxScale: 2.5,
       glyphCount: 145,
-      file: 'embedded://$wilcom_a2',
+      file: 'embedded://wilcom_a2',
     ),
     EmbFontMeta(
       id: 'wilcom_e1',
@@ -6821,7 +6821,7 @@ class _EmbeddedWilcomFonts {
       minScale: 0.45,
       maxScale: 2.5,
       glyphCount: 66,
-      file: 'embedded://$wilcom_e1',
+      file: 'embedded://wilcom_e1',
     ),
     EmbFontMeta(
       id: 'wilcom_e2',
@@ -6835,7 +6835,7 @@ class _EmbeddedWilcomFonts {
       minScale: 0.45,
       maxScale: 2.5,
       glyphCount: 66,
-      file: 'embedded://$wilcom_e2',
+      file: 'embedded://wilcom_e2',
     ),
     EmbFontMeta(
       id: 'wilcom_e3',
@@ -6849,7 +6849,7 @@ class _EmbeddedWilcomFonts {
       minScale: 0.45,
       maxScale: 2.5,
       glyphCount: 66,
-      file: 'embedded://$wilcom_e3',
+      file: 'embedded://wilcom_e3',
     ),
     EmbFontMeta(
       id: 'wilcom_e4',
@@ -6863,7 +6863,7 @@ class _EmbeddedWilcomFonts {
       minScale: 0.45,
       maxScale: 2.5,
       glyphCount: 66,
-      file: 'embedded://$wilcom_e4',
+      file: 'embedded://wilcom_e4',
     ),
   ];
 
