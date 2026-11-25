@@ -4018,7 +4018,7 @@ class _CmGridAndHandlesOverlay extends StatelessWidget {
                 width: boxW,
                 height: boxH,
                 child: Transform.rotate(
-                  angle: rotationDeg * math.pi / 180.0,
+                  angle: rotationDeg * pi / 180.0,
                   child: Stack(
                     clipBehavior: Clip.none,
                     children: [
@@ -4447,8 +4447,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
         title: Text(
-          '${tr('الكتابة والتطريز', 'Lettering')},
-    ); ($_activeCode)',
+          '${tr('الكتابة والتطريز', 'Lettering')} ($_activeCode)',
           style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -5019,6 +5018,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
             ),
           ),
         ],
+      ),
       ),
     );
   }
