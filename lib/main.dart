@@ -3964,6 +3964,184 @@ class _VectorStitchPainter extends CustomPainter {
 
 
 /// شاشة الكتابة والتطريز المبسّطة: 5 فونطات عربي (A1–A5) + 5 فونطات إنجليزي (E1–E5) بدون أسماء + جدول طول وعرض بالأرقام + Auto-Branching بدون جنبات
+
+class _CmGridAndHandlesOverlay extends StatelessWidget {
+  final VectorDesignData? vec;
+  final double widthCm;
+  final double rotationDeg;
+  final String pathMode;
+  final double pathParam;
+  final ValueChanged<double> onWidthCmDrag;
+  final ValueChanged<double> onRotationDrag;
+  final ValueChanged<double> onPathParamDrag;
+  final VoidCallback onInteractionEnd;
+
+  const _CmGridAndHandlesOverlay({
+    required this.vec,
+    required this.widthCm,
+    required this.rotationDeg,
+    required this.pathMode,
+    required this.pathParam,
+    required this.onWidthCmDrag,
+    required this.onRotationDrag,
+    required this.onPathParamDrag,
+    required this.onInteractionEnd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (ctx, c) {
+        final double w = c.maxWidth;
+        final double h = c.maxHeight;
+        final double boxW = (w * (widthCm / 26.0)).clamp(110.0, w - 36.0);
+        final double boxH = (h * 0.44).clamp(76.0, h - 56.0);
+        final double left = (w - boxW) * 0.5;
+        final double top = (h - boxH) * 0.5;
+
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: _CmGridPainter(
+                    widthCm: widthCm,
+                    vec: vec,
+                  ),
+                ),
+              ),
+            ),
+            if (vec != null)
+              Positioned(
+                left: left,
+                top: top,
+                width: boxW,
+                height: boxH,
+                child: Transform.rotate(
+                  angle: rotationDeg * math.pi / 180.0,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      IgnorePointer(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.75), width: 1.3),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        right: -12,
+                        bottom: -12,
+                        child: GestureDetector(
+                          onPanUpdate: (d) {
+                            final nextW = (widthCm + d.delta.dx * 0.08).clamp(3.0, 32.0);
+                            onWidthCmDrag(nextW);
+                          },
+                          onPanEnd: (_) => onInteractionEnd(),
+                          child: Container(
+                            width: 24,
+                            height: 24,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFD4AF37),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.open_in_full, size: 13, color: Colors.black),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        top: -28,
+                        left: boxW * 0.5 - 12,
+                        child: GestureDetector(
+                          onPanUpdate: (d) {
+                            final nextRot = (rotationDeg + d.delta.dx * 1.2 + d.delta.dy * 0.6) % 360.0;
+                            onRotationDrag(nextRot);
+                          },
+                          onPanEnd: (_) => onInteractionEnd(),
+                          child: Container(
+                            width: 24,
+                            height: 24,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF56CCF2),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.rotate_right, size: 14, color: Colors.black),
+                          ),
+                        ),
+                      ),
+                      if (pathMode != 'linear')
+                        Positioned(
+                          bottom: -24,
+                          left: boxW * 0.5 - 12,
+                          child: GestureDetector(
+                            onPanUpdate: (d) {
+                              final nextP = (pathParam + d.delta.dy * 0.012).clamp(-1.0, 1.0);
+                              onPathParamDrag(nextP);
+                            },
+                            onPanEnd: (_) => onInteractionEnd(),
+                            child: Container(
+                              width: 24,
+                              height: 24,
+                              decoration: const BoxDecoration(
+                                color: Colors.greenAccent,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.tune, size: 14, color: Colors.black),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _CmGridPainter extends CustomPainter {
+  final double widthCm;
+  final VectorDesignData? vec;
+  const _CmGridPainter({required this.widthCm, this.vec});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double pxPerCm = (size.width / 16.0).clamp(18.0, 48.0);
+    final Paint minorPaint = Paint()
+      ..color = const Color(0xFFE2E8F0)
+      ..strokeWidth = 0.7;
+    final Paint majorPaint = Paint()
+      ..color = const Color(0xFF94A3B8).withOpacity(0.55)
+      ..strokeWidth = 1.1;
+
+    for (double x = 0; x <= size.width; x += pxPerCm * 0.5) {
+      final bool isCm = ((x / pxPerCm) - (x / pxPerCm).round()).abs() < 0.05;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), isCm ? majorPaint : minorPaint);
+    }
+    for (double y = 0; y <= size.height; y += pxPerCm * 0.5) {
+      final bool isCm = ((y / pxPerCm) - (y / pxPerCm).round()).abs() < 0.05;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), isCm ? majorPaint : minorPaint);
+    }
+
+    final TextPainter tp = TextPainter(
+      textDirection: TextDirection.ltr,
+      text: TextSpan(
+        text: '1cm • ${widthCm.toStringAsFixed(1)}cm',
+        style: const TextStyle(color: Color(0xFF475569), fontSize: 10, fontWeight: FontWeight.bold),
+      ),
+    )..layout();
+    tp.paint(canvas, Offset(size.width - tp.width - 8, size.height - tp.height - 6));
+  }
+
+  @override
+  bool shouldRepaint(covariant _CmGridPainter oldDelegate) {
+    return oldDelegate.widthCm != widthCm || oldDelegate.vec != vec;
+  }
+}
+
 class TextToEmbroideryScreen extends StatefulWidget {
   const TextToEmbroideryScreen({super.key});
   @override
@@ -3998,6 +4176,12 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   bool _lockAspect = true;
   double _densityMm = 0.45;
   double _extraSpacingMm = 0.0;
+  double _satinWidthOffsetMm = 0.0;
+  bool _autoSplit8Mm = true;
+  String _pathMode = 'linear';
+  double _pathParam = 0.35;
+  double _rotationDeg = 0.0;
+  Timer? _liveTypeTimer;
   int _underlayMode = 1;
   bool _isSatin = true;
   int _selectedColor = 0xFFFF1744;
@@ -4067,8 +4251,16 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
     await _generate();
   }
 
+  void _scheduleLiveGenerate() {
+    _liveTypeTimer?.cancel();
+    _liveTypeTimer = Timer(const Duration(milliseconds: 160), () {
+      if (mounted) _generate();
+    });
+  }
+
   @override
   void dispose() {
+    _liveTypeTimer?.cancel();
     _textCtrl.dispose();
     _widthCmCtrl.dispose();
     _heightCmCtrl.dispose();
@@ -4113,6 +4305,11 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           targetHeightCm: _lockAspect ? null : _customHeightCm,
           densityMm: _densityMm,
           extraSpacingMm: _extraSpacingMm,
+          satinWidthOffsetMm: _satinWidthOffsetMm,
+          autoSplit8Mm: _autoSplit8Mm,
+          pathMode: _pathMode,
+          pathParam: _pathParam,
+          rotationDeg: _rotationDeg,
           underlayMode: _underlayMode,
           colorArgb: _selectedColor,
         );
@@ -4136,6 +4333,11 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           targetHeightCm: _lockAspect ? null : _customHeightCm,
           densityMm: _densityMm,
           extraSpacingMm: _extraSpacingMm,
+          satinWidthOffsetMm: _satinWidthOffsetMm,
+          autoSplit8Mm: _autoSplit8Mm,
+          pathMode: _pathMode,
+          pathParam: _pathParam,
+          rotationDeg: _rotationDeg,
           underlayMode: _underlayMode,
           colorArgb: _selectedColor,
         );
@@ -4237,12 +4439,16 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return SafeArea(
+      top: true,
+      bottom: true,
+      child: Scaffold(
       backgroundColor: const Color(0xFF0E131D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
         title: Text(
-          '${tr('الكتابة والتطريز', 'Lettering')} ($_activeCode)',
+          '${tr('الكتابة والتطريز', 'Lettering')},
+    ); ($_activeCode)',
           style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -4309,39 +4515,23 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _textCtrl,
-                    minLines: 1,
-                    maxLines: 3,
-                    textInputAction: TextInputAction.newline,
-                    style: const TextStyle(color: Colors.white, fontSize: 15),
-                    decoration: InputDecoration(
-                      hintText: tr('اكتب هنا...', 'Type here...'),
-                      filled: true,
-                      fillColor: const Color(0xFF18202E),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
-                    ),
-                    onSubmitted: (_) => _generate(),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: _generating ? null : _generate,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFD4AF37),
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: Text(tr('توليد', 'Create'), style: const TextStyle(fontWeight: FontWeight.bold)),
-                ),
-              ],
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+            child: TextField(
+              controller: _textCtrl,
+              minLines: 1,
+              maxLines: 2,
+              textInputAction: TextInputAction.done,
+              style: const TextStyle(color: Colors.white, fontSize: 15),
+              decoration: InputDecoration(
+                hintText: tr('اكتب هنا ليظهر مباشرة كغرز...', 'Type to preview stitches live...'),
+                prefixIcon: const Icon(Icons.bolt, color: Color(0xFFD4AF37), size: 18),
+                filled: true,
+                fillColor: const Color(0xFF18202E),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+              ),
+              onChanged: (_) => _scheduleLiveGenerate(),
+              onSubmitted: (_) => _generate(),
             ),
           ),
           Expanded(
@@ -4364,6 +4554,22 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                         )
                       : Stack(
                           children: [
+                            _CmGridAndHandlesOverlay(
+                              vec: _vec,
+                              widthCm: _widthCm,
+                              rotationDeg: _rotationDeg,
+                              pathMode: _pathMode,
+                              pathParam: _pathParam,
+                              onWidthCmDrag: (w) {
+                                setState(() {
+                                  _widthCm = w;
+                                  _widthCmCtrl.text = w.toStringAsFixed(1);
+                                });
+                              },
+                              onRotationDrag: (r) => setState(() => _rotationDeg = r),
+                              onPathParamDrag: (p) => setState(() => _pathParam = p),
+                              onInteractionEnd: _scheduleLiveGenerate,
+                            ),
                             InteractiveViewer(
                               minScale: 0.7,
                               maxScale: 10.0,
@@ -4639,6 +4845,82 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                       ],
                     ),
 
+                    Row(
+                      children: [
+                        Text(
+                          '${tr('تباعد', 'Sp')}: ${_extraSpacingMm.toStringAsFixed(1)}mm',
+                          style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11, fontWeight: FontWeight.bold),
+                        ),
+                        Expanded(
+                          child: Slider(
+                            value: _extraSpacingMm.clamp(-2.0, 8.0),
+                            min: -2.0,
+                            max: 8.0,
+                            divisions: 20,
+                            activeColor: const Color(0xFFD4AF37),
+                            onChanged: (v) {
+                              setState(() => _extraSpacingMm = v);
+                              _scheduleLiveGenerate();
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        for (final pm in [
+                          ('linear', tr('مستقيم', 'Line')),
+                          ('arc', tr('قوس', 'Arc')),
+                          ('circle', tr('دائري', 'Circle')),
+                          ('wave', tr('متعرج', 'Wave')),
+                        ])
+                          ChoiceChip(
+                            label: Text(pm.$2, style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: _pathMode == pm.$1 ? Colors.black : Colors.white)),
+                            selected: _pathMode == pm.$1,
+                            selectedColor: const Color(0xFF56CCF2),
+                            backgroundColor: Colors.white10,
+                            visualDensity: VisualDensity.compact,
+                            onSelected: (_) {
+                              setState(() => _pathMode = pm.$1);
+                              _generate();
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Text(
+                          '${tr('فستون', 'Sat')}: ${_satinWidthOffsetMm >= 0 ? '+' : ''}${_satinWidthOffsetMm.toStringAsFixed(1)}mm',
+                          style: const TextStyle(color: Colors.greenAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                        ),
+                        Expanded(
+                          child: Slider(
+                            value: _satinWidthOffsetMm.clamp(-0.5, 1.0),
+                            min: -0.5,
+                            max: 1.0,
+                            divisions: 15,
+                            activeColor: Colors.greenAccent,
+                            onChanged: (v) {
+                              setState(() => _satinWidthOffsetMm = v);
+                              _scheduleLiveGenerate();
+                            },
+                          ),
+                        ),
+                        FilterChip(
+                          label: Text(tr('قسم >8مم', 'Split >8mm'), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: _autoSplit8Mm ? Colors.black : Colors.white70)),
+                          selected: _autoSplit8Mm,
+                          selectedColor: const Color(0xFFD4AF37),
+                          backgroundColor: Colors.white10,
+                          visualDensity: VisualDensity.compact,
+                          onSelected: (v) {
+                            setState(() => _autoSplit8Mm = v);
+                            _generate();
+                          },
+                        ),
+                      ],
+                    ),
                     // لون الخيط
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,

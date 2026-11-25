@@ -12676,6 +12676,11 @@ class InkStitchFontEngine {
     double? targetHeightCm,
     double densityMm = 0.42,
     double extraSpacingMm = 0.0,
+    double satinWidthOffsetMm = 0.0,
+    bool autoSplit8Mm = true,
+    String pathMode = 'linear',
+    double pathParam = 0.35,
+    double rotationDeg = 0.0,
     int underlayMode = 1, // 0 = بدون، 1 = درز وسط تلقائي، 2 = حواف + وسط
     int colorArgb = 0xFFFF1744,
   }) async {
@@ -12691,6 +12696,10 @@ class InkStitchFontEngine {
         letterHeightCm: letterHeightCm,
         densityMm: densityMm,
         extraSpacingMm: extraSpacingMm,
+        satinWidthOffsetMm: satinWidthOffsetMm,
+        autoSplit8Mm: autoSplit8Mm,
+        pathMode: pathMode,
+        pathParam: pathParam,
         underlayMode: underlayMode,
         colorArgb: colorArgb,
       );
@@ -12706,11 +12715,13 @@ class InkStitchFontEngine {
       }
       final bool isWilcomNative = raw.machineType.contains('Wilcom');
       final double dFactor = isWilcomNative ? (0.45 / densityMm.clamp(0.25, 1.0)).clamp(0.5, 2.0) : 1.0;
-      if ((sx - 1.0).abs() > 0.015 || (sy - 1.0).abs() > 0.015 || (dFactor - 1.0).abs() > 0.04) {
+      final bool hasRot = rotationDeg.abs() > 0.05;
+      if ((sx - 1.0).abs() > 0.015 || (sy - 1.0).abs() > 0.015 || (dFactor - 1.0).abs() > 0.04 || hasRot) {
         return VectorDesignEditor.transform(
           raw,
           scaleX: sx,
           scaleY: sy,
+          rotationDeg: rotationDeg,
           densityFactor: dFactor,
         );
       }
@@ -12724,6 +12735,10 @@ class InkStitchFontEngine {
     required double letterHeightCm,
     required double densityMm,
     required double extraSpacingMm,
+    required double satinWidthOffsetMm,
+    required bool autoSplit8Mm,
+    required String pathMode,
+    required double pathParam,
     required int underlayMode,
     required int colorArgb,
   }) {
@@ -12744,8 +12759,9 @@ class InkStitchFontEngine {
     final double extraSpUnits = extraSpacingMm * 10.0;
     final double lineH = ((font['lineH'] as num?)?.toDouble() ?? (capH * 1.45)) * scale;
     final double densityUnits = (densityMm * 10.0).clamp(2.5, 10.0);
-    final double rawJoinOv = (font['joinOverlap'] as num?)?.toDouble() ?? 2.2;
-    final double arabicJoinOverlap = (rawJoinOv * scale).clamp(1.0, 28.0);
+    final double rawJoinOv = (font['joinOverlap'] as num?)?.toDouble() ?? 1.4;
+    final double arabicJoinOverlap = (rawJoinOv * scale).clamp(0.0, 14.0);
+    final double satinOffsetUnits = satinWidthOffsetMm * 5.0;
 
     Map<String, dynamic>? lookupGlyph(_ShapedGlyphToken tok) {
       if (tok.dotForm.isNotEmpty && glyphs.containsKey(tok.dotForm)) {
@@ -12773,11 +12789,30 @@ class InkStitchFontEngine {
     double curNeedleX = 0.0, curNeedleY = 0.0;
     bool hasNeedle = false;
 
-    void addPt(double ux, double uy, bool isMove) {
+    (double, double) warpPath(double ux, double uy) {
+      if (pathMode == 'arc' && pathParam.abs() > 0.005) {
+        final double sagUnits = pathParam * 220.0;
+        final double halfSpan = math.max(250.0, targetCapUnits * 1.6);
+        final double normX = (ux / halfSpan).clamp(-1.5, 1.5);
+        return (ux, uy + sagUnits * (1.0 - normX * normX));
+      } else if (pathMode == 'circle') {
+        final double radius = (380.0 + (pathParam + 1.0) * 520.0).clamp(240.0, 1800.0);
+        final double theta = ux / radius;
+        final double r = radius - uy;
+        return (r * math.sin(theta), radius - r * math.cos(theta));
+      } else if (pathMode == 'wave' && pathParam.abs() > 0.005) {
+        final double amp = pathParam * 140.0;
+        return (ux, uy + amp * math.sin(ux * 0.011));
+      }
+      return (ux, uy);
+    }
+
+    void addPt(double rawUx, double rawUy, bool isMove) {
+      final (ux, uy) = warpPath(rawUx, rawUy);
       bool actualMove = isMove;
       if (isMove && hasNeedle) {
         final double d = math.sqrt((ux - curNeedleX) * (ux - curNeedleX) + (uy - curNeedleY) * (uy - curNeedleY));
-        if (d < 36.0) {
+        if (d < 28.0) {
           actualMove = false;
         }
       }
@@ -12898,6 +12933,8 @@ class InkStitchFontEngine {
               ox: ox,
               oy: oy,
               scale: scale,
+              widthOffsetMm: satinWidthOffsetMm,
+              autoSplit8Mm: autoSplit8Mm,
               addPt: addPt,
             );
           }
@@ -13218,15 +13255,52 @@ class InkStitchFontEngine {
     required double ox,
     required double oy,
     required double scale,
+    double widthOffsetMm = 0.0,
+    bool autoSplit8Mm = true,
     required void Function(double, double, bool) addPt,
   }) {
     final List<dynamic>? rawP = el['p'] as List<dynamic>?;
     if (rawP == null || rawP.length < 4) return;
     final int n = rawP.length ~/ 2;
+    final double wOffUnits = widthOffsetMm.clamp(-0.6, 1.2) * 6.0;
+    double prevX = 0.0, prevY = 0.0;
+    bool hasP = false;
+
     for (int i = 0; i < n; i++) {
-      final double px = ox + (rawP[i * 2] as num).toDouble() * scale;
-      final double py = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
+      double px = ox + (rawP[i * 2] as num).toDouble() * scale;
+      double py = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
+
+      if (wOffUnits.abs() > 0.05 && n >= 2) {
+        final int i0 = math.max(0, i - 1);
+        final int i1 = math.min(n - 1, i + 1);
+        final double tx = (rawP[i1 * 2] as num).toDouble() - (rawP[i0 * 2] as num).toDouble();
+        final double ty = (rawP[i1 * 2 + 1] as num).toDouble() - (rawP[i0 * 2 + 1] as num).toDouble();
+        final double tLen = math.sqrt(tx * tx + ty * ty);
+        if (tLen > 1e-4) {
+          final double nx = -ty / tLen;
+          final double ny = tx / tLen;
+          px += nx * wOffUnits;
+          py += ny * wOffUnits;
+        }
+      }
+
+      if (hasP && autoSplit8Mm) {
+        final double dx = px - prevX;
+        final double dy = py - prevY;
+        final double segLen = math.sqrt(dx * dx + dy * dy);
+        if (segLen > 80.0) {
+          final int parts = (segLen / 42.0).ceil().clamp(2, 12);
+          for (int k = 1; k < parts; k++) {
+            final double t = k / parts;
+            addPt(prevX + dx * t, prevY + dy * t, false);
+          }
+        }
+      }
+
       addPt(px, py, i == 0);
+      prevX = px;
+      prevY = py;
+      hasP = true;
     }
   }
 
