@@ -55,30 +55,85 @@ int compareNatural(String a, String b) {
 }
 
 Future<VectorDesignData?> loadAnyVectorDesign(String path) async {
+  VectorDesignData? v;
   if (path.toLowerCase().endsWith('.tbf')) {
-    final tbf = await TarikProTbfParser.loadVector(path);
-    if (tbf != null) return tbf;
+    v = await TarikProTbfParser.loadVector(path);
   }
-  return VectorDesignLoader.load(path);
+  v ??= await VectorDesignLoader.load(path);
+  if (v != null) {
+    v = TarikProDahaoCalibrator.calibrate(v, path);
+  }
+  return v;
 }
 
 Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
   final lower = path.toLowerCase();
   EmbDesignInfo? result;
   if (lower.endsWith('.dst')) {
-    result = await DstParser.parseFile(path, maxCanvas: 640.0);
+    result = await DstParser.parseFile(path, maxCanvas: 720.0);
   } else if (lower.endsWith('.emb')) {
     result = await EmbParser.parseFile(path);
+    if (result != null && result.previewJpeg != null && result.previewJpeg!.isNotEmpty) {
+      final enhanced = await TarikProEmbImageEnhancer.enhancePreview(result.previewJpeg!);
+      final cleanMachine = result.machineType.replaceAll(RegExp(r'Wilcom\s*', caseSensitive: false), '').trim();
+      result = EmbDesignInfo(
+        filePath: result.filePath,
+        fileName: result.fileName,
+        previewJpeg: enhanced ?? result.previewJpeg,
+        stitchPreviewBytes: result.stitchPreviewBytes,
+        previewWidth: result.previewWidth,
+        previewHeight: result.previewHeight,
+        stitches: result.stitches,
+        colorCount: result.colorCount,
+        stopsCount: result.stopsCount,
+        jumpsCount: result.jumpsCount,
+        sequinsCount: result.sequinsCount,
+        trimsCount: result.trimsCount,
+        beadsCount: result.beadsCount,
+        machineType: cleanMachine.isEmpty ? 'EMB' : cleanMachine,
+        colorSequence: result.colorSequence,
+        widthMm: result.widthMm,
+        heightMm: result.heightMm,
+      );
+    }
   } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
-    result = await DahaoParser.parseFile(path, maxCanvas: 640.0);
+    result = await DahaoParser.parseFile(path, maxCanvas: 720.0);
+    if (result != null && lower.endsWith('.dha')) {
+      final calVec = await loadAnyVectorDesign(path);
+      if (calVec != null && calVec.stX.length >= 2) {
+        final calPng = await TarikPro3DRenderer.renderVectorToPng(
+          calVec,
+          maxCanvas: 720.0,
+          is3D: false,
+          transparentBg: false,
+          decorTheme: 0,
+        );
+        result = EmbDesignInfo(
+          filePath: result.filePath,
+          fileName: result.fileName,
+          previewJpeg: calPng ?? result.previewJpeg,
+          stitches: calVec.stitches,
+          colorCount: calVec.colorCount,
+          stopsCount: calVec.stopsCount,
+          jumpsCount: calVec.jumpsCount,
+          sequinsCount: calVec.sequinsCount,
+          beadsCount: calVec.beadsCount,
+          trimsCount: calVec.trimsCount,
+          machineType: calVec.machineType,
+          colorSequence: result.colorSequence,
+          widthMm: calVec.widthMm,
+          heightMm: calVec.heightMm,
+        );
+      }
+    }
   } else if (lower.endsWith('.tbf')) {
-    result = await TarikProTbfParser.parseFile(path, maxCanvas: 640.0);
+    result = await TarikProTbfParser.parseFile(path, maxCanvas: 720.0);
   } else if (UniversalFormatParser.isSupported(lower)) {
-    result = await UniversalFormatParser.parseFile(path, maxCanvas: 640.0);
+    result = await UniversalFormatParser.parseFile(path, maxCanvas: 720.0);
   }
 
   // فحص ذكي لمحتوى الملف إذا كانت اللاحقة مختلفة أو مرسلة من واتساب بصيغة BIN
-  result ??= await UniversalFormatParser.parseByContentFallback(path, maxCanvas: 640.0);
+  result ??= await UniversalFormatParser.parseByContentFallback(path, maxCanvas: 720.0);
   if (result != null) return result;
 
   final name = path.split(Platform.pathSeparator).last;
@@ -102,7 +157,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v7');
+    final dir = Directory('${supportDir.path}/design_cache_v8');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -1998,10 +2053,65 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   bool _isSharing = false;
   bool _isExportingDst = false;
   String? _lastExportedPath;
+  Uint8List? _sharpPreviewBytes;
+  bool _loadingSharp = false;
+  bool _detail3D = false;
+  int _decorTheme = 0; // 0=ذهبي ولؤلؤي، 1=فضي ولؤلؤي، 2=لؤلؤي، 3=ملوّن
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSharpPreview();
+  }
+
+  Future<void> _loadSharpPreview() async {
+    final path = widget.design.filePath;
+    if (!VectorDesignLoader.supportsVectorView(path)) return;
+    if (mounted) setState(() => _loadingSharp = true);
+    try {
+      final bytes = await TarikPro3DRenderer.renderHighResPreview(
+        path,
+        maxCanvas: 1800.0,
+        is3D: _detail3D,
+        transparentBg: false,
+        decorTheme: _decorTheme,
+      );
+      if (mounted) {
+        setState(() {
+          if (bytes != null && bytes.isNotEmpty) _sharpPreviewBytes = bytes;
+          _loadingSharp = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingSharp = false);
+    }
+  }
+
+  String _decorThemeLabel(int theme) {
+    switch (theme) {
+      case 1:
+        return tr('فضي', 'Silver');
+      case 2:
+        return tr('لؤلؤي', 'Pearl');
+      case 3:
+        return tr('ملوّن', 'Color');
+      default:
+        return tr('ذهبي', 'Gold');
+    }
+  }
 
   void _openFullScreenViewer() {
-    if (widget.design.previewJpeg == null) return;
-    Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenDesignViewer(design: widget.design)));
+    if (widget.design.previewJpeg == null && _sharpPreviewBytes == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FullScreenDesignViewer(
+          design: widget.design,
+          initialIs3D: _detail3D,
+          initialDecorTheme: _decorTheme,
+        ),
+      ),
+    );
   }
 
   Future<void> _showFormatPickerAndExport({required bool shareAfter}) async {
@@ -2214,17 +2324,21 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                         children: [
                           Container(
                             width: double.infinity,
+                            height: double.infinity,
                             color: Colors.white,
-                            child: d.previewJpeg != null
+                            child: (_sharpPreviewBytes ?? d.previewJpeg) != null
                                 ? InteractiveViewer(
                                     minScale: 0.8,
-                                    maxScale: 8.0,
-                                    child: Center(
+                                    maxScale: 10.0,
+                                    child: SizedBox.expand(
                                       child: Image.memory(
-                                        d.previewJpeg!,
+                                        (_sharpPreviewBytes ?? d.previewJpeg)!,
+                                        width: double.infinity,
+                                        height: double.infinity,
                                         fit: BoxFit.contain,
                                         filterQuality: FilterQuality.high,
                                         isAntiAlias: true,
+                                        gaplessPlayback: true,
                                       ),
                                     ),
                                   )
@@ -2244,28 +2358,99 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                     ),
                                   ),
                           ),
-                          if (d.previewJpeg != null)
+                          if (_loadingSharp)
+                            const Positioned(
+                              top: 8,
+                              right: 8,
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)),
+                              ),
+                            ),
+                          if ((_sharpPreviewBytes ?? d.previewJpeg) != null)
                             Positioned(
                               bottom: 8,
                               left: 8,
-                              child: Material(
-                                color: const Color(0xFF0E131D).withOpacity(0.86),
-                                borderRadius: BorderRadius.circular(18),
-                                child: InkWell(
-                                  onTap: _openFullScreenViewer,
-                                  borderRadius: BorderRadius.circular(18),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Icon(Icons.zoom_in, size: 16, color: Color(0xFFD4AF37)),
-                                        const SizedBox(width: 4),
-                                        Text(tr('تكبير', 'Zoom'), style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
-                                      ],
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Material(
+                                    color: const Color(0xFF0E131D).withOpacity(0.86),
+                                    borderRadius: BorderRadius.circular(18),
+                                    child: InkWell(
+                                      onTap: _openFullScreenViewer,
+                                      borderRadius: BorderRadius.circular(18),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            const Icon(Icons.zoom_in, size: 16, color: Color(0xFFD4AF37)),
+                                            const SizedBox(width: 4),
+                                            Text(tr('تكبير', 'Zoom'), style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+                                          ],
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ),
+                                  if (VectorDesignLoader.supportsVectorView(d.filePath)) ...[
+                                    const SizedBox(width: 6),
+                                    Material(
+                                      color: _detail3D
+                                          ? const Color(0xFFD4AF37)
+                                          : const Color(0xFF0E131D).withOpacity(0.86),
+                                      borderRadius: BorderRadius.circular(18),
+                                      child: InkWell(
+                                        onTap: _loadingSharp
+                                            ? null
+                                            : () {
+                                                setState(() => _detail3D = !_detail3D);
+                                                _loadSharpPreview();
+                                              },
+                                        borderRadius: BorderRadius.circular(18),
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                          child: Text(
+                                            '3D',
+                                            style: TextStyle(
+                                              color: _detail3D ? Colors.black : const Color(0xFFD4AF37),
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                  if (VectorDesignLoader.supportsVectorView(d.filePath) && (d.sequinsCount > 0 || d.beadsCount > 0)) ...[
+                                    const SizedBox(width: 6),
+                                    Material(
+                                      color: const Color(0xFF0E131D).withOpacity(0.86),
+                                      borderRadius: BorderRadius.circular(18),
+                                      child: InkWell(
+                                        onTap: _loadingSharp
+                                            ? null
+                                            : () {
+                                                setState(() => _decorTheme = (_decorTheme + 1) % 4);
+                                                _loadSharpPreview();
+                                              },
+                                        borderRadius: BorderRadius.circular(18),
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                                          child: Text(
+                                            '✨ ${_decorThemeLabel(_decorTheme)}',
+                                            style: const TextStyle(
+                                              color: Color(0xFFD4AF37),
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
                         ],
@@ -2617,7 +2802,14 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
 
 class FullScreenDesignViewer extends StatefulWidget {
   final EmbDesignInfo design;
-  const FullScreenDesignViewer({super.key, required this.design});
+  final bool initialIs3D;
+  final int initialDecorTheme;
+  const FullScreenDesignViewer({
+    super.key,
+    required this.design,
+    this.initialIs3D = false,
+    this.initialDecorTheme = 0,
+  });
   @override
   State<FullScreenDesignViewer> createState() => _FullScreenDesignViewerState();
 }
@@ -2628,6 +2820,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   Color _canvasBg = Colors.white;
   bool _enhanceClarity = true;
   bool _is3D = false;
+  int _decorTheme = 0;
   double _currentScale = 1.0;
   Uint8List? _hdBytes;
   bool _loadingHd = false;
@@ -2635,11 +2828,22 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   @override
   void initState() {
     super.initState();
+    _is3D = widget.initialIs3D;
+    _decorTheme = widget.initialDecorTheme;
     _transformController.addListener(() {
       final scale = _transformController.value.getMaxScaleOnAxis();
       if ((scale - _currentScale).abs() > 0.05) setState(() => _currentScale = scale);
     });
     _loadHdIfSupported();
+  }
+
+  String _decorThemeLabel(int t) {
+    switch (t) {
+      case 1: return tr('فضي', 'Silver');
+      case 2: return tr('لؤلؤي', 'Pearl');
+      case 3: return tr('ملوّن', 'Color');
+      default: return tr('ذهبي', 'Gold');
+    }
   }
 
   @override
@@ -2664,6 +2868,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
         maxCanvas: 2200.0,
         is3D: _is3D,
         transparentBg: true,
+        decorTheme: _decorTheme,
       );
       if (hd == null || hd.isEmpty) {
         if (isDst) {
@@ -2701,6 +2906,8 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
     final displayBytes = _hdBytes ?? d.previewJpeg!;
     final imageWidget = Image.memory(
       displayBytes,
+      width: double.infinity,
+      height: double.infinity,
       fit: BoxFit.contain,
       filterQuality: FilterQuality.high,
       isAntiAlias: true,
@@ -2803,6 +3010,25 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                           ),
                         ),
                         const SizedBox(width: 6),
+                        if (d.sequinsCount > 0 || d.beadsCount > 0) ...[
+                          TextButton(
+                            onPressed: _loadingHd
+                                ? null
+                                : () {
+                                    setState(() => _decorTheme = (_decorTheme + 1) % 4);
+                                    _loadHdIfSupported();
+                                  },
+                            style: TextButton.styleFrom(
+                              backgroundColor: const Color(0xFFD4AF37).withOpacity(0.20),
+                              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                            ),
+                            child: Text(
+                              '✨ ${_decorThemeLabel(_decorTheme)}',
+                              style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11.5, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
                       ],
                       TextButton.icon(
                         onPressed: () => setState(() => _enhanceClarity = !_enhanceClarity),
@@ -3299,6 +3525,8 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   double _bastingMarginMm = 5.0;
   final TextEditingController _marginCtrl = TextEditingController(text: '5.0');
   bool _bastingSeparateColor = true;
+  int _bastingColorArgb = 0xFF00BFA5;
+  static const List<int> _bastingColors = [0xFF00BFA5, 0xFFFF1744, 0xFF007BFF, 0xFFFFB300, 0xFF00C853, 0xFFD500F9, 0xFF000000];
   double _runLengthMm = 4.0;
   final TextEditingController _runLenCtrl = TextEditingController(text: '4.0');
   bool _applyRunToDesign = false;
@@ -3384,8 +3612,8 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
     if (_original == null) return;
     final double? targetW = double.tryParse(txt.trim().replaceAll(',', '.'));
     final double baseW = (_original!.widthMm ?? 0.0) / 10.0;
-    if (targetW == null || targetW < 0.5 || targetW > 120.0 || baseW <= 0.05) return;
-    _scaleX = (targetW / baseW).clamp(0.2, 4.0);
+    if (targetW == null || targetW < 0.2 || targetW > 500.0 || baseW <= 0.05) return;
+    _scaleX = (targetW / baseW).clamp(0.05, 25.0);
     if (_lockAspect) _scaleY = _scaleX;
     _rebuildEdited(syncDims: true);
   }
@@ -3394,8 +3622,8 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
     if (_original == null) return;
     final double? targetH = double.tryParse(txt.trim().replaceAll(',', '.'));
     final double baseH = (_original!.heightMm ?? 0.0) / 10.0;
-    if (targetH == null || targetH < 0.5 || targetH > 120.0 || baseH <= 0.05) return;
-    _scaleY = (targetH / baseH).clamp(0.2, 4.0);
+    if (targetH == null || targetH < 0.2 || targetH > 500.0 || baseH <= 0.05) return;
+    _scaleY = (targetH / baseH).clamp(0.05, 25.0);
     if (_lockAspect) _scaleX = _scaleY;
     _rebuildEdited(syncDims: true);
   }
@@ -3482,8 +3710,41 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
     } else {
       next = withoutFilter;
     }
+    VectorDesignData finalVec = next;
+    if (_addBastingFrame && finalVec.stColor.isNotEmpty && finalVec.paletteArgb.isNotEmpty) {
+      final palCopy = Int32List.fromList(finalVec.paletteArgb);
+      final int frameColIdx = finalVec.stColor[0] % palCopy.length;
+      palCopy[frameColIdx] = _bastingColorArgb;
+      finalVec = VectorDesignData(
+        stX: finalVec.stX,
+        stY: finalVec.stY,
+        stMove: finalVec.stMove,
+        stColor: finalVec.stColor,
+        stDev: finalVec.stDev,
+        seqX: finalVec.seqX,
+        seqY: finalVec.seqY,
+        seqCode: finalVec.seqCode,
+        beadX: finalVec.beadX,
+        beadY: finalVec.beadY,
+        beadCode: finalVec.beadCode,
+        paletteArgb: palCopy,
+        stitches: finalVec.stitches,
+        colorCount: finalVec.colorCount,
+        stopsCount: finalVec.stopsCount,
+        jumpsCount: finalVec.jumpsCount,
+        sequinsCount: finalVec.sequinsCount,
+        beadsCount: finalVec.beadsCount,
+        trimsCount: finalVec.trimsCount,
+        minX: finalVec.minX,
+        maxX: finalVec.maxX,
+        minY: finalVec.minY,
+        maxY: finalVec.maxY,
+        hasBounds: finalVec.hasBounds,
+        machineType: finalVec.machineType,
+      );
+    }
     setState(() {
-      _edited = next;
+      _edited = finalVec;
       _filteredOutCount = removed;
     });
     if (syncDims) _syncDimInputs(next);
@@ -3564,7 +3825,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
             ),
             IconButton(
               icon: const Icon(Icons.select_all, color: Color(0xFF56CCF2), size: 21),
-              tooltip: tr('تحديد عنصر (ويلكم)', 'Select Element'),
+              tooltip: tr('تحديد عنصر', 'Select Element'),
               onPressed: () async {
                 final resPath = await Navigator.push<String>(
                   context,
@@ -3793,7 +4054,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
                                           Text(
-                                            tr('نقطة البداية والنهاية (ويلكم)', 'Auto Start & End'),
+                                            tr('نقطة البداية والنهاية', 'Auto Start & End'),
                                             style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
                                           ),
                                           const SizedBox(height: 4),
@@ -3961,6 +4222,40 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                               activeColor: Colors.tealAccent,
                                               onChanged: (v) => _setMarginMm(v),
                                             ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text(
+                                            tr('لون إطار الدرزة:', 'Frame Color:'),
+                                            style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w600),
+                                          ),
+                                          Row(
+                                            children: _bastingColors.map((argb) {
+                                              final bool sel = _bastingColorArgb == argb;
+                                              return GestureDetector(
+                                                onTap: () {
+                                                  _bastingColorArgb = argb;
+                                                  _rebuildEdited();
+                                                },
+                                                child: Container(
+                                                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                                                  width: 22,
+                                                  height: 22,
+                                                  decoration: BoxDecoration(
+                                                    color: Color(argb),
+                                                    shape: BoxShape.circle,
+                                                    border: Border.all(
+                                                      color: sel ? const Color(0xFFD4AF37) : Colors.white38,
+                                                      width: sel ? 2.4 : 1.0,
+                                                    ),
+                                                  ),
+                                                ),
+                                              );
+                                            }).toList(),
                                           ),
                                         ],
                                       ),
@@ -4414,7 +4709,7 @@ class _VectorStitchPainter extends CustomPainter {
         canvas.drawPath(
           path,
           Paint()
-            ..color = Colors.black.withOpacity(0.26)
+            ..color = Colors.black.withOpacity(0.18)
             ..style = PaintingStyle.stroke
             ..strokeWidth = tw * 1.08
             ..strokeCap = StrokeCap.round
@@ -4426,7 +4721,7 @@ class _VectorStitchPainter extends CustomPainter {
         canvas.drawPath(
           path,
           Paint()
-            ..color = Color.lerp(baseColor, Colors.black, 0.28) ?? baseColor
+            ..color = Color.lerp(baseColor, Colors.black, 0.24) ?? baseColor
             ..style = PaintingStyle.stroke
             ..strokeWidth = tw
             ..strokeCap = StrokeCap.round
@@ -4808,8 +5103,8 @@ class _InteractiveLetteringCanvasState extends State<_InteractiveLetteringCanvas
         _activeHandle == _LetteringHandle.resizeBR ||
         _activeHandle == _LetteringHandle.resizeBL) {
       final double curDist = max(12.0, (pos - center).distance);
-      final double ratio = (curDist / _dragStartDist).clamp(0.25, 3.5);
-      final double nextW = (_dragStartWidthCm * ratio).clamp(3.0, 32.0);
+      final double ratio = (curDist / _dragStartDist).clamp(0.10, 12.0);
+      final double nextW = (_dragStartWidthCm * ratio).clamp(0.8, 250.0);
       setState(() {
         _liveScalePreview = nextW / max(0.5, _dragStartWidthCm);
         _hudLabel = '${tr('العرض', 'W')}: ${nextW.toStringAsFixed(1)} ${tr('سم', 'cm')}';
@@ -5049,7 +5344,7 @@ class _InteractiveLetteringPainter extends CustomPainter {
         canvas.drawPath(
           path,
           Paint()
-            ..color = Colors.black.withOpacity(0.26)
+            ..color = Colors.black.withOpacity(0.18)
             ..style = PaintingStyle.stroke
             ..strokeWidth = tw * 1.08
             ..strokeCap = StrokeCap.round
@@ -5061,7 +5356,7 @@ class _InteractiveLetteringPainter extends CustomPainter {
         canvas.drawPath(
           path,
           Paint()
-            ..color = Color.lerp(baseColor, Colors.black, 0.28) ?? baseColor
+            ..color = Color.lerp(baseColor, Colors.black, 0.24) ?? baseColor
             ..style = PaintingStyle.stroke
             ..strokeWidth = tw
             ..strokeCap = StrokeCap.round
@@ -5275,6 +5570,8 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   Timer? _liveTypeTimer;
   int _underlayMode = 1;
   bool _isSatin = true;
+  double _tatamiAngleDeg = 0.0;
+  int _tatamiPattern = 0; // 0=قياسي 1/3، 1=مائل 1/4، 2=متعرج، 3=منسوج
   int _selectedColor = 0xFFFF1744;
   String _exportFormat = 'DST';
   String? _hintMsg;
@@ -5342,11 +5639,9 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   List<int> _visibleFontSlots() {
     final map = _arabicGroup ? _arProFonts : _enProFonts;
-    int maxSlot = 5;
-    for (final k in map.keys) {
-      if (k > maxSlot) maxSlot = k;
-    }
-    return List.generate(maxSlot, (i) => i + 1);
+    final keys = map.keys.toList()..sort();
+    if (keys.isNotEmpty) return keys;
+    return [1, 2, 3, 4];
   }
 
   void _scheduleLiveGenerate() {
@@ -5372,7 +5667,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
     final wCm = (v.widthMm ?? 0.0) / 10.0;
     final hCm = (v.heightMm ?? 0.0) / 10.0;
     if (wCm > 0.1) {
-      _widthCm = wCm.clamp(2.0, 35.0);
+      _widthCm = wCm.clamp(0.5, 500.0);
       _widthCmCtrl.text = wCm.toStringAsFixed(1);
     }
     if (hCm > 0.1) {
@@ -5399,77 +5694,29 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
     try {
       VectorDesignData? v;
-      final bool useProArabic = _arabicGroup && _arProFonts.containsKey(_fontNumber) && _isSatin;
-      final bool useProEnglish = !_arabicGroup && _enProFonts.containsKey(_fontNumber) && _isSatin;
+      final EmbFontMeta? activeMeta = _arabicGroup
+          ? (_arProFonts[_fontNumber] ?? (_arProFonts.isNotEmpty ? _arProFonts.values.first : null))
+          : (_enProFonts[_fontNumber] ?? (_enProFonts.isNotEmpty ? _enProFonts.values.first : null));
 
-      if (useProArabic) {
+      if (activeMeta != null) {
         v = await TarikProFontEngine.generate(
-          meta: _arProFonts[_fontNumber]!,
+          meta: activeMeta,
           text: txt,
-          letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.8, 12.0),
+          letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.5, 120.0),
           targetWidthCm: _widthCm,
           targetHeightCm: _lockAspect ? null : _customHeightCm,
           densityMm: _densityMm,
           extraSpacingMm: _extraSpacingMm,
           satinWidthOffsetMm: _satinWidthOffsetMm,
           autoSplit8Mm: _autoSplit8Mm,
+          isTatami: !_isSatin,
+          tatamiAngleDeg: _tatamiAngleDeg,
+          tatamiPattern: _tatamiPattern,
           pathMode: _pathMode,
           pathParam: _pathParam,
           rotationDeg: _rotationDeg,
           underlayMode: _underlayMode,
           colorArgb: _selectedColor,
-        );
-        // إن لم يجد حرفاً مدعوماً (مثلاً تشكيل نادر)، يرجع تلقائياً للفونط العريض النظيف بدون أن يترك الشاشة فارغة
-        v ??= await TextToStitchEngine.generateFromText(
-          text: txt,
-          widthCm: _widthCm,
-          heightCm: _lockAspect ? null : _customHeightCm,
-          densityMm: _densityMm,
-          colorArgb: _selectedColor,
-          isBold: true,
-          isSatin: _isSatin,
-          fontFamily: _arTtfFallbacks[(_fontNumber - 1).clamp(0, 4)],
-        );
-      } else if (useProEnglish) {
-        v = await TarikProFontEngine.generate(
-          meta: _enProFonts[_fontNumber]!,
-          text: txt,
-          letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.8, 12.0),
-          targetWidthCm: _widthCm,
-          targetHeightCm: _lockAspect ? null : _customHeightCm,
-          densityMm: _densityMm,
-          extraSpacingMm: _extraSpacingMm,
-          satinWidthOffsetMm: _satinWidthOffsetMm,
-          autoSplit8Mm: _autoSplit8Mm,
-          pathMode: _pathMode,
-          pathParam: _pathParam,
-          rotationDeg: _rotationDeg,
-          underlayMode: _underlayMode,
-          colorArgb: _selectedColor,
-        );
-        v ??= await TextToStitchEngine.generateFromText(
-          text: txt,
-          widthCm: _widthCm,
-          heightCm: _lockAspect ? null : _customHeightCm,
-          densityMm: _densityMm,
-          colorArgb: _selectedColor,
-          isBold: true,
-          isSatin: _isSatin,
-          fontFamily: _enTtfFallbacks[(_fontNumber - 1).clamp(0, 4)],
-        );
-      } else {
-        final String fam = _arabicGroup
-            ? _arTtfFallbacks[(_fontNumber - 1).clamp(0, 4)]
-            : _enTtfFallbacks[(_fontNumber - 1).clamp(0, 4)];
-        v = await TextToStitchEngine.generateFromText(
-          text: txt,
-          widthCm: _widthCm,
-          heightCm: _lockAspect ? null : _customHeightCm,
-          densityMm: _densityMm,
-          colorArgb: _selectedColor,
-          isBold: true,
-          isSatin: _isSatin,
-          fontFamily: fam,
         );
       }
 
@@ -5487,7 +5734,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   void _applyWidthInput(String txt) {
     final double? w = double.tryParse(txt.trim().replaceAll(',', '.'));
-    if (w == null || w < 2.0 || w > 40.0) return;
+    if (w == null || w < 0.5 || w > 500.0) return;
     _widthCm = w;
     if (_lockAspect) _customHeightCm = null;
     _generate();
@@ -5495,10 +5742,10 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   void _applyHeightInput(String txt) {
     final double? h = double.tryParse(txt.trim().replaceAll(',', '.'));
-    if (h == null || h < 0.8 || h > 25.0) return;
+    if (h == null || h < 0.3 || h > 500.0) return;
     if (_lockAspect && _vec != null && (_vec!.widthMm ?? 0) > 0 && (_vec!.heightMm ?? 0) > 0) {
       final ratio = _vec!.widthMm! / _vec!.heightMm!;
-      _widthCm = (h * ratio).clamp(2.0, 40.0);
+      _widthCm = (h * ratio).clamp(0.5, 500.0);
       _customHeightCm = null;
     } else {
       _customHeightCm = h;
@@ -5596,7 +5843,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
             ),
             IconButton(
               icon: const Icon(Icons.select_all, color: Color(0xFF56CCF2), size: 21),
-              tooltip: tr('تحديد عنصر (ويلكم)', 'Select Element'),
+              tooltip: tr('تحديد عنصر', 'Select Element'),
               onPressed: () {
                 Navigator.push(
                   context,
@@ -5698,7 +5945,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                   border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.6)),
                                 ),
                                 child: Text(
-                                  '$_activeCode${_vec!.machineType.contains('Wilcom') ? ' • Wilcom' : ''} • ${_vec!.stitches} ${tr('غرزة', 'st')}',
+                                  '$_activeCode${!_isSatin ? ' • Tatami' : ' • Pro'} • ${_vec!.stitches} ${tr('غرزة', 'st')}',
                                   style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11, fontWeight: FontWeight.bold),
                                 ),
                               ),
@@ -5899,10 +6146,9 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                       ],
                     ),
                     Slider(
-                      value: _widthCm.clamp(3.0, 30.0),
-                      min: 3.0,
-                      max: 30.0,
-                      divisions: 54,
+                      value: _widthCm.clamp(1.0, max(60.0, _widthCm.ceilToDouble())),
+                      min: 1.0,
+                      max: max(60.0, _widthCm.ceilToDouble()),
                       activeColor: const Color(0xFFD4AF37),
                       onChanged: (v) {
                         setState(() {
@@ -5968,6 +6214,89 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                         ),
                       ],
                     ),
+                    if (!_isSatin) ...[
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Text(
+                            '${tr('زاوية التاتامي', 'Angle')}: ${_tatamiAngleDeg.round()}°',
+                            style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold, fontSize: 11),
+                          ),
+                          Expanded(
+                            child: Slider(
+                              value: _tatamiAngleDeg.clamp(0.0, 180.0),
+                              min: 0.0,
+                              max: 180.0,
+                              divisions: 36,
+                              activeColor: Colors.tealAccent,
+                              onChanged: (v) {
+                                setState(() => _tatamiAngleDeg = v);
+                                _scheduleLiveGenerate();
+                              },
+                            ),
+                          ),
+                          for (final d in [0, 45, 90, 135])
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 1.5),
+                              child: InkWell(
+                                onTap: () {
+                                  setState(() => _tatamiAngleDeg = d.toDouble());
+                                  _generate();
+                                },
+                                borderRadius: BorderRadius.circular(6),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: _tatamiAngleDeg.round() == d ? Colors.tealAccent : Colors.white10,
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    '$d°',
+                                    style: TextStyle(
+                                      color: _tatamiAngleDeg.round() == d ? Colors.black : Colors.white70,
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            tr('نقشة التاتامي:', 'Pattern:'),
+                            style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold),
+                          ),
+                          for (final pt in [
+                            (0, tr('قياسي', 'Brick')),
+                            (1, tr('مائل', 'Twill')),
+                            (2, tr('متعرج', 'Wave')),
+                            (3, tr('منسوج', 'Weave')),
+                          ])
+                            ChoiceChip(
+                              label: Text(
+                                pt.$2,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: _tatamiPattern == pt.$1 ? Colors.black : Colors.white,
+                                ),
+                              ),
+                              selected: _tatamiPattern == pt.$1,
+                              selectedColor: Colors.tealAccent,
+                              backgroundColor: Colors.white10,
+                              visualDensity: VisualDensity.compact,
+                              onSelected: (_) {
+                                setState(() => _tatamiPattern = pt.$1);
+                                _generate();
+                              },
+                            ),
+                        ],
+                      ),
+                    ],
 
                     Row(
                       children: [
@@ -6068,7 +6397,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                           ),
                         ),
                         FilterChip(
-                          label: Text(tr('قسم >8مم', 'Split >8mm'), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: _autoSplit8Mm ? Colors.black : Colors.white70)),
+                          label: Text(tr('قسم >7مم', 'Split >7mm'), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: _autoSplit8Mm ? Colors.black : Colors.white70)),
                           selected: _autoSplit8Mm,
                           selectedColor: const Color(0xFFD4AF37),
                           backgroundColor: Colors.white10,
@@ -6697,23 +7026,23 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
       if (_lockAspect) {
         final double r0 = max(10.0, (_dragStartDesign - _dragGroupCenter).distance);
         final double r1 = (curDesign - _dragGroupCenter).distance;
-        final double f = (r1 / r0).clamp(0.15, 5.0);
+        final double f = (r1 / r0).clamp(0.05, 20.0);
         fx = f;
         fy = f;
       } else {
         final double dx0 = max(8.0, (_dragStartDesign.dx - gCx).abs());
         final double dy0 = max(8.0, (_dragStartDesign.dy - gCy).abs());
-        fx = ((curDesign.dx - gCx).abs() / dx0).clamp(0.15, 5.0);
-        fy = ((curDesign.dy - gCy).abs() / dy0).clamp(0.15, 5.0);
+        fx = ((curDesign.dx - gCx).abs() / dx0).clamp(0.05, 20.0);
+        fy = ((curDesign.dy - gCy).abs() / dy0).clamp(0.05, 20.0);
       }
     } else if (_activeHandle == _WilcomHandle.centerLeft || _activeHandle == _WilcomHandle.centerRight) {
       final double dx0 = max(8.0, (_dragStartDesign.dx - gCx).abs());
-      fx = ((curDesign.dx - gCx).abs() / dx0).clamp(0.15, 5.0);
+      fx = ((curDesign.dx - gCx).abs() / dx0).clamp(0.05, 20.0);
       fy = 1.0;
     } else if (_activeHandle == _WilcomHandle.topCenter || _activeHandle == _WilcomHandle.bottomCenter) {
       final double dy0 = max(8.0, (_dragStartDesign.dy - gCy).abs());
       fx = 1.0;
-      fy = ((curDesign.dy - gCy).abs() / dy0).clamp(0.15, 5.0);
+      fy = ((curDesign.dy - gCy).abs() / dy0).clamp(0.05, 20.0);
     }
 
     for (final idx in indices) {
@@ -6723,8 +7052,8 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
       final double ry0 = (obj.centerY + tf0.dy) - gCy;
       _transforms[idx].dx = (gCx + rx0 * fx) - obj.centerX;
       _transforms[idx].dy = (gCy + ry0 * fy) - obj.centerY;
-      _transforms[idx].scaleX = (tf0.scaleX * fx).clamp(0.15, 5.0);
-      _transforms[idx].scaleY = (tf0.scaleY * fy).clamp(0.15, 5.0);
+      _transforms[idx].scaleX = (tf0.scaleX * fx).clamp(0.05, 20.0);
+      _transforms[idx].scaleY = (tf0.scaleY * fy).clamp(0.05, 20.0);
     }
 
     final nb = _selectionBoundsDesign();
@@ -6779,8 +7108,8 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
       final double ry = (obj.centerY + tf.dy) - gCy;
       tf.dx = (gCx + rx * fx) - obj.centerX;
       tf.dy = (gCy + ry * fy) - obj.centerY;
-      tf.scaleX = (tf.scaleX * fx).clamp(0.15, 5.0);
-      tf.scaleY = (tf.scaleY * fy).clamp(0.15, 5.0);
+      tf.scaleX = (tf.scaleX * fx).clamp(0.05, 20.0);
+      tf.scaleY = (tf.scaleY * fy).clamp(0.05, 20.0);
     }
     _rebuild(syncNums: true);
   }
@@ -6788,31 +7117,31 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
   void _applyNumericWidth(String txt) {
     final b = _selectionBoundsDesign();
     final double? targetW = double.tryParse(txt.trim().replaceAll(',', '.'));
-    if (b == null || targetW == null || targetW < 0.2 || targetW > 120.0) return;
+    if (b == null || targetW == null || targetW < 0.2 || targetW > 500.0) return;
     final double curW = (b.$2 - b.$1) / 10.0;
     if (curW <= 0.05) return;
-    final double fx = (targetW / curW).clamp(0.15, 5.0);
+    final double fx = (targetW / curW).clamp(0.05, 20.0);
     _scaleSelectionByFactors(fx, _lockAspect ? fx : 1.0);
   }
 
   void _applyNumericHeight(String txt) {
     final b = _selectionBoundsDesign();
     final double? targetH = double.tryParse(txt.trim().replaceAll(',', '.'));
-    if (b == null || targetH == null || targetH < 0.2 || targetH > 120.0) return;
+    if (b == null || targetH == null || targetH < 0.2 || targetH > 500.0) return;
     final double curH = (b.$4 - b.$3) / 10.0;
     if (curH <= 0.05) return;
-    final double fy = (targetH / curH).clamp(0.15, 5.0);
+    final double fy = (targetH / curH).clamp(0.05, 20.0);
     _scaleSelectionByFactors(_lockAspect ? fy : 1.0, fy);
   }
 
   void _applyNumericPercent(String txt) {
     final indices = _targetIndices;
     final double? pct = double.tryParse(txt.trim().replaceAll(',', '.').replaceAll('%', ''));
-    if (indices.isEmpty || pct == null || pct < 15.0 || pct > 400.0) return;
-    final double targetScale = (pct / 100.0).clamp(0.15, 4.0);
+    if (indices.isEmpty || pct == null || pct < 5.0 || pct > 2000.0) return;
+    final double targetScale = (pct / 100.0).clamp(0.05, 20.0);
     final double curScale = _transforms[indices.first].scaleX;
     if (curScale <= 0.01) return;
-    final double f = (targetScale / curScale).clamp(0.15, 5.0);
+    final double f = (targetScale / curScale).clamp(0.05, 20.0);
     _scaleSelectionByFactors(f, f);
   }
 
@@ -6876,7 +7205,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
         if (UniversalExporter.supportedFormats.any((f) => f['ext'] == origExt)) {
           targetExt = origExt;
         }
-        baseName = '${widget.design!.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_wilcom';
+        baseName = '${widget.design!.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_pro';
         outDir = File(widget.design!.filePath).parent.path;
       } else {
         baseName = '${widget.defaultBaseName}_${DateTime.now().millisecondsSinceEpoch}';
@@ -6915,7 +7244,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
         title: Text(
-          tr('تعديل العناصر (ويلكم)', 'Wilcom Object Editor'),
+          tr('تعديل العناصر', 'Object Editor'),
           style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -8144,4 +8473,4 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - Pro v6.2 (Protected)
+// Tarik emb - Pro v6.3
