@@ -3,9 +3,8 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
 
-/// محرك قراءة وتقطيع ملفات الفونطات العربية الأصلية بصيغة Tajima DST (مثل A1, a3, a4)
-/// يحوّل شيت التطريز المكون من 6 صفوف إلى JSON متوافق 100% مع InkStitchFontEngine
-/// دون الحاجة لتضخيم ملف emb_parser.dart ودون المساس بفونط A2 المدمج.
+/// محرك قراءة وتقطيع ملفات الفونطات العربية الأصلية بصيغة Tajima DST (A1, a3, a4)
+/// تم التحقق من البنية الفعلية للملفات الثلاثة: 6 صفوف = 133 حرفاً (18 + 21 + 23 + 23 + 38 + 10)
 class WilcomDstFontLoader {
   static final Map<String, String> _jsonCache = {};
 
@@ -17,11 +16,11 @@ class WilcomDstFontLoader {
     'ص.isol', 'ض.isol',
   ];
 
-  // الصف 2 (20 حرفاً — منفصل + لام ألف)
+  // الصف 2 (21 حرفاً — منفصل + ئ + ء + لام ألف)
   static const List<String> _row2Keys = [
     'ط.isol', 'ظ.isol', 'ع.isol', 'غ.isol', 'ف.isol', 'ق.isol',
     'ك.isol', 'ل.isol', 'م.isol', 'ن.isol', 'ه.isol', 'ة.isol',
-    'و.isol', 'ؤ.isol', 'ي.isol', 'ى.isol', 'ء.isol',
+    'و.isol', 'ؤ.isol', 'ي.isol', 'ى.isol', 'ئ.isol', 'ء.isol',
     'لا.isol', 'لأ.isol', 'لإ.isol',
   ];
 
@@ -41,7 +40,7 @@ class WilcomDstFontLoader {
     'م.medi', 'ن.medi', 'ه.medi', 'ي.medi', 'ئ.medi',
   ];
 
-  // الصف 5 لفونط A1 (38 حرفاً — آخر الكلمة مع ـئ)
+  // الصف 5 (38 حرفاً — آخر الكلمة في A1 و a3 و a4)
   static const List<String> _row5Keys38 = [
     'ا.fina', 'أ.fina', 'إ.fina', 'آ.fina',
     'ب.fina', 'ت.fina', 'ث.fina', 'ج.fina', 'ح.fina', 'خ.fina',
@@ -52,7 +51,7 @@ class WilcomDstFontLoader {
     'ئ.fina', 'لا.fina', 'لأ.fina', 'لإ.fina',
   ];
 
-  // الصف 5 لفونطي a3 و a4 (37 حرفاً — آخر الكلمة بدون ـئ مستقلة)
+  // احتياطي لأي ملف مستقبلي بـ 37 حرفاً في الصف 5
   static const List<String> _row5Keys37 = [
     'ا.fina', 'أ.fina', 'إ.fina', 'آ.fina',
     'ب.fina', 'ت.fina', 'ث.fina', 'ج.fina', 'ح.fina', 'خ.fina',
@@ -68,14 +67,14 @@ class WilcomDstFontLoader {
     '٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩',
   ];
 
-  // فهارس الحروف المستقرة على السطر (بدون نزول تحت السطر) لحساب خط السطر بدقة
+  // فهارس الحروف المستقرة على السطر لحساب خط السطر (Baseline) بدقة
   static const List<List<int>> _baselineAnchorIndices = [
     [0, 1, 3, 4, 5, 6, 10, 11], // الصف 1: ا أ آ ب ت ث د ذ
-    [0, 1, 4, 6, 10, 11, 17, 18], // الصف 2: ط ظ ف ك ه ة لا لأ
-    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19], // الصف 3: بـ تـ ثـ سـ شـ صـ ضـ طـ ظـ فـ قـ كـ لـ نـ
-    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19], // الصف 4: وسط الكلمة
-    [0, 1, 3, 4, 5, 6, 10, 11, 18, 19, 22, 24, 28, 29], // الصف 5: آخر الكلمة
-    [1, 2, 3, 4, 5, 6, 7, 8, 9], // الصف 6: الأرقام
+    [0, 1, 4, 6, 10, 11, 18, 19], // الصف 2: ط ظ ف ك ه ة لا لأ
+    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19], // الصف 3
+    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19], // الصف 4
+    [0, 1, 3, 4, 5, 6, 10, 11, 18, 19, 22, 24, 28, 29], // الصف 5
+    [1, 2, 3, 4, 5, 6, 7, 8, 9], // الصف 6
   ];
 
   /// تحميل ملف DST من الأصول وتحويله مع التخزين المؤقت
@@ -95,9 +94,7 @@ class WilcomDstFontLoader {
         final bd = await rootBundle.load(path);
         bytes = bd.buffer.asUint8List(bd.offsetInBytes, bd.lengthInBytes);
         if (bytes.length > 512) break;
-      } catch (_) {
-        // جرّب المسار البديل (حروف كبيرة/صغيرة)
-      }
+      } catch (_) {}
     }
     if (bytes == null || bytes.length <= 512) return null;
 
@@ -113,7 +110,7 @@ class WilcomDstFontLoader {
     return jsonStr;
   }
 
-  /// تحويل بايتات ملف DST إلى JSON جاهز لمحرك InkStitchFontEngine
+  /// تحويل بايتات ملف DST إلى JSON جاهز لمحرك الكتابة
   static String? parseDstBytesToFontJson({
     required Uint8List bytes,
     required String nameEn,
@@ -126,12 +123,16 @@ class WilcomDstFontLoader {
     final rows = _clusterIntoRows(runs, 6);
     if (rows.length != 6) return null;
 
+    // التحقق التلقائي من عدد حروف الصف الخامس (A1 و a3 و a4 جميعها تحتوي على 38 حرفاً)
+    final row5NaturalClusters = _mergeOverlappingClusters(rows[4]);
+    final bool use38Row5 = row5HasFinalYehHamza || row5NaturalClusters.length >= 38;
+
     final rowKeyLists = <List<String>>[
       _row1Keys,
       _row2Keys,
       _row3Keys,
       _row4Keys,
-      row5HasFinalYehHamza ? _row5Keys38 : _row5Keys37,
+      use38Row5 ? _row5Keys38 : _row5Keys37,
       _row6Keys,
     ];
 
@@ -164,7 +165,22 @@ class WilcomDstFontLoader {
 
     if (glyphsMap.isEmpty) return null;
 
-    // تركيب تلقائي لحرف (ـئ) في فونطي a3 و a4 بوضع همزة (ء.isol) فوق (ى.fina)
+    // إصلاح تلقائي لحرف (ئ.isol) إذا كانت خانته تحتوي على همزة صغيرة فقط (مثل A1.DST)
+    if (glyphsMap.containsKey('ى.isol')) {
+      final double yehW = (glyphsMap['ى.isol']!['w'] as num).toDouble();
+      final double? hamzaYehW = glyphsMap['ئ.isol'] != null
+          ? (glyphsMap['ئ.isol']!['w'] as num).toDouble()
+          : null;
+      if (hamzaYehW == null || hamzaYehW < yehW * 0.65) {
+        glyphsMap['ئ.isol'] = _synthesizeFinalYehHamza(
+          glyphsMap['ى.isol']!,
+          glyphsMap['ء.isol'],
+          capH,
+        );
+      }
+    }
+
+    // تركيب احتياطي لحرف (ئ.fina) إن غاب في أي ملف مستقبلي
     if (!glyphsMap.containsKey('ئ.fina') && glyphsMap.containsKey('ى.fina')) {
       glyphsMap['ئ.fina'] = _synthesizeFinalYehHamza(
         glyphsMap['ى.fina']!,
@@ -173,7 +189,7 @@ class WilcomDstFontLoader {
       );
     }
 
-    // بدائل آمنة للام ألف ممدودة وأشكال الهمزة والياء/الكاف الفارسية والأرقام اللاتينية
+    // بدائل آمنة للام ألف ممدودة والهمزة المتطرفة
     if (!glyphsMap.containsKey('لآ.isol') && glyphsMap.containsKey('لا.isol')) {
       glyphsMap['لآ.isol'] = glyphsMap['لأ.isol'] ?? glyphsMap['لا.isol']!;
     }
@@ -182,13 +198,6 @@ class WilcomDstFontLoader {
     }
     if (!glyphsMap.containsKey('ء.fina') && glyphsMap.containsKey('ء.isol')) {
       glyphsMap['ء.fina'] = glyphsMap['ء.isol']!;
-    }
-    if (!glyphsMap.containsKey('ئ.isol') && glyphsMap.containsKey('ى.isol')) {
-      glyphsMap['ئ.isol'] = _synthesizeFinalYehHamza(
-        glyphsMap['ى.isol']!,
-        glyphsMap['ء.isol'],
-        capH,
-      );
     }
 
     // ربط الأرقام الإنجليزية 0-9 مباشرة بالأرقام العربية المطرزة ٠-٩
@@ -215,13 +224,12 @@ class WilcomDstFontLoader {
     return jsonEncode(fontObj);
   }
 
-  /// فك تشفير Tajima DST (رأس 512 بايت + 3 بايت لكل غرزة) وتقسيمه لمقاطع متصلة
   static List<_DstRun> _extractDstRuns(Uint8List bytes) {
     final List<_DstRun> runs = [];
     List<double> curPts = [];
 
     double cx = 0.0;
-    double cy = 0.0; // إحداثيات الشاشة (+Y للأسفل)
+    double cy = 0.0;
 
     void flushRun() {
       if (curPts.length >= 4) {
@@ -237,7 +245,7 @@ class WilcomDstFontLoader {
       final int b2 = bytes[offset + 2];
       offset += 3;
 
-      if (b2 == 0xF3) break; // نهاية ملف DST
+      if (b2 == 0xF3) break;
 
       int dx = 0;
       int dyDst = 0;
@@ -269,7 +277,7 @@ class WilcomDstFontLoader {
       final bool isStop = (b2 & 0xC3) == 0xC3;
 
       cx += dx;
-      cy -= dyDst; // عكس Y لتتوافق مع محور Flutter (الأسفل موجب)
+      cy -= dyDst;
 
       if (isJump || isStop) {
         flushRun();
@@ -282,11 +290,9 @@ class WilcomDstFontLoader {
     return runs;
   }
 
-  /// تقسيم المقاطع عمودياً إلى 6 صفوف (من الأعلى للأسفل)
   static List<List<_DstRun>> _clusterIntoRows(List<_DstRun> runs, int numRows) {
     if (runs.isEmpty) return const [];
 
-    // نستخدم المقاطع الرئيسية (أجسام الحروف لا النقاط الصغيرة) لاكتشاف الفواصل بين الصفوف
     final heights = runs.map((r) => r.height).toList()..sort();
     final double medH = heights[heights.length ~/ 2];
     final majorRuns = runs
@@ -295,7 +301,6 @@ class WilcomDstFontLoader {
     final baseList = majorRuns.length >= numRows * 2 ? majorRuns : List<_DstRun>.from(runs);
     baseList.sort((a, b) => a.centerY.compareTo(b.centerY));
 
-    // إيجاد أكبر (numRows - 1) فجوة عمودية بين أجسام الحروف
     final List<({int splitIdx, double gap})> gaps = [];
     for (int i = 0; i < baseList.length - 1; i++) {
       final double g = baseList[i + 1].centerY - baseList[i].centerY;
@@ -308,7 +313,6 @@ class WilcomDstFontLoader {
         .toList()
       ..sort();
 
-    // حساب نطاق Y لكل صف من المقاطع الرئيسية
     final List<({double minY, double maxY, double centerY})> rowBands = [];
     int start = 0;
     for (int s = 0; s <= splitIndices.length; s++) {
@@ -330,7 +334,6 @@ class WilcomDstFontLoader {
       start = end;
     }
 
-    // إسناد كل مقطع (بما فيها النقاط والهمزات) لأقرب صف عمودياً
     final List<List<_DstRun>> result = List.generate(numRows, (_) => []);
     for (final run in runs) {
       int bestRow = 0;
@@ -355,19 +358,11 @@ class WilcomDstFontLoader {
     return result;
   }
 
-  /// تجميع مقاطع الصف الواحد إلى حروف كاملة مرتّبة من اليمين إلى اليسار
-  static List<_GlyphCluster> _clusterRowRightToLeft(
-    List<_DstRun> rowRuns,
-    int expectedCount,
-  ) {
-    if (rowRuns.isEmpty) return const [];
-
-    // 1) كل مقطع يبدأ ككتلة مستقلة
+  static List<_GlyphCluster> _mergeOverlappingClusters(List<_DstRun> rowRuns) {
     final List<_GlyphCluster> clusters = rowRuns
         .map((r) => _GlyphCluster([r]))
         .toList();
 
-    // 2) دمج الكتل المتداخلة أفقياً (مثل النقاط والهمزات وشرطة الكاف ولام ألف)
     bool merged = true;
     while (merged) {
       merged = false;
@@ -381,9 +376,17 @@ class WilcomDstFontLoader {
         }
       }
     }
+    return clusters;
+  }
 
-    // 3) إذا بقي عدد الكتل أكبر من العدد المتوقع (مثلاً نقطة جانبية مائلة قليلاً)
-    // ندمج أصغر فجوة أفقية مع إعطاء أولوية لدمج النقاط/الهمزات الصغيرة بأقرب حرف
+  static List<_GlyphCluster> _clusterRowRightToLeft(
+    List<_DstRun> rowRuns,
+    int expectedCount,
+  ) {
+    if (rowRuns.isEmpty) return const [];
+
+    final List<_GlyphCluster> clusters = _mergeOverlappingClusters(rowRuns);
+
     if (clusters.length > expectedCount) {
       final avgH = clusters.fold<double>(0.0, (s, c) => s + c.height) / clusters.length;
       while (clusters.length > expectedCount) {
@@ -408,12 +411,10 @@ class WilcomDstFontLoader {
       }
     }
 
-    // 4) ترتيب نهائي من اليمين إلى اليسار (أكبر centerX أولاً)
     clusters.sort((a, b) => b.centerX.compareTo(a.centerX));
     return clusters;
   }
 
-  /// حساب خط السطر (Baseline) بالوسيط الهندسي للحروف المستقرة على السطر
   static double _estimateRowBaseline(
     List<_GlyphCluster> clusters,
     List<int> anchorIndices,
@@ -457,7 +458,6 @@ class WilcomDstFontLoader {
     };
   }
 
-  /// تركيب حرف (ـئ / ئ) تلقائياً بوضع همزة الفونط فوق جسم الألف المقصورة
   static Map<String, dynamic> _synthesizeFinalYehHamza(
     Map<String, dynamic> baseYeh,
     Map<String, dynamic>? hamzaGlyph,
