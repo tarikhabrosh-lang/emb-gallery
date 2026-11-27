@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -737,6 +738,10 @@ class TarikProFontEngine {
     double extraSpacingMm = 0.0,
     double satinWidthOffsetMm = 0.0,
     bool autoSplit8Mm = true,
+    bool isTatami = false,
+    double tatamiAngleDeg = 0.0,
+    int tatamiPattern = 0, // 0=قياسي 1/3، 1=مائل 1/4، 2=متعرج، 3=منسوج 1/2
+    double tatamiStitchLenMm = 4.0,
     String pathMode = 'linear',
     double pathParam = 0.35,
     double rotationDeg = 0.0,
@@ -756,7 +761,11 @@ class TarikProFontEngine {
         densityMm: densityMm,
         extraSpacingMm: extraSpacingMm,
         satinWidthOffsetMm: satinWidthOffsetMm,
-        autoSplit8Mm: false, // نقسّم بدقة بعد ضبط المقاس النهائي!
+        autoSplit8Mm: false,
+        isTatami: isTatami,
+        tatamiAngleDeg: tatamiAngleDeg,
+        tatamiPattern: tatamiPattern,
+        tatamiStitchLenMm: tatamiStitchLenMm,
         pathMode: pathMode,
         pathParam: pathParam,
         underlayMode: underlayMode,
@@ -768,19 +777,19 @@ class TarikProFontEngine {
       if (targetWidthCm != null || targetHeightCm != null) {
         final double curW = (raw.widthMm ?? 0.0) / 10.0;
         final double curH = (raw.heightMm ?? 0.0) / 10.0;
-        if (curW > 0.1 && curH > 0.1) {
+        if (curW > 0.05 && curH > 0.05) {
           sx = targetWidthCm != null
-              ? (targetWidthCm / curW).clamp(0.20, 5.0)
-              : (targetHeightCm! / curH).clamp(0.20, 5.0);
+              ? (targetWidthCm / curW).clamp(0.04, 40.0)
+              : (targetHeightCm! / curH).clamp(0.04, 40.0);
           sy = targetHeightCm != null
-              ? (targetHeightCm / curH).clamp(0.20, 5.0)
+              ? (targetHeightCm / curH).clamp(0.04, 40.0)
               : sx;
         }
       }
 
-      // إذا كبّر المستخدم المقاس بدرجة كبيرة، نُعيد التوليد مباشرةً بالارتفاع الحقيقي حتى تكون الكثافة وتعريض الفستون بالمليمتر الحقيقي!
-      if ((sx - 1.0).abs() > 0.12 && targetHeightCm == null) {
-        final double adjustedHeightCm = (letterHeightCm * sx).clamp(0.6, 20.0);
+      // إعادة التوليد بالمقاس الحقيقي المباشر (بدون سقف 20 سم) حتى تبقى الكثافة والتاتامي وتعريض الفستون بالمليمتر الدقيق!
+      if ((sx - 1.0).abs() > 0.10 && targetHeightCm == null) {
+        final double adjustedHeightCm = (letterHeightCm * sx).clamp(0.3, 120.0);
         final VectorDesignData? scaledRaw = _generateSync(
           rawJson: rawJson,
           text: trimmed,
@@ -789,6 +798,10 @@ class TarikProFontEngine {
           extraSpacingMm: extraSpacingMm,
           satinWidthOffsetMm: satinWidthOffsetMm,
           autoSplit8Mm: false,
+          isTatami: isTatami,
+          tatamiAngleDeg: tatamiAngleDeg,
+          tatamiPattern: tatamiPattern,
+          tatamiStitchLenMm: tatamiStitchLenMm,
           pathMode: pathMode,
           pathParam: pathParam,
           underlayMode: underlayMode,
@@ -797,8 +810,8 @@ class TarikProFontEngine {
         if (scaledRaw != null) {
           raw = scaledRaw;
           final double curW2 = (raw.widthMm ?? 0.0) / 10.0;
-          if (targetWidthCm != null && curW2 > 0.1) {
-            sx = (targetWidthCm / curW2).clamp(0.5, 2.0);
+          if (targetWidthCm != null && curW2 > 0.05) {
+            sx = (targetWidthCm / curW2).clamp(0.2, 5.0);
             sy = sx;
           } else {
             sx = 1.0;
@@ -807,8 +820,8 @@ class TarikProFontEngine {
         }
       }
 
-      final bool isWilcomNative = raw.machineType.contains('Wilcom');
-      final double dFactor = isWilcomNative
+      final bool isNativeStitch = !isTatami && raw.machineType.contains('(Pro)');
+      final double dFactor = isNativeStitch
           ? (0.45 / densityMm.clamp(0.25, 1.0)).clamp(0.55, 1.85)
           : 1.0;
       final bool hasRot = rotationDeg.abs() > 0.05;
@@ -822,18 +835,17 @@ class TarikProFontEngine {
           scaleX: sx,
           scaleY: sy,
           rotationDeg: rotationDeg,
-          densityFactor: 1.0, // نطبّق كثافة الفستون النظيفة بدالة مخصصة تحافظ على أزواج الزكزاك
+          densityFactor: 1.0,
         );
       }
 
-      // تعديل كثافة الفستون بدون تفتيت الغرز
-      if ((dFactor - 1.0).abs() > 0.05) {
+      if (!isTatami && (dFactor - 1.0).abs() > 0.05) {
         out = _adjustSatinDensityClean(out, dFactor);
       }
 
-      // تقسيم تلقائي مضمون للغرز العريضة > 8 مم بعد الوصول للمقاس النهائي (Wilcom Auto-Split)
-      if (autoSplit8Mm) {
-        out = _applyPostScaleAutoSplit(out, maxStitchMm: 8.0);
+      // تقسيم تلقائي احترافي للغرز العريضة (معيار 7.0 مم / أقل غرزة 1.6 مم)
+      if (!isTatami && autoSplit8Mm) {
+        out = _applyPostScaleAutoSplit(out, maxStitchMm: 7.0, minStitchMm: 1.6);
       }
 
       return out;
@@ -843,11 +855,13 @@ class TarikProFontEngine {
   /// تقسيم تلقائي احترافي بعد التكبير النهائي: أي غرزة فستون أطول من 8 مم تُقسّم بتدرّج حريري متناوب بدون فراغات أو تفتّت
   static VectorDesignData _applyPostScaleAutoSplit(
     VectorDesignData src, {
-    double maxStitchMm = 8.0,
+    double maxStitchMm = 7.0,
+    double minStitchMm = 1.6,
   }) {
     final int n = src.stX.length;
     if (n < 2) return src;
-    final double maxUnits = maxStitchMm.clamp(4.5, 11.0) * 10.0;
+    final double maxUnits = maxStitchMm.clamp(4.0, 11.0) * 10.0;
+    final double minUnits = minStitchMm.clamp(1.0, 3.0) * 10.0;
 
     final stX = _ProFloat32Buf(n + 512);
     final stY = _ProFloat32Buf(n + 512);
@@ -868,19 +882,23 @@ class TarikProFontEngine {
         final double dy = py - prevY;
         final double len = math.sqrt(dx * dx + dy * dy);
 
-        // نقسم فقط الغرز الفستونية الحقيقية (> 8 مم وحتى 60 مم) — أما القفزات الضخمة فلا نلمسها
-        if (len > maxUnits && len < 600.0) {
-          final int parts = (len / (maxUnits * 0.56)).ceil().clamp(2, 10);
-          // إزاحة متدرجة عبر 4 صفوف لتفادي ظهور خط شق مستقيم في وسط الحرف (Tatami Stagger)
-          const offsets = [0.0, 0.18, -0.14, 0.08];
+        // تقسيم الغرز العريضة (> 7.0 مم) مع ضمان أن كل قطعة >= 1.6 مم بتدرج ناعم وواضح
+        if (len > maxUnits && len < 800.0) {
+          final int parts = (len / (maxUnits * 0.65)).ceil().clamp(2, 16);
+          const offsets = [0.0, 0.26, -0.22, 0.14];
           final double stagger = offsets[rowCounter & 3];
+          final double minFrac = (minUnits / len).clamp(0.10, 0.38);
+          double lastT = 0.0;
           for (int k = 1; k < parts; k++) {
             final double rawT = (k / parts) + (stagger / parts);
-            final double t = rawT.clamp(0.12, 0.88);
-            stX.add(prevX + dx * t);
-            stY.add(prevY + dy * t);
-            stMove.add(0);
-            stColor.add(col);
+            final double t = rawT.clamp(math.max(minFrac, lastT + minFrac), 1.0 - minFrac);
+            if (t > lastT + 0.04 && (1.0 - t) * len >= minUnits * 0.85) {
+              stX.add(prevX + dx * t);
+              stY.add(prevY + dy * t);
+              stMove.add(0);
+              stColor.add(col);
+              lastT = t;
+            }
           }
           rowCounter++;
         }
@@ -1047,6 +1065,10 @@ class TarikProFontEngine {
     required double extraSpacingMm,
     required double satinWidthOffsetMm,
     required bool autoSplit8Mm,
+    bool isTatami = false,
+    double tatamiAngleDeg = 0.0,
+    int tatamiPattern = 0,
+    double tatamiStitchLenMm = 4.0,
     required String pathMode,
     required double pathParam,
     required int underlayMode,
@@ -1062,7 +1084,7 @@ class TarikProFontEngine {
     final bool isRtl = fontRtl && (textHasAr || RegExp(r'[0-9\u0660-\u0669]').hasMatch(text));
 
     final double capH = ((font['capH'] as num?)?.toDouble() ?? 150.0).clamp(20.0, 2000.0);
-    final double targetCapUnits = (letterHeightCm * 100.0).clamp(40.0, 2200.0);
+    final double targetCapUnits = (letterHeightCm * 100.0).clamp(20.0, 30000.0);
     final double scale = targetCapUnits / capH;
 
     final double spaceW = ((font['spaceW'] as num?)?.toDouble() ?? (capH * 0.60)) * scale;
@@ -1230,21 +1252,36 @@ class TarikProFontEngine {
           }
 
           if (type == 's') {
-            _emitSatinColumn(
-              el: el,
-              ox: ox,
-              oy: oy,
-              scale: scale,
-              densityUnits: densityUnits,
-              satinOffsetUnits: satinOffsetUnits,
-              autoSplit8Mm: autoSplit8Mm,
-              underlayMode: underlayMode,
-              curNeedleX: curNeedleX,
-              curNeedleY: curNeedleY,
-              hasNeedle: hasNeedle,
-              nextAnchor: nextAnchor,
-              addPt: addPt,
-            );
+            if (isTatami) {
+              _emitSatinColumnAsTatami(
+                el: el,
+                ox: ox,
+                oy: oy,
+                scale: scale,
+                densityUnits: densityUnits,
+                satinOffsetUnits: satinOffsetUnits,
+                angleDeg: tatamiAngleDeg,
+                pattern: tatamiPattern,
+                stitchLenUnits: (tatamiStitchLenMm * 10.0).clamp(20.0, 75.0),
+                addPt: addPt,
+              );
+            } else {
+              _emitSatinColumn(
+                el: el,
+                ox: ox,
+                oy: oy,
+                scale: scale,
+                densityUnits: densityUnits,
+                satinOffsetUnits: satinOffsetUnits,
+                autoSplit8Mm: autoSplit8Mm,
+                underlayMode: underlayMode,
+                curNeedleX: curNeedleX,
+                curNeedleY: curNeedleY,
+                hasNeedle: hasNeedle,
+                nextAnchor: nextAnchor,
+                addPt: addPt,
+              );
+            }
           } else if (type == 'r') {
             _emitRunningPath(
               el: el,
@@ -1260,18 +1297,36 @@ class TarikProFontEngine {
               oy: oy,
               scale: scale,
               densityUnits: densityUnits,
+              angleDeg: isTatami ? tatamiAngleDeg : 0.0,
+              pattern: isTatami ? tatamiPattern : 0,
+              stitchLenUnits: (tatamiStitchLenMm * 10.0).clamp(20.0, 75.0),
               addPt: addPt,
             );
           } else if (type == 'd') {
-            _emitDigitizedRun(
-              el: el,
-              ox: ox,
-              oy: oy,
-              scale: scale,
-              satinOffsetUnits: satinOffsetUnits,
-              autoSplit8Mm: autoSplit8Mm,
-              addPt: addPt,
-            );
+            if (isTatami) {
+              _emitDigitizedRunAsTatami(
+                el: el,
+                ox: ox,
+                oy: oy,
+                scale: scale,
+                densityUnits: densityUnits,
+                satinOffsetUnits: satinOffsetUnits,
+                angleDeg: tatamiAngleDeg,
+                pattern: tatamiPattern,
+                stitchLenUnits: (tatamiStitchLenMm * 10.0).clamp(20.0, 75.0),
+                addPt: addPt,
+              );
+            } else {
+              _emitDigitizedRun(
+                el: el,
+                ox: ox,
+                oy: oy,
+                scale: scale,
+                satinOffsetUnits: satinOffsetUnits,
+                autoSplit8Mm: autoSplit8Mm,
+                addPt: addPt,
+              );
+            }
           }
         }
 
@@ -1281,8 +1336,8 @@ class TarikProFontEngine {
 
     if (stX.length < 2) return null;
 
-    final bool isWilcomNative = font['nativeStitch'] == true;
-    final String fontName = (font['nameEn'] ?? 'Wilcom Satin').toString();
+    final bool isNativeStitch = font['nativeStitch'] == true;
+    final String fontName = (font['nameEn'] ?? 'Pro Satin').toString();
     return VectorDesignData(
       stX: stX.finish(),
       stY: stY.finish(),
@@ -1307,7 +1362,9 @@ class TarikProFontEngine {
       minY: minY,
       maxY: maxY,
       hasBounds: hasBounds,
-      machineType: isWilcomNative ? '$fontName (Wilcom)' : '$fontName (Satin)',
+      machineType: isTatami
+          ? '$fontName (Tatami)'
+          : (isNativeStitch ? '$fontName (Pro)' : '$fontName (Satin)'),
     );
   }
 
@@ -1667,12 +1724,169 @@ class TarikProFontEngine {
     }
   }
 
-  static void _emitFillPolygon({
+  static double _tatamiPhase(int rowIdx, int pattern) {
+    switch (pattern) {
+      case 1: // مائل (Diagonal Twill 1/4)
+        const p1 = [0.0, 0.25, 0.50, 0.75];
+        return p1[rowIdx % p1.length];
+      case 2: // متعرج (Herringbone / Chevron)
+        const p2 = [0.0, 0.20, 0.40, 0.60, 0.40, 0.20];
+        return p2[rowIdx % p2.length];
+      case 3: // منسوج (Basket Weave 1/2)
+        return (rowIdx & 1) == 0 ? 0.0 : 0.50;
+      default: // قياسي (Standard Brick 1/3)
+        const p0 = [0.0, 0.33, 0.66];
+        return p0[rowIdx % p0.length];
+    }
+  }
+
+  /// محرك تعبئة التاتامي العالمي: يدعم أي زاوية (0°..180°)، الكثافة بالمليمتر، و4 نقشات تدرّج عالمية
+  static void _emitRotatedTatamiPolygon({
+    required List<double> xs,
+    required List<double> ys,
+    required double densityUnits,
+    required double angleDeg,
+    required int pattern,
+    required double stitchLenUnits,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final int n = xs.length;
+    if (n < 3) return;
+
+    final double rad = angleDeg * math.pi / 180.0;
+    final double ca = math.cos(rad);
+    final double sa = math.sin(rad);
+
+    // تدوير المضلع بزاوية (-angleDeg) ليصبح المسح أفقياً ثم إرجاع الغرز بزاوية (+angleDeg)
+    final rx = List<double>.filled(n, 0.0);
+    final ry = List<double>.filled(n, 0.0);
+    double minY = double.infinity, maxY = -double.infinity;
+    for (int i = 0; i < n; i++) {
+      final double vx = xs[i] * ca + ys[i] * sa;
+      final double vy = -xs[i] * sa + ys[i] * ca;
+      rx[i] = vx;
+      ry[i] = vy;
+      if (vy < minY) minY = vy;
+      if (vy > maxY) maxY = vy;
+    }
+    if (maxY - minY < 1.5) return;
+
+    final double stepY = densityUnits.clamp(2.5, 12.0);
+    final double stLen = stitchLenUnits.clamp(18.0, 75.0);
+    bool forward = true;
+    bool first = true;
+    int rowIdx = 0;
+    double prevX = 0.0, prevY = 0.0;
+
+    void emitRot(double vx, double vy, bool isMove) {
+      final double gx = vx * ca - vy * sa;
+      final double gy = vx * sa + vy * ca;
+      addPt(gx, gy, isMove);
+    }
+
+    for (double y = minY + stepY * 0.5; y <= maxY; y += stepY) {
+      final List<double> hits = [];
+      for (int i = 0; i < n; i++) {
+        final int j = (i + 1) % n;
+        final double y0 = ry[i], y1 = ry[j];
+        if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {
+          hits.add(rx[i] + (y - y0) * (rx[j] - rx[i]) / (y1 - y0));
+        }
+      }
+      if (hits.length < 2) {
+        rowIdx++;
+        continue;
+      }
+      hits.sort();
+      final double phase = _tatamiPhase(rowIdx, pattern) * stLen;
+
+      for (int h = 0; h + 1 < hits.length; h += 2) {
+        final double leftX = hits[h];
+        final double rightX = hits[h + 1];
+        if (rightX - leftX < 1.5) continue;
+
+        final double xStart = forward ? leftX : rightX;
+        final double xEnd = forward ? rightX : leftX;
+        final bool jumpHere = first ||
+            math.sqrt((xStart - prevX) * (xStart - prevX) + (y - prevY) * (y - prevY)) > 48.0;
+
+        emitRot(xStart, y, jumpHere);
+        first = false;
+
+        // توليد نقاط التدرّج (Tatami Pattern Penetrations) وفق النقشة المختارة
+        if (forward) {
+          double gx = ((leftX - phase) / stLen).ceil() * stLen + phase;
+          while (gx < rightX - 4.0) {
+            if (gx > leftX + 4.0) emitRot(gx, y, false);
+            gx += stLen;
+          }
+        } else {
+          double gx = ((rightX - phase) / stLen).floor() * stLen + phase;
+          while (gx > leftX + 4.0) {
+            if (gx < rightX - 4.0) emitRot(gx, y, false);
+            gx -= stLen;
+          }
+        }
+
+        emitRot(xEnd, y, false);
+        prevX = xEnd;
+        prevY = y;
+      }
+      forward = !forward;
+      rowIdx++;
+    }
+  }
+
+  /// تحويل عمود فستون (A2 / E1..E4) مباشرةً إلى تاتامي حقيقي بالزاوية والكثافة والنقشة المختارة
+  static void _emitSatinColumnAsTatami({
     required Map<String, dynamic> el,
     required double ox,
     required double oy,
     required double scale,
     required double densityUnits,
+    required double satinOffsetUnits,
+    required double angleDeg,
+    required int pattern,
+    required double stitchLenUnits,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final List<dynamic>? rawR1 = el['r1'] as List<dynamic>?;
+    final List<dynamic>? rawR2 = el['r2'] as List<dynamic>?;
+    if (rawR1 == null || rawR2 == null || rawR1.length < 4 || rawR2.length < 4) return;
+    final int n1 = rawR1.length ~/ 2;
+    final int n2 = rawR2.length ~/ 2;
+    final List<double> px = [];
+    final List<double> py = [];
+    for (int i = 0; i < n1; i++) {
+      px.add(ox + (rawR1[i * 2] as num).toDouble() * scale);
+      py.add(oy + (rawR1[i * 2 + 1] as num).toDouble() * scale);
+    }
+    for (int i = n2 - 1; i >= 0; i--) {
+      px.add(ox + (rawR2[i * 2] as num).toDouble() * scale);
+      py.add(oy + (rawR2[i * 2 + 1] as num).toDouble() * scale);
+    }
+    _emitRotatedTatamiPolygon(
+      xs: px,
+      ys: py,
+      densityUnits: densityUnits,
+      angleDeg: angleDeg,
+      pattern: pattern,
+      stitchLenUnits: stitchLenUnits,
+      addPt: addPt,
+    );
+  }
+
+  /// تحويل الفونطات الرقمية الأساسية (A1 / A3 / A4) من فستون إلى تاتامي حقيقي باستخلاص حدود الأعمدة
+  static void _emitDigitizedRunAsTatami({
+    required Map<String, dynamic> el,
+    required double ox,
+    required double oy,
+    required double scale,
+    required double densityUnits,
+    required double satinOffsetUnits,
+    required double angleDeg,
+    required int pattern,
+    required double stitchLenUnits,
     required void Function(double, double, bool) addPt,
   }) {
     final List<dynamic>? rawP = el['p'] as List<dynamic>?;
@@ -1680,70 +1894,493 @@ class TarikProFontEngine {
     final int n = rawP.length ~/ 2;
     final xs = List<double>.filled(n, 0.0);
     final ys = List<double>.filled(n, 0.0);
-    double minY = double.infinity, maxY = -double.infinity;
     for (int i = 0; i < n; i++) {
       xs[i] = ox + (rawP[i * 2] as num).toDouble() * scale;
       ys[i] = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
-      if (ys[i] < minY) minY = ys[i];
-      if (ys[i] > maxY) maxY = ys[i];
     }
-    if (maxY - minY < 2.0) return;
 
-    bool forward = true;
-    bool first = true;
-    const double stitchStep = 32.0;
+    // تقسيم المسار إلى مقاطع فستون (حيث تنعكس الزاوية للخلف cosT < -0.25) وتحويل كل مقطع لمضلع مغلق يُعبّأ بالتاتامي
+    final List<double> railA_x = [], railA_y = [];
+    final List<double> railB_x = [], railB_y = [];
+    bool sideA = true;
+    int satinCount = 0;
 
-    for (double y = minY + densityUnits * 0.5; y <= maxY; y += densityUnits) {
-      final List<double> hits = [];
-      for (int i = 0; i < n; i++) {
-        final int j = (i + 1) % n;
-        final double y0 = ys[i], y1 = ys[j];
-        if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {
-          hits.add(xs[i] + (y - y0) * (xs[j] - xs[i]) / (y1 - y0));
+    void flushSatinBlock() {
+      if (railA_x.length >= 2 && railB_x.length >= 2) {
+        final px = <double>[...railA_x, ...railB_x.reversed];
+        final py = <double>[...railA_y, ...railB_y.reversed];
+        _emitRotatedTatamiPolygon(
+          xs: px,
+          ys: py,
+          densityUnits: densityUnits,
+          angleDeg: angleDeg,
+          pattern: pattern,
+          stitchLenUnits: stitchLenUnits,
+          addPt: addPt,
+        );
+        satinCount++;
+      }
+      railA_x.clear();
+      railA_y.clear();
+      railB_x.clear();
+      railB_y.clear();
+      sideA = true;
+    }
+
+    for (int i = 1; i < n - 1; i++) {
+      final double v1x = xs[i] - xs[i - 1], v1y = ys[i] - ys[i - 1];
+      final double v2x = xs[i + 1] - xs[i], v2y = ys[i + 1] - ys[i];
+      final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+      final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+      final bool isZigzag = l1 > 5.5 && l2 > 5.5 && ((v1x * v2x + v1y * v2y) / (l1 * l2)) < -0.20;
+
+      if (isZigzag) {
+        if (railA_x.isEmpty && railB_x.isEmpty) {
+          railA_x.add(xs[i - 1]);
+          railA_y.add(ys[i - 1]);
+          sideA = false;
+        }
+        if (sideA) {
+          railA_x.add(xs[i]);
+          railA_y.add(ys[i]);
+        } else {
+          railB_x.add(xs[i]);
+          railB_y.add(ys[i]);
+        }
+        sideA = !sideA;
+      } else {
+        if (railA_x.isNotEmpty || railB_x.isNotEmpty) {
+          if (sideA) {
+            railA_x.add(xs[i]);
+            railA_y.add(ys[i]);
+          } else {
+            railB_x.add(xs[i]);
+            railB_y.add(ys[i]);
+          }
+          flushSatinBlock();
         }
       }
-      if (hits.length < 2) continue;
-      hits.sort();
-      for (int h = 0; h + 1 < hits.length; h += 2) {
-        final double xA = forward ? hits[h] : hits[h + 1];
-        final double xB = forward ? hits[h + 1] : hits[h];
-        addPt(xA, y, first);
-        first = false;
-        final double span = (xB - xA).abs();
-        if (span > stitchStep) {
-          final int steps = (span / stitchStep).floor();
-          for (int s = 1; s < steps; s++) {
-            addPt(xA + (xB - xA) * (s / steps), y, false);
+    }
+    if (railA_x.isNotEmpty || railB_x.isNotEmpty) {
+      if (sideA) {
+        railA_x.add(xs[n - 1]);
+        railA_y.add(ys[n - 1]);
+      } else {
+        railB_x.add(xs[n - 1]);
+        railB_y.add(ys[n - 1]);
+      }
+      flushSatinBlock();
+    }
+
+    // في حال كان العنصر خطاً مفرداً غير فستوني (مثل نقطة أو درزة رفيعة)، نرسمه كدرزة نظيفة
+    if (satinCount == 0) {
+      for (int i = 0; i < n; i++) {
+        addPt(xs[i], ys[i], i == 0);
+      }
+    }
+  }
+
+  static void _emitFillPolygon({
+    required Map<String, dynamic> el,
+    required double ox,
+    required double oy,
+    required double scale,
+    required double densityUnits,
+    double angleDeg = 0.0,
+    int pattern = 0,
+    double stitchLenUnits = 40.0,
+    required void Function(double, double, bool) addPt,
+  }) {
+    final List<dynamic>? rawP = el['p'] as List<dynamic>?;
+    if (rawP == null || rawP.length < 6) return;
+    final int n = rawP.length ~/ 2;
+    final xs = List<double>.filled(n, 0.0);
+    final ys = List<double>.filled(n, 0.0);
+    for (int i = 0; i < n; i++) {
+      xs[i] = ox + (rawP[i * 2] as num).toDouble() * scale;
+      ys[i] = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
+    }
+    _emitRotatedTatamiPolygon(
+      xs: xs,
+      ys: ys,
+      densityUnits: densityUnits,
+      angleDeg: angleDeg,
+      pattern: pattern,
+      stitchLenUnits: stitchLenUnits,
+      addPt: addPt,
+    );
+  }
+}
+
+/// معايرة ملفات داهاو (.DHA) وفق القياسات الفعلية للماكينة:
+/// - فصل الخرز (`seqCode == 4` الناتج عن pulse=6) عن الترتر ووضعه في مصفوفة الخرز بمقاسه الحقيقي 3.0 مم
+class TarikProDahaoCalibrator {
+  static VectorDesignData calibrate(VectorDesignData vec, String filePath) {
+    final lower = filePath.toLowerCase();
+    if (!lower.endsWith('.dha') || vec.seqX.isEmpty) return vec;
+
+    bool hasCode4 = false;
+    for (int i = 0; i < vec.seqCode.length; i++) {
+      if (vec.seqCode[i] == 4) {
+        hasCode4 = true;
+        break;
+      }
+    }
+    if (!hasCode4) return vec;
+
+    final newSeqX = _ProFloat32Buf(vec.seqX.length);
+    final newSeqY = _ProFloat32Buf(vec.seqY.length);
+    final newSeqCode = _ProUint8Buf(vec.seqCode.length);
+
+    final newBeadX = _ProFloat32Buf(vec.beadX.length + 128);
+    final newBeadY = _ProFloat32Buf(vec.beadY.length + 128);
+    final newBeadCode = _ProUint8Buf(vec.beadCode.length + 128);
+
+    for (int i = 0; i < vec.beadX.length; i++) {
+      newBeadX.add(vec.beadX[i]);
+      newBeadY.add(vec.beadY[i]);
+      newBeadCode.add(vec.beadCode[i]);
+    }
+
+    for (int i = 0; i < vec.seqX.length; i++) {
+      final int sc = vec.seqCode[i];
+      if (sc == 4) {
+        newBeadX.add(vec.seqX[i]);
+        newBeadY.add(vec.seqY[i]);
+        newBeadCode.add(1); // خرز لؤلؤي 3.0 مم
+      } else {
+        newSeqX.add(vec.seqX[i]);
+        newSeqY.add(vec.seqY[i]);
+        newSeqCode.add(sc);
+      }
+    }
+
+    return VectorDesignData(
+      stX: vec.stX,
+      stY: vec.stY,
+      stMove: vec.stMove,
+      stColor: vec.stColor,
+      stDev: vec.stDev,
+      seqX: newSeqX.finish(),
+      seqY: newSeqY.finish(),
+      seqCode: newSeqCode.finish(),
+      beadX: newBeadX.finish(),
+      beadY: newBeadY.finish(),
+      beadCode: newBeadCode.finish(),
+      paletteArgb: vec.paletteArgb,
+      stitches: vec.stitches,
+      colorCount: vec.colorCount,
+      stopsCount: vec.stopsCount,
+      jumpsCount: vec.jumpsCount,
+      sequinsCount: newSeqX.length,
+      beadsCount: newBeadX.length,
+      trimsCount: vec.trimsCount,
+      minX: vec.minX,
+      maxX: vec.maxX,
+      minY: vec.minY,
+      maxY: vec.maxY,
+      hasBounds: vec.hasBounds,
+      machineType: vec.machineType,
+    );
+  }
+}
+
+/// محسّن معاينات ملفات `.EMB` بالمعادلة المعتمدة (Formula A — Natural HD):
+/// - قص تلقائي للهوامش الرمادية المدمجة (>50% من مساحة الأيقونة)
+/// - تبييض الخلفية الرمادية بنعومة إلى أبيض نقي
+/// - تعزيز الحدة والتباين الطبيعي (`Contrast 1.16`، تشبع `1.14`)
+class TarikProEmbImageEnhancer {
+  static Future<Uint8List?> enhancePreview(Uint8List rawBytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(rawBytes);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      final int w = img.width;
+      final int h = img.height;
+      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+      img.dispose();
+      codec.dispose();
+      if (bd == null || w < 16 || h < 16) return rawBytes;
+
+      final Uint8List src = bd.buffer.asUint8List();
+
+      // 1) اكتشاف لون الخلفية من الزوايا الأربعة (الرمادي 221 أو الأبيض 255)
+      final List<int> cornerIdx = [
+        0,
+        (w - 1) * 4,
+        (h - 1) * w * 4,
+        ((h - 1) * w + (w - 1)) * 4,
+      ];
+      int bgR = 0, bgG = 0, bgB = 0;
+      for (final ci in cornerIdx) {
+        bgR += src[ci];
+        bgG += src[ci + 1];
+        bgB += src[ci + 2];
+      }
+      bgR ~/= 4;
+      bgG ~/= 4;
+      bgB ~/= 4;
+
+      // 2) إيجاد حدود التصميم الحقيقية (قص الهوامش الفارغة)
+      int minX = w, maxX = 0, minY = h, maxY = 0;
+      for (int y = 0; y < h; y++) {
+        int rowHits = 0;
+        int rowMinX = w, rowMaxX = 0;
+        final int rowOff = y * w * 4;
+        for (int x = 0; x < w; x++) {
+          final int o = rowOff + x * 4;
+          final int dr = (src[o] - bgR).abs();
+          final int dg = (src[o + 1] - bgG).abs();
+          final int db = (src[o + 2] - bgB).abs();
+          if (dr > 18 || dg > 18 || db > 18) {
+            rowHits++;
+            if (x < rowMinX) rowMinX = x;
+            if (x > rowMaxX) rowMaxX = x;
           }
         }
-        addPt(xB, y, false);
+        if (rowHits >= 2) {
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (rowMinX < minX) minX = rowMinX;
+          if (rowMaxX > maxX) maxX = rowMaxX;
+        }
       }
-      forward = !forward;
+
+      if (maxX <= minX + 4 || maxY <= minY + 4) return rawBytes;
+      minX = math.max(0, minX - 3);
+      minY = math.max(0, minY - 3);
+      maxX = math.min(w - 1, maxX + 3);
+      maxY = math.min(h - 1, maxY + 3);
+
+      final int cw = maxX - minX + 1;
+      final int ch = maxY - minY + 1;
+      final clean = Uint8List(cw * ch * 4);
+
+      // 3) تنظيف الخلفية الرمادية إلى أبيض نقي + تطبيق Formula A (تباين 1.16 + تشبع 1.14)
+      for (int y = 0; y < ch; y++) {
+        final int srcRow = (minY + y) * w * 4;
+        final int dstRow = y * cw * 4;
+        for (int x = 0; x < cw; x++) {
+          final int so = srcRow + (minX + x) * 4;
+          final int doff = dstRow + x * 4;
+          double r = src[so].toDouble();
+          double g = src[so + 1].toDouble();
+          double b = src[so + 2].toDouble();
+
+          final double d = math.max((r - bgR).abs(), math.max((g - bgG).abs(), (b - bgB).abs()));
+          final double alpha = ((d - 8.0) / 14.0).clamp(0.0, 1.0);
+          r = r * alpha + 255.0 * (1.0 - alpha);
+          g = g * alpha + 255.0 * (1.0 - alpha);
+          b = b * alpha + 255.0 * (1.0 - alpha);
+
+          // Contrast 1.16
+          r = (r - 128.0) * 1.16 + 128.0;
+          g = (g - 128.0) * 1.16 + 128.0;
+          b = (b - 128.0) * 1.16 + 128.0;
+
+          // Saturation 1.14
+          final double luma = 0.299 * r + 0.587 * g + 0.114 * b;
+          r = luma + (r - luma) * 1.14;
+          g = luma + (g - luma) * 1.14;
+          b = luma + (b - luma) * 1.14;
+
+          clean[doff] = r.clamp(0, 255).round();
+          clean[doff + 1] = g.clamp(0, 255).round();
+          clean[doff + 2] = b.clamp(0, 255).round();
+          clean[doff + 3] = 255;
+        }
+      }
+
+      // 4) تعزيز الحدة الطبيعي (3×3 Unsharp Mask خفيف بدون تشويش)
+      final sharp = Uint8List.fromList(clean);
+      for (int y = 1; y < ch - 1; y++) {
+        for (int x = 1; x < cw - 1; x++) {
+          final int o = (y * cw + x) * 4;
+          for (int c = 0; c < 3; c++) {
+            final int center = clean[o + c];
+            final int avg = (clean[o - 4 + c] +
+                    clean[o + 4 + c] +
+                    clean[o - cw * 4 + c] +
+                    clean[o + cw * 4 + c]) >>
+                2;
+            final int diff = center - avg;
+            if (diff.abs() > 3) {
+              sharp[o + c] = (center + (diff * 0.48)).clamp(0, 255).round();
+            }
+          }
+        }
+      }
+
+      final completer = Completer<ui.Image>();
+      ui.decodeImageFromPixels(sharp, cw, ch, ui.PixelFormat.rgba8888, completer.complete);
+      final outImg = await completer.future;
+      final pngBd = await outImg.toByteData(format: ui.ImageByteFormat.png);
+      outImg.dispose();
+      return pngBd?.buffer.asUint8List() ?? rawBytes;
+    } catch (_) {
+      return rawBytes;
     }
   }
 }
 
-/// محرك العرض ثلاثي الأبعاد الحقيقي (Wilcom TrueView 3D Pro):
-/// - يُلغي القفزات والخيوط الطويلة (> 12 مم) نهائياً في وضع 3D حتى لا تظهر أي خيوط عابرة مشوِّهة
-/// - يحسب سمك الخيط بالقياس الفيزيائي الحقيقي (~0.38 مم متناسباً مع مقاس التصميم) بدلاً من السمك الضخم الثابت
-/// - يرسم الخيط بطبقات حريرية دقيقة + ترتر وخرز حقيقيين
+/// مولّد وكاش الخامات الفوتوغرافية الحقيقية (PBR Sprites) للخرز والترتر:
+/// - ذهبي معدني، فضي معدني، لؤلؤي صدفي، أحمر ياقوتي، وخرز لؤلؤي/ذهبي/فضي/كريستالي
+/// - تُبنى مرة واحدة في الذاكرة بدقة 64×64 وتُطبع بسرعة فائقة عبر GPU
+class TarikProPbrSprites {
+  static ui.Image? seqGold;
+  static ui.Image? seqSilver;
+  static ui.Image? seqPearl;
+  static ui.Image? seqRuby;
+  static ui.Image? beadPearl;
+  static ui.Image? beadGold;
+  static ui.Image? beadSilver;
+  static ui.Image? beadCrystal;
+  static bool _ready = false;
+
+  static Future<void> ensureLoaded() async {
+    if (_ready) return;
+    seqGold = await _buildSequin(const [226, 174, 42], const [255, 248, 200], const [116, 76, 14]);
+    seqSilver = await _buildSequin(const [196, 204, 214], const [255, 255, 255], const [82, 90, 102]);
+    seqPearl = await _buildSequin(const [238, 232, 222], const [255, 255, 252], const [145, 136, 128], iridescent: true);
+    seqRuby = await _buildSequin(const [212, 34, 62], const [255, 205, 215], const [90, 10, 24]);
+
+    beadPearl = await _buildBead(const [245, 240, 230], const [255, 255, 255], const [145, 136, 126], isPearl: true);
+    beadGold = await _buildBead(const [228, 176, 40], const [255, 248, 195], const [108, 70, 12]);
+    beadSilver = await _buildBead(const [196, 204, 214], const [255, 255, 255], const [78, 86, 98]);
+    beadCrystal = await _buildBead(const [22, 168, 190], const [220, 252, 255], const [8, 66, 78]);
+    _ready = true;
+  }
+
+  static Future<ui.Image> _buildSequin(
+    List<int> baseRgb,
+    List<int> hiRgb,
+    List<int> shRgb, {
+    bool iridescent = false,
+    int size = 64,
+  }) async {
+    final pixels = Uint8List(size * size * 4);
+    const double l1x = -0.58, l1y = -0.62, l1z = 0.53;
+    const double h1x = -0.351, h1y = -0.375, h1z = 0.858;
+    for (int py = 0; py < size; py++) {
+      final double y = -1.2 + (2.4 * py / (size - 1));
+      for (int px = 0; px < size; px++) {
+        final double x = -1.2 + (2.4 * px / (size - 1));
+        final double r = math.sqrt(x * x + y * y);
+        final double th = math.atan2(y, x);
+        final double rSh = math.sqrt((x - 0.07) * (x - 0.07) + (y - 0.09) * (y - 0.09));
+        final double shA = ((1.0 - rSh) / 0.22).clamp(0.0, 1.0) * 0.28;
+        final double discA = (((0.96 - r) / 0.05).clamp(0.0, 1.0)) * (((r - 0.28) / 0.05).clamp(0.0, 1.0));
+
+        double cR = 0, cG = 0, cB = 0;
+        if (discA > 0.001) {
+          final double eOut = math.exp(-math.pow((r - 0.91) / 0.06, 2));
+          final double eIn = math.exp(-math.pow((r - 0.31) / 0.05, 2));
+          final double slope = 0.25 + 0.50 * eOut - 0.40 * eIn;
+          final double nx = -slope * math.cos(th);
+          final double ny = -slope * math.sin(th);
+          final double nz = math.sqrt((1.0 - nx * nx - ny * ny).clamp(0.05, 1.0));
+          final double ndotl = (nx * l1x + ny * l1y + nz * l1z).clamp(0.0, 1.0);
+          final double ndoth = (nx * h1x + ny * h1y + nz * h1z).clamp(0.0, 1.0);
+          final double aniso = math.pow(math.cos(2.0 * (th + 0.65)) * 0.5 + 0.5, 2.0).toDouble();
+          final double spec = math.pow(ndoth, 10.0).toDouble();
+
+          cR = shRgb[0] * (0.42 + 0.58 * (1.0 - ndotl)) + baseRgb[0] * (0.58 * ndotl + 0.48 * aniso) + hiRgb[0] * 0.75 * spec;
+          cG = shRgb[1] * (0.42 + 0.58 * (1.0 - ndotl)) + baseRgb[1] * (0.58 * ndotl + 0.48 * aniso) + hiRgb[1] * 0.75 * spec;
+          cB = shRgb[2] * (0.42 + 0.58 * (1.0 - ndotl)) + baseRgb[2] * (0.58 * ndotl + 0.48 * aniso) + hiRgb[2] * 0.75 * spec;
+          if (iridescent) {
+            cR += 16.0 * math.sin(th * 2.0 + r * 4.0);
+            cG += 12.0 * math.sin(th * 2.0 + r * 4.0 + 2.1);
+            cB += 18.0 * math.sin(th * 2.0 + r * 4.0 + 4.2);
+          }
+        }
+        final double ad = discA * 0.96;
+        final double oa = ad + shA * (1.0 - ad);
+        final int o = (py * size + px) * 4;
+        if (oa > 1e-4) {
+          pixels[o] = ((cR * ad) / oa).clamp(0, 255).round();
+          pixels[o + 1] = ((cG * ad) / oa).clamp(0, 255).round();
+          pixels[o + 2] = ((cB * ad) / oa).clamp(0, 255).round();
+          pixels[o + 3] = (oa * 255.0).clamp(0, 255).round();
+        }
+      }
+    }
+    final c = Completer<ui.Image>();
+    ui.decodeImageFromPixels(pixels, size, size, ui.PixelFormat.rgba8888, c.complete);
+    return c.future;
+  }
+
+  static Future<ui.Image> _buildBead(
+    List<int> baseRgb,
+    List<int> hiRgb,
+    List<int> shRgb, {
+    bool isPearl = false,
+    int size = 64,
+  }) async {
+    final pixels = Uint8List(size * size * 4);
+    const double l1x = -0.48, l1y = -0.54, l1z = 0.69;
+    const double h1x = -0.261, h1y = -0.294, h1z = 0.919;
+    for (int py = 0; py < size; py++) {
+      final double y = -1.2 + (2.4 * py / (size - 1));
+      for (int px = 0; px < size; px++) {
+        final double x = -1.2 + (2.4 * px / (size - 1));
+        final double r = math.sqrt(x * x + y * y);
+        final double rSh = math.sqrt((x - 0.09) * (x - 0.09) + (y - 0.11) * (y - 0.11));
+        final double shA = ((0.98 - rSh) / 0.24).clamp(0.0, 1.0) * 0.34;
+        final double sa = ((0.94 - r) / 0.05).clamp(0.0, 1.0);
+        double cR = 0, cG = 0, cB = 0;
+        if (sa > 0.001) {
+          final double rn = (r / 0.94).clamp(0.0, 1.0);
+          final double nx = x / 0.94, ny = y / 0.94;
+          final double nz = math.sqrt((1.0 - rn * rn).clamp(0.0, 1.0));
+          final double ndotl = (nx * l1x + ny * l1y + nz * l1z).clamp(0.0, 1.0);
+          final double ndoth = (nx * h1x + ny * h1y + nz * h1z).clamp(0.0, 1.0);
+          final double fres = math.pow(1.0 - nz, 2.5).toDouble();
+          final double spec = math.pow(ndoth, isPearl ? 24.0 : 30.0).toDouble();
+          final double diff = isPearl ? math.pow(ndotl, 0.78).toDouble() : ndotl;
+          cR = shRgb[0] * (0.28 + 0.54 * (1.0 - ndotl)) + baseRgb[0] * (0.82 * diff) + hiRgb[0] * (0.98 * spec + 0.30 * fres);
+          cG = shRgb[1] * (0.28 + 0.54 * (1.0 - ndotl)) + baseRgb[1] * (0.82 * diff) + hiRgb[1] * (0.98 * spec + 0.30 * fres);
+          cB = shRgb[2] * (0.28 + 0.54 * (1.0 - ndotl)) + baseRgb[2] * (0.82 * diff) + hiRgb[2] * (0.98 * spec + 0.30 * fres);
+        }
+        final double oa = sa + shA * (1.0 - sa);
+        final int o = (py * size + px) * 4;
+        if (oa > 1e-4) {
+          pixels[o] = ((cR * sa) / oa).clamp(0, 255).round();
+          pixels[o + 1] = ((cG * sa) / oa).clamp(0, 255).round();
+          pixels[o + 2] = ((cB * sa) / oa).clamp(0, 255).round();
+          pixels[o + 3] = (oa * 255.0).clamp(0, 255).round();
+        }
+      }
+    }
+    final c = Completer<ui.Image>();
+    ui.decodeImageFromPixels(pixels, size, size, ui.PixelFormat.rgba8888, c.complete);
+    return c.future;
+  }
+}
+
+/// محرك العرض ثلاثي الأبعاد الحقيقي (Cylindrical Silk 3D + خامات الخرز والترتر الفوتوغرافية PBR):
+/// - إضاءة اتجاهية حريرية موزعة على 8 زوايا (سريع جداً حتى لـ 100 ألف غرزة) بدون حواف سوداء قاسية
+/// - يُلغي القفزات والخيوط الطويلة (> 12 مم) في وضع 3D
+/// - يرسم الخرز والترتر بخامات PBR الحقيقية وبالمقاسات الفيزيائية المعايرة (3.0 مم و 5.0 مم)
 class TarikPro3DRenderer {
   static Future<Uint8List?> renderHighResPreview(
     String filePath, {
     double maxCanvas = 2200.0,
     bool is3D = false,
     bool transparentBg = true,
+    int decorTheme = 0, // 0=ذهبي ولؤلؤي، 1=فضي ولؤلؤي، 2=لؤلؤي، 3=ملوّن
   }) async {
     try {
-      final VectorDesignData? vec = filePath.toLowerCase().endsWith('.tbf')
+      VectorDesignData? vec = filePath.toLowerCase().endsWith('.tbf')
           ? await TarikProTbfParser.loadVector(filePath)
           : await VectorDesignLoader.load(filePath);
       if (vec == null || vec.stX.length < 2) return null;
+      vec = TarikProDahaoCalibrator.calibrate(vec, filePath);
       return await renderVectorToPng(
         vec,
         maxCanvas: maxCanvas,
         is3D: is3D,
         transparentBg: transparentBg,
+        decorTheme: decorTheme,
       );
     } catch (_) {
       return null;
@@ -1755,11 +2392,16 @@ class TarikPro3DRenderer {
     double maxCanvas = 2200.0,
     bool is3D = false,
     bool transparentBg = true,
+    int decorTheme = 0,
   }) async {
     if (!data.hasBounds || data.stX.length < 2) return null;
     final double rawW = data.maxX - data.minX;
     final double rawH = data.maxY - data.minY;
     if (!rawW.isFinite || !rawH.isFinite || rawW <= 0 || rawH <= 0) return null;
+
+    if (data.seqX.isNotEmpty || data.beadX.isNotEmpty) {
+      await TarikProPbrSprites.ensureLoaded();
+    }
 
     final double pad = maxCanvas >= 1800.0 ? 36.0 : 24.0;
     final double scale = (maxCanvas - pad * 2) / math.max(rawW, rawH);
@@ -1779,11 +2421,9 @@ class TarikPro3DRenderer {
     final double minX = data.minX;
     final double minY = data.minY;
 
-    // السمك الفيزيائي الحقيقي للخيط (~0.38 مم = 3.8 وحدة من 0.1 مم) متناسب مع مقياس التصميم الفعلي!
-    final double physThreadW = (scale * 3.8).clamp(0.95, 4.2);
-    final double flatStrokeW = (scale * 1.4).clamp(0.45, 0.85);
+    final double physThreadW = (scale * 3.6).clamp(1.0, 4.4);
+    final double flatStrokeW = (scale * 1.45).clamp(0.55, 1.0);
 
-    // الحد الأقصى لطول الغرزة الحقيقية قبل اعتبارها قفزة وإلغائها في العرض ثلاثي الأبعاد (12.0 مم = 120 وحدة)
     const double maxRealStitchUnits3D = 120.0;
     const double maxRealStitchUnits2D = 145.0;
     final double maxSegSq = is3D
@@ -1796,39 +2436,45 @@ class TarikPro3DRenderer {
     final Uint8List stColor = data.stColor;
     final int nSt = stX.length;
 
-    Path currentPath = Path();
-    int activeColorIdx = -1;
-    bool hasMove = false;
-    double prevRawX = 0.0, prevRawY = 0.0;
+    if (is3D) {
+      // 8 حاويات زاوية (0..180°) لإضاءة الحرير الاتجاهية الحقيقية (Anisotropic Silk Sheen) بسرعة GPU عالية
+      const double lx = -0.7071, ly = -0.7071;
+      List<Path> angleBuckets = List.generate(8, (_) => Path());
+      List<bool> bucketUsed = List.filled(8, false);
+      Path fullColorPath = Path();
+      bool hasAnySeg = false;
+      int activeColorIdx = -1;
+      double prevRawX = 0.0, prevRawY = 0.0;
+      double prevSx = 0.0, prevSy = 0.0;
+      bool hasPrev = false;
 
-    void flushPath() {
-      if (!hasMove || activeColorIdx < 0) return;
-      final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
-      if (is3D) {
+      void flush3DColor() {
+        if (!hasAnySeg || activeColorIdx < 0) return;
+        final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
         final double tw = physThreadW;
-        final double shOff = (tw * 0.32).clamp(0.28, 1.3);
-        final double hiOff = (tw * 0.18).clamp(0.18, 0.75);
+        final double shOff = (tw * 0.28).clamp(0.25, 1.15);
+        final double hiOff = (tw * 0.16).clamp(0.16, 0.65);
 
-        // 1) ظل ناعم محكم تحت الخيط بدون تضخيم مشوّه
+        // 1) ظل ناعم تحت الغرز
         canvas.save();
         canvas.translate(shOff, shOff);
         canvas.drawPath(
-          currentPath,
+          fullColorPath,
           Paint()
-            ..color = Colors.black.withOpacity(0.26)
+            ..color = Colors.black.withOpacity(0.18)
             ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 1.08
+            ..strokeWidth = tw * 1.06
             ..strokeCap = StrokeCap.round
             ..strokeJoin = StrokeJoin.round
             ..isAntiAlias = true,
         );
         canvas.restore();
 
-        // 2) حافة داكنة دقيقة للعمق (Wilcom TrueView Edge)
+        // 2) حافة ناعمة للعمق (26% أغمق فقط بدون تحديد أسود ثقيل)
         canvas.drawPath(
-          currentPath,
+          fullColorPath,
           Paint()
-            ..color = Color.lerp(baseColor, Colors.black, 0.28) ?? baseColor
+            ..color = Color.lerp(baseColor, Colors.black, 0.26) ?? baseColor
             ..style = PaintingStyle.stroke
             ..strokeWidth = tw
             ..strokeCap = StrokeCap.round
@@ -1836,33 +2482,100 @@ class TarikPro3DRenderer {
             ..isAntiAlias = true,
         );
 
-        // 3) جسم الخيط اللوني
-        canvas.drawPath(
-          currentPath,
-          Paint()
-            ..color = baseColor
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 0.76
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
+        // 3) جسم الخيط ولمعة الحرير حسب زاوية كل غرزة
+        for (int b = 0; b < 8; b++) {
+          if (!bucketUsed[b]) continue;
+          final double midAng = (b + 0.5) * (math.pi / 8.0);
+          final double nx = -math.sin(midAng);
+          final double ny = math.cos(midAng);
+          final double align = (nx * lx + ny * ly).abs(); // 0..1
+          final Color bodyCol = Color.lerp(
+                Color.lerp(baseColor, Colors.black, 0.08) ?? baseColor,
+                Color.lerp(baseColor, Colors.white, 0.16) ?? baseColor,
+                align,
+              ) ??
+              baseColor;
+          final Color hiCol = (Color.lerp(baseColor, Colors.white, 0.35 + 0.48 * align) ?? Colors.white)
+              .withOpacity(0.45 + 0.40 * align);
 
-        // 4) لمعة الحرير العلوية الدقيقة
-        canvas.save();
-        canvas.translate(-hiOff, -hiOff);
-        canvas.drawPath(
-          currentPath,
-          Paint()
-            ..color = (Color.lerp(baseColor, Colors.white, 0.58) ?? Colors.white).withOpacity(0.75)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = (tw * 0.24).clamp(0.25, 1.1)
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.restore();
-      } else {
+          canvas.drawPath(
+            angleBuckets[b],
+            Paint()
+              ..color = bodyCol
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = tw * 0.78
+              ..strokeCap = StrokeCap.round
+              ..strokeJoin = StrokeJoin.round
+              ..isAntiAlias = true,
+          );
+
+          canvas.save();
+          canvas.translate(-hiOff, -hiOff);
+          canvas.drawPath(
+            angleBuckets[b],
+            Paint()
+              ..color = hiCol
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = (tw * 0.26).clamp(0.24, 1.05)
+              ..strokeCap = StrokeCap.round
+              ..strokeJoin = StrokeJoin.round
+              ..isAntiAlias = true,
+          );
+          canvas.restore();
+        }
+
+        angleBuckets = List.generate(8, (_) => Path());
+        bucketUsed = List.filled(8, false);
+        fullColorPath = Path();
+        hasAnySeg = false;
+      }
+
+      for (int i = 0; i < nSt; i++) {
+        final int cIdx = stColor[i];
+        if (cIdx != activeColorIdx) {
+          flush3DColor();
+          activeColorIdx = cIdx;
+          hasPrev = false;
+        }
+        final double rx = stX[i];
+        final double ry = stY[i];
+        final double sx = (rx - minX) * scale + pad;
+        final double sy = (ry - minY) * scale + pad;
+
+        bool isJump = stMove[i] != 0 || !hasPrev;
+        if (!isJump) {
+          final double dx = rx - prevRawX;
+          final double dy = ry - prevRawY;
+          if (dx * dx + dy * dy > maxSegSq) isJump = true;
+        }
+
+        if (!isJump) {
+          fullColorPath.moveTo(prevSx, prevSy);
+          fullColorPath.lineTo(sx, sy);
+          double ang = math.atan2(sy - prevSy, sx - prevSx);
+          if (ang < 0) ang += math.pi;
+          final int b = ((ang / math.pi) * 8.0).floor().clamp(0, 7);
+          angleBuckets[b].moveTo(prevSx, prevSy);
+          angleBuckets[b].lineTo(sx, sy);
+          bucketUsed[b] = true;
+          hasAnySeg = true;
+        }
+        prevRawX = rx;
+        prevRawY = ry;
+        prevSx = sx;
+        prevSy = sy;
+        hasPrev = true;
+      }
+      flush3DColor();
+    } else {
+      Path currentPath = Path();
+      int activeColorIdx = -1;
+      bool hasMove = false;
+      double prevRawX = 0.0, prevRawY = 0.0;
+
+      void flushFlat() {
+        if (!hasMove || activeColorIdx < 0) return;
+        final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
         canvas.drawPath(
           currentPath,
           Paint()
@@ -1873,60 +2586,43 @@ class TarikPro3DRenderer {
             ..strokeJoin = StrokeJoin.round
             ..isAntiAlias = true,
         );
+        currentPath = Path();
+        hasMove = false;
       }
-      currentPath = Path();
-      hasMove = false;
-    }
 
-    for (int i = 0; i < nSt; i++) {
-      final int cIdx = stColor[i];
-      if (cIdx != activeColorIdx) {
-        flushPath();
-        activeColorIdx = cIdx;
-      }
-      final double rx = stX[i];
-      final double ry = stY[i];
-      final double sx = (rx - minX) * scale + pad;
-      final double sy = (ry - minY) * scale + pad;
-
-      bool treatAsJump = stMove[i] != 0 || !hasMove;
-      if (!treatAsJump) {
-        final double dx = rx - prevRawX;
-        final double dy = ry - prevRawY;
-        // إلغاء أي قفزة أو انتقال طويل (> 12 مم في 3D) حتى لا يُرسم كخيط عريض عابر للتصميم
-        if (dx * dx + dy * dy > maxSegSq) {
-          treatAsJump = true;
+      for (int i = 0; i < nSt; i++) {
+        final int cIdx = stColor[i];
+        if (cIdx != activeColorIdx) {
+          flushFlat();
+          activeColorIdx = cIdx;
         }
-      }
+        final double rx = stX[i];
+        final double ry = stY[i];
+        final double sx = (rx - minX) * scale + pad;
+        final double sy = (ry - minY) * scale + pad;
 
-      if (treatAsJump) {
-        currentPath.moveTo(sx, sy);
-        hasMove = true;
-      } else {
-        currentPath.lineTo(sx, sy);
+        bool treatAsJump = stMove[i] != 0 || !hasMove;
+        if (!treatAsJump) {
+          final double dx = rx - prevRawX;
+          final double dy = ry - prevRawY;
+          if (dx * dx + dy * dy > maxSegSq) treatAsJump = true;
+        }
+        if (treatAsJump) {
+          currentPath.moveTo(sx, sy);
+          hasMove = true;
+        } else {
+          currentPath.lineTo(sx, sy);
+        }
+        prevRawX = rx;
+        prevRawY = ry;
       }
-      prevRawX = rx;
-      prevRawY = ry;
+      flushFlat();
     }
-    flushPath();
 
-    // رسم الترتر (Sequins)
+    // رسم الترتر الفوتوغرافي (PBR) بالمقاسات المعايرة: SeqA=3.0مم، SeqB=5.0مم، SeqC=3.0مم، SeqD=5.0مم
     if (data.seqX.isNotEmpty) {
-      final List<Path> seqPaths = List.generate(4, (_) => Path());
-      final List<bool> hasSeq = [false, false, false, false];
-      const seqRadiiUnits = [15.0, 22.0, 28.0, 35.0];
-      const seqColors = [
-        Color(0xFFE53935),
-        Color(0xFFFB8C00),
-        Color(0xFF1E88E5),
-        Color(0xFF8E24AA),
-      ];
-      final List<double> seqRadiiPx = [
-        (seqRadiiUnits[0] * scale).clamp(2.0, 18.0),
-        (seqRadiiUnits[1] * scale).clamp(2.0, 18.0),
-        (seqRadiiUnits[2] * scale).clamp(2.0, 18.0),
-        (seqRadiiUnits[3] * scale).clamp(2.0, 18.0),
-      ];
+      const seqDiamUnits = [30.0, 50.0, 30.0, 50.0]; // 3.0mm, 5.0mm, 3.0mm, 5.0mm
+      final spritePaint = Paint()..filterQuality = FilterQuality.high;
       for (int i = 0; i < data.seqX.length; i++) {
         final int code = data.seqCode[i];
         int b = 0;
@@ -1937,72 +2633,55 @@ class TarikPro3DRenderer {
         } else if (code == 4 || code == 8 || code == 32) {
           b = 3;
         }
+        ui.Image? sp;
+        if (decorTheme == 1) {
+          sp = b == 1 ? TarikProPbrSprites.seqPearl : TarikProPbrSprites.seqSilver;
+        } else if (decorTheme == 2) {
+          sp = TarikProPbrSprites.seqPearl;
+        } else if (decorTheme == 3) {
+          sp = b == 0
+              ? TarikProPbrSprites.seqRuby
+              : (b == 1 ? TarikProPbrSprites.seqGold : (b == 2 ? TarikProPbrSprites.seqSilver : TarikProPbrSprites.seqPearl));
+        } else {
+          sp = TarikProPbrSprites.seqGold;
+        }
+        if (sp == null) continue;
         final double sx = (data.seqX[i] - minX) * scale + pad;
         final double sy = (data.seqY[i] - minY) * scale + pad;
-        seqPaths[b].addOval(Rect.fromCircle(center: Offset(sx, sy), radius: seqRadiiPx[b]));
-        hasSeq[b] = true;
-      }
-      for (int b = 0; b < 4; b++) {
-        if (!hasSeq[b]) continue;
-        canvas.drawPath(
-          seqPaths[b],
-          Paint()
-            ..color = seqColors[b]
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = (seqRadiiPx[b] * 0.25).clamp(0.65, 2.2)
-            ..isAntiAlias = true,
+        final double dPx = (seqDiamUnits[b] * scale * 1.25).clamp(4.0, 48.0);
+        canvas.drawImageRect(
+          sp,
+          Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
+          Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
+          spritePaint,
         );
       }
     }
 
-    // رسم الخرز (Beads)
+    // رسم الخرز الفوتوغرافي (PBR) بالمقاس الحقيقي المعاير (3.0 مم)
     if (data.beadX.isNotEmpty) {
-      final List<_ProFloat32Buf> beadPts = [
-        _ProFloat32Buf(1024),
-        _ProFloat32Buf(512),
-        _ProFloat32Buf(512),
-      ];
-      final _ProFloat32Buf hiPts = _ProFloat32Buf(math.min(data.beadX.length * 2, 65536));
-      final double r = (12.0 * scale).clamp(1.5, 8.0);
-      final double hiOff = r * 0.25;
+      final spritePaint = Paint()..filterQuality = FilterQuality.high;
+      final double dPx = (30.0 * scale * 1.22).clamp(3.5, 36.0);
       for (int i = 0; i < data.beadX.length; i++) {
         final int c = data.beadCode[i];
-        final int b = (c == 2) ? 1 : (c == 3 ? 2 : 0);
+        ui.Image? sp;
+        if (decorTheme == 1) {
+          sp = c == 2 ? TarikProPbrSprites.beadSilver : TarikProPbrSprites.beadPearl;
+        } else if (decorTheme == 2) {
+          sp = TarikProPbrSprites.beadPearl;
+        } else if (decorTheme == 3) {
+          sp = c == 2 ? TarikProPbrSprites.beadCrystal : (c == 3 ? TarikProPbrSprites.beadGold : TarikProPbrSprites.beadPearl);
+        } else {
+          sp = c == 2 ? TarikProPbrSprites.beadGold : TarikProPbrSprites.beadPearl;
+        }
+        if (sp == null) continue;
         final double sx = (data.beadX[i] - minX) * scale + pad;
         final double sy = (data.beadY[i] - minY) * scale + pad;
-        beadPts[b].add(sx);
-        beadPts[b].add(sy);
-        hiPts.add(sx - hiOff);
-        hiPts.add(sy - hiOff);
-      }
-      const beadColors = [
-        Color(0xFFD4A017),
-        Color(0xFF00ACC1),
-        Color(0xFF8E24AA),
-      ];
-      for (int b = 0; b < 3; b++) {
-        if (beadPts[b].length == 0) continue;
-        canvas.drawRawPoints(
-          ui.PointMode.points,
-          beadPts[b].finish(),
-          Paint()
-            ..color = beadColors[b]
-            ..style = PaintingStyle.stroke
-            ..strokeCap = StrokeCap.round
-            ..strokeWidth = r * 2.0
-            ..isAntiAlias = true,
-        );
-      }
-      if (hiPts.length > 0 && r >= 2.0) {
-        canvas.drawRawPoints(
-          ui.PointMode.points,
-          hiPts.finish(),
-          Paint()
-            ..color = const Color(0xBFFFFFFF)
-            ..style = PaintingStyle.stroke
-            ..strokeCap = StrokeCap.round
-            ..strokeWidth = r * 0.64
-            ..isAntiAlias = true,
+        canvas.drawImageRect(
+          sp,
+          Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
+          Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
+          spritePaint,
         );
       }
     }
