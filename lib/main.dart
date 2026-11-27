@@ -17,6 +17,13 @@ import 'parsers/emb_parser.dart';
 import 'parsers/tarik_pro_engine.dart';
 
 final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
+final ValueNotifier<int> galleryRefreshNotifier = ValueNotifier<int>(0);
+String? lastMutatedFilePath;
+
+void notifyDesignFilesChanged([String? path]) {
+  lastMutatedFilePath = path;
+  galleryRefreshNotifier.value++;
+}
 
 String tr(String ar, String en) => isArabicNotifier.value ? ar : en;
 
@@ -47,6 +54,14 @@ int compareNatural(String a, String b) {
   return aParts.length.compareTo(bParts.length);
 }
 
+Future<VectorDesignData?> loadAnyVectorDesign(String path) async {
+  if (path.toLowerCase().endsWith('.tbf')) {
+    final tbf = await TarikProTbfParser.loadVector(path);
+    if (tbf != null) return tbf;
+  }
+  return VectorDesignLoader.load(path);
+}
+
 Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
   final lower = path.toLowerCase();
   EmbDesignInfo? result;
@@ -56,6 +71,8 @@ Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
     result = await EmbParser.parseFile(path);
   } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
     result = await DahaoParser.parseFile(path, maxCanvas: 640.0);
+  } else if (lower.endsWith('.tbf')) {
+    result = await TarikProTbfParser.parseFile(path, maxCanvas: 640.0);
   } else if (UniversalFormatParser.isSupported(lower)) {
     result = await UniversalFormatParser.parseFile(path, maxCanvas: 640.0);
   }
@@ -85,7 +102,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v6');
+    final dir = Directory('${supportDir.path}/design_cache_v7');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -107,6 +124,18 @@ class DesignCacheManager {
   }
 
   static EmbDesignInfo? getFromMemory(String path) => _memCache[path];
+
+  static Future<void> invalidate(String path) async {
+    _memCache.remove(path);
+    try {
+      final dir = await _getCacheDir();
+      final key = _keyForPath(path);
+      final metaFile = File('${dir.path}/$key.json');
+      final imgFile = File('${dir.path}/$key.img');
+      if (await metaFile.exists()) await metaFile.delete();
+      if (await imgFile.exists()) await imgFile.delete();
+    } catch (_) {}
+  }
 
   static Future<EmbDesignInfo?> getOrParse(String path) async {
     if (_memCache.containsKey(path)) {
@@ -544,6 +573,7 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   @override
   void initState() {
     super.initState();
+    galleryRefreshNotifier.addListener(_onGalleryFilesChanged);
     _intentChannel.setMethodCallHandler((call) async {
       if (call.method == 'onFileOpened' && call.arguments is String) {
         await _openIncomingEmbFile(call.arguments as String);
@@ -565,6 +595,82 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
         _startBackgroundScan();
       }
     });
+  }
+
+  @override
+  void dispose() {
+    galleryRefreshNotifier.removeListener(_onGalleryFilesChanged);
+    super.dispose();
+  }
+
+  Future<void> _onGalleryFilesChanged() async {
+    if (!mounted) return;
+    final String? changedPath = lastMutatedFilePath;
+    if (changedPath != null && changedPath.isNotEmpty) {
+      final file = File(changedPath);
+      final parentPath = file.parent.path;
+      final bool exists = await file.exists();
+      if (exists) {
+        final info = await DesignCacheManager.getOrParse(changedPath);
+        if (!mounted) return;
+        setState(() {
+          final idx = _folders.indexWhere((f) => f.folderPath == parentPath);
+          if (idx >= 0) {
+            final grp = _folders[idx];
+            if (!grp.filePaths.contains(changedPath)) {
+              grp.filePaths.insert(0, changedPath);
+            }
+            if (info?.previewJpeg != null) {
+              grp.coverBytes = info!.previewJpeg;
+            }
+          } else {
+            final folderName = parentPath.split(Platform.pathSeparator).last;
+            _folders.insert(
+              0,
+              EmbFolderGroup(
+                folderPath: parentPath,
+                folderName: folderName.isEmpty ? parentPath : folderName,
+                filePaths: [changedPath],
+                coverBytes: info?.previewJpeg,
+              ),
+            );
+          }
+        });
+        return;
+      }
+    }
+    // في حال حذف أو تعديل جماعي، نُحدّث قائمة المجلدات تلقائياً
+    await _refreshExistingFoldersSilently();
+  }
+
+  Future<void> _refreshExistingFoldersSilently() async {
+    for (final folder in List<EmbFolderGroup>.from(_folders)) {
+      final dir = Directory(folder.folderPath);
+      if (!await dir.exists()) continue;
+      final List<String> fresh = [];
+      try {
+        await for (final entity in dir.list(recursive: false, followLinks: false)) {
+          if (entity is File) {
+            final p = entity.path.toLowerCase();
+            if (validExtensions.any((ext) => p.endsWith(ext))) {
+              fresh.add(entity.path);
+            }
+          }
+        }
+      } catch (_) {}
+      fresh.sort((a, b) => compareNatural(
+            b.split(Platform.pathSeparator).last,
+            a.split(Platform.pathSeparator).last,
+          ));
+      folder.filePaths
+        ..clear()
+        ..addAll(fresh);
+    }
+    if (mounted) {
+      setState(() {
+        _folders.removeWhere((f) => f.filePaths.isEmpty);
+      });
+    }
   }
 
   Future<void> _openIncomingEmbFile(String path) async {
@@ -1150,32 +1256,84 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
   final List<EmbDesignInfo> _designs = [];
   List<EmbDesignInfo> _filteredDesigns = [];
   bool _isLoading = true;
+  bool _isBatchWorking = false;
   String _searchQuery = '';
   SortOption _sortOption = SortOption.nameDesc;
+  final Set<String> _selectedPaths = {};
+
+  bool get _selectionMode => _selectedPaths.isNotEmpty;
 
   @override
   void initState() {
     super.initState();
-    _loadFolderDesignsInBackground();
+    galleryRefreshNotifier.addListener(_onExternalChange);
+    _loadFolderDesignsInBackground(rescanDisk: true);
   }
 
-  Future<void> _loadFolderDesignsInBackground() async {
+  @override
+  void dispose() {
+    galleryRefreshNotifier.removeListener(_onExternalChange);
+    super.dispose();
+  }
+
+  void _onExternalChange() {
+    if (mounted) {
+      _loadFolderDesignsInBackground(rescanDisk: true);
+    }
+  }
+
+  Future<void> _loadFolderDesignsInBackground({bool rescanDisk = false}) async {
+    if (rescanDisk) {
+      final dir = Directory(widget.folderGroup.folderPath);
+      if (await dir.exists()) {
+        final List<String> diskFiles = [];
+        try {
+          await for (final entity in dir.list(recursive: false, followLinks: false)) {
+            if (entity is File) {
+              final p = entity.path.toLowerCase();
+              if (validExtensions.any((ext) => p.endsWith(ext))) {
+                diskFiles.add(entity.path);
+              }
+            }
+          }
+        } catch (_) {}
+        if (diskFiles.isNotEmpty || widget.folderGroup.filePaths.isNotEmpty) {
+          // دمج أي ملفات فرعية موجودة أصلاً إذا كانت قائمة مختارة، أو تحديث مباشر للمجلد الحقيقي
+          final Set<String> merged = {...diskFiles};
+          for (final p in widget.folderGroup.filePaths) {
+            if (File(p).parent.path != widget.folderGroup.folderPath && await File(p).exists()) {
+              merged.add(p);
+            }
+          }
+          widget.folderGroup.filePaths
+            ..clear()
+            ..addAll(merged);
+        }
+      }
+    }
+
     final List<String> paths = List<String>.from(widget.folderGroup.filePaths)
       ..sort((a, b) => compareNatural(
             b.split(Platform.pathSeparator).last,
             a.split(Platform.pathSeparator).last,
           ));
 
+    final List<EmbDesignInfo> nextLoaded = [];
     final List<String> pendingPaths = [];
     for (final path in paths) {
       final cached = DesignCacheManager.getFromMemory(path);
       if (cached != null) {
-        _designs.add(cached);
+        nextLoaded.add(cached);
       } else {
         pendingPaths.add(path);
       }
     }
-    if (_designs.isNotEmpty) {
+
+    if (mounted) {
+      _designs
+        ..clear()
+        ..addAll(nextLoaded);
+      _selectedPaths.removeWhere((p) => !paths.contains(p));
       _applyFilterAndSort();
     }
 
@@ -1184,7 +1342,9 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
       if (!mounted) return;
       final EmbDesignInfo? info = await DesignCacheManager.getOrParse(path);
       if (info != null) {
-        _designs.add(info);
+        if (!_designs.any((d) => d.filePath == info.filePath)) {
+          _designs.add(info);
+        }
         count++;
         if (count % 6 == 0 || count == pendingPaths.length) {
           _applyFilterAndSort();
@@ -1225,124 +1385,468 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
     });
   }
 
+  void _toggleSelection(String filePath) {
+    setState(() {
+      if (_selectedPaths.contains(filePath)) {
+        _selectedPaths.remove(filePath);
+      } else {
+        _selectedPaths.add(filePath);
+      }
+    });
+  }
+
+  Future<void> _batchDeleteSelected() async {
+    if (_selectedPaths.isEmpty || _isBatchWorking) return;
+    final int count = _selectedPaths.length;
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF18202E),
+        title: Text(
+          tr('تأكيد الحذف', 'Confirm Delete'),
+          style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          tr(
+            'هل أنت متأكد من حذف $count ملف نهائياً من الجهاز؟',
+            'Are you sure you want to permanently delete $count file(s)?',
+          ),
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(tr('إلغاء', 'Cancel'), style: const TextStyle(color: Colors.white70)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+            child: Text(tr('حذف', 'Delete')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isBatchWorking = true);
+    int deleted = 0;
+    final List<String> targets = List<String>.from(_selectedPaths);
+    for (final p in targets) {
+      try {
+        final f = File(p);
+        if (await f.exists()) {
+          await f.delete();
+        }
+        await DesignCacheManager.invalidate(p);
+        widget.folderGroup.filePaths.remove(p);
+        _designs.removeWhere((d) => d.filePath == p);
+        deleted++;
+      } catch (_) {}
+    }
+
+    if (mounted) {
+      setState(() {
+        _selectedPaths.clear();
+        _isBatchWorking = false;
+      });
+      _applyFilterAndSort();
+      notifyDesignFilesChanged();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(tr('تم حذف $deleted ملف بنجاح', 'Deleted $deleted file(s)')),
+          backgroundColor: const Color(0xFF2E7D32),
+        ),
+      );
+    }
+  }
+
+  Future<void> _batchShareSelected() async {
+    if (_selectedPaths.isEmpty || _isBatchWorking) return;
+    final List<XFile> xfiles = [];
+    for (final p in _selectedPaths) {
+      if (await File(p).exists()) {
+        xfiles.add(XFile(p));
+      }
+    }
+    if (xfiles.isEmpty) return;
+    try {
+      await Share.shareXFiles(xfiles);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${tr('تعذرت المشاركة', 'Share failed')}: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _batchConvertSelected() async {
+    if (_selectedPaths.isEmpty || _isBatchWorking) return;
+
+    final String? chosenExt = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF18202E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4)),
+              ),
+              Text(
+                tr(
+                  'تحويل ${_selectedPaths.length} ملف إلى صيغة:',
+                  'Convert ${_selectedPaths.length} file(s) to format:',
+                ),
+                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+              const SizedBox(height: 10),
+              ...UniversalExporter.supportedFormats.map((fmt) {
+                final ext = fmt['ext']!;
+                final label = fmt['name']!;
+                return ListTile(
+                  leading: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD4AF37).withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text('.$ext', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                  ),
+                  title: Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                  ),
+                  trailing: const Icon(Icons.transform, color: Colors.white60, size: 20),
+                  onTap: () => Navigator.pop(ctx, ext),
+                );
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (chosenExt == null || !mounted) return;
+    setState(() => _isBatchWorking = true);
+    int okCount = 0;
+    final List<String> targets = List<String>.from(_selectedPaths);
+
+    for (final srcPath in targets) {
+      if (!UniversalExporter.canExport(srcPath)) continue;
+      final fileName = srcPath.split(Platform.pathSeparator).last;
+      final baseName = fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
+      final parentDir = File(srcPath).parent.path;
+      final outPath = joinCleanPath(parentDir, '$baseName.$chosenExt');
+      String? res = await UniversalExporter.exportToFormat(srcPath, outPath, chosenExt);
+      res ??= await UniversalExporter.exportToFormat(
+        srcPath,
+        '/storage/emulated/0/Download/$baseName.$chosenExt',
+        chosenExt,
+      );
+      if (res != null && await File(res).exists()) {
+        await DesignCacheManager.invalidate(res);
+        final info = await DesignCacheManager.getOrParse(res);
+        if (info != null && mounted) {
+          if (!widget.folderGroup.filePaths.contains(res)) {
+            widget.folderGroup.filePaths.insert(0, res);
+          }
+          _designs.removeWhere((d) => d.filePath == res);
+          _designs.insert(0, info);
+          okCount++;
+        }
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _selectedPaths.clear();
+        _isBatchWorking = false;
+      });
+      _applyFilterAndSort();
+      notifyDesignFilesChanged();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            tr(
+              'تم تحويل $okCount ملف إلى .$chosenExt وحفظها في نفس المجلد',
+              'Converted $okCount file(s) to .$chosenExt in the same folder',
+            ),
+          ),
+          backgroundColor: const Color(0xFF2E7D32),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final numFmt = intl.NumberFormat('#,###');
     return ValueListenableBuilder<bool>(
       valueListenable: isArabicNotifier,
       builder: (context, isAr, _) {
-        return Scaffold(
-          appBar: AppBar(
-            backgroundColor: const Color(0xFF0E131D),
-            title: Directionality(
-              textDirection: TextDirection.ltr,
-              child: Text(widget.folderGroup.folderName, style: const TextStyle(fontSize: 15), maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () async {
-                  await _EmbGalleryAppState.toggleLanguage();
-                  setState(() {});
-                },
-                child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
-              ),
-              PopupMenuButton<SortOption>(
-                icon: const Icon(Icons.sort),
-                tooltip: tr('ترتيب', 'Sort'),
-                onSelected: (opt) {
-                  _sortOption = opt;
-                  _applyFilterAndSort();
-                },
-                itemBuilder: (_) => [
-                  PopupMenuItem(value: SortOption.nameDesc, child: Text(tr('الأحدث / الأكبر رقماً (9 - 1)', 'Newest / Largest (9 - 1)'))),
-                  PopupMenuItem(value: SortOption.nameAsc, child: Text(tr('الاسم / الأصغر رقماً (1 - 9)', 'Name / Smallest (1 - 9)'))),
-                  PopupMenuItem(value: SortOption.stitchesDesc, child: Text(tr('الأكثر غرزاً', 'Most Stitches'))),
-                  PopupMenuItem(value: SortOption.stitchesAsc, child: Text(tr('الأقل غرزاً', 'Least Stitches'))),
-                  PopupMenuItem(value: SortOption.colorsDesc, child: Text(tr('الأكثر ألواناً', 'Most Colors'))),
-                ],
-              ),
-            ],
-          ),
-          body: Column(
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                color: const Color(0xFF18202E),
-                child: Directionality(
-                  textDirection: TextDirection.ltr,
-                  child: Text(
-                    '📁 ${widget.folderGroup.folderPath}',
-                    style: const TextStyle(fontSize: 11, color: Colors.white60),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: TextField(
-                  decoration: InputDecoration(
-                    hintText: tr('بحث...', 'Search...'),
-                    prefixIcon: const Icon(Icons.search),
-                    filled: true,
-                    fillColor: const Color(0xFF18202E),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
-                  ),
-                  onChanged: (val) {
-                    _searchQuery = val;
-                    _applyFilterAndSort();
-                  },
-                ),
-              ),
-              if (_isLoading) const LinearProgressIndicator(color: Color(0xFFD4AF37)),
-              Expanded(
-                child: _filteredDesigns.isEmpty
-                    ? Center(
-                        child: Text(
-                          _isLoading ? tr('جاري القراءة...', 'Loading...') : tr('لا يوجد تطابق', 'No match'),
-                          style: const TextStyle(color: Colors.white70),
-                        ),
-                      )
-                    : GridView.builder(
-                        padding: const EdgeInsets.all(12),
-                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          crossAxisSpacing: 12,
-                          mainAxisSpacing: 12,
-                          childAspectRatio: 0.70,
-                        ),
-                        itemCount: _filteredDesigns.length,
-                        itemBuilder: (context, index) {
-                          final item = _filteredDesigns[index];
-                          return _DesignGridCard(
-                            design: item,
-                            formattedStitches: numFmt.format(item.stitches),
-                            onTap: () async {
-                              final exportedPath = await Navigator.push<String>(
-                                context,
-                                MaterialPageRoute(builder: (_) => DesignDetailScreen(design: item)),
-                              );
-                              if (exportedPath != null && exportedPath.isNotEmpty && mounted) {
-                                final newInfo = await DesignCacheManager.getOrParse(exportedPath);
-                                if (newInfo != null && mounted) {
-                                  setState(() {
-                                    if (!widget.folderGroup.filePaths.contains(exportedPath)) {
-                                      widget.folderGroup.filePaths.insert(0, exportedPath);
-                                    }
-                                    _designs.removeWhere((d) => d.filePath == exportedPath);
-                                    _designs.insert(0, newInfo);
-                                  });
-                                  _applyFilterAndSort();
-                                }
+        final bool allSelected =
+            _filteredDesigns.isNotEmpty && _filteredDesigns.every((d) => _selectedPaths.contains(d.filePath));
+        return PopScope(
+          canPop: !_selectionMode,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop && _selectionMode) {
+              setState(() => _selectedPaths.clear());
+            }
+          },
+          child: Scaffold(
+            appBar: _selectionMode
+                ? AppBar(
+                    backgroundColor: const Color(0xFF1F2B3E),
+                    leading: IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white),
+                      onPressed: () => setState(() => _selectedPaths.clear()),
+                    ),
+                    title: Text(
+                      '${_selectedPaths.length} ${tr('محدد', 'selected')}',
+                      style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                    actions: [
+                      TextButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            if (allSelected) {
+                              _selectedPaths.clear();
+                            } else {
+                              for (final d in _filteredDesigns) {
+                                _selectedPaths.add(d.filePath);
                               }
-                            },
-                          );
+                            }
+                          });
                         },
+                        icon: Icon(
+                          allSelected ? Icons.deselect : Icons.select_all,
+                          color: const Color(0xFFD4AF37),
+                          size: 19,
+                        ),
+                        label: Text(
+                          allSelected ? tr('إلغاء الكل', 'None') : tr('تحديد الكل', 'All'),
+                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                        ),
                       ),
-              ),
-            ],
+                    ],
+                  )
+                : AppBar(
+                    backgroundColor: const Color(0xFF0E131D),
+                    title: Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: Text(widget.folderGroup.folderName, style: const TextStyle(fontSize: 15), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    ),
+                    actions: [
+                      IconButton(
+                        icon: const Icon(Icons.refresh, color: Color(0xFFD4AF37), size: 20),
+                        tooltip: tr('تحديث المجلد', 'Refresh Folder'),
+                        onPressed: () => _loadFolderDesignsInBackground(rescanDisk: true),
+                      ),
+                      TextButton(
+                        onPressed: () async {
+                          await _EmbGalleryAppState.toggleLanguage();
+                          setState(() {});
+                        },
+                        child: Text(isAr ? 'EN' : 'عربي', style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+                      ),
+                      PopupMenuButton<SortOption>(
+                        icon: const Icon(Icons.sort),
+                        tooltip: tr('ترتيب', 'Sort'),
+                        onSelected: (opt) {
+                          _sortOption = opt;
+                          _applyFilterAndSort();
+                        },
+                        itemBuilder: (_) => [
+                          PopupMenuItem(value: SortOption.nameDesc, child: Text(tr('الأحدث / الأكبر رقماً (9 - 1)', 'Newest / Largest (9 - 1)'))),
+                          PopupMenuItem(value: SortOption.nameAsc, child: Text(tr('الاسم / الأصغر رقماً (1 - 9)', 'Name / Smallest (1 - 9)'))),
+                          PopupMenuItem(value: SortOption.stitchesDesc, child: Text(tr('الأكثر غرزاً', 'Most Stitches'))),
+                          PopupMenuItem(value: SortOption.stitchesAsc, child: Text(tr('الأقل غرزاً', 'Least Stitches'))),
+                          PopupMenuItem(value: SortOption.colorsDesc, child: Text(tr('الأكثر ألواناً', 'Most Colors'))),
+                        ],
+                      ),
+                    ],
+                  ),
+            body: Column(
+              children: [
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  color: const Color(0xFF18202E),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Directionality(
+                          textDirection: TextDirection.ltr,
+                          child: Text(
+                            '📁 ${widget.folderGroup.folderPath}',
+                            style: const TextStyle(fontSize: 11, color: Colors.white60),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                      if (!_selectionMode && _filteredDesigns.isNotEmpty)
+                        Text(
+                          tr('ضغطة مطوّلة للتحديد', 'Long-press to select'),
+                          style: const TextStyle(fontSize: 10, color: Color(0xFFD4AF37)),
+                        ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: TextField(
+                    decoration: InputDecoration(
+                      hintText: tr('بحث...', 'Search...'),
+                      prefixIcon: const Icon(Icons.search),
+                      filled: true,
+                      fillColor: const Color(0xFF18202E),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                    ),
+                    onChanged: (val) {
+                      _searchQuery = val;
+                      _applyFilterAndSort();
+                    },
+                  ),
+                ),
+                if (_isLoading || _isBatchWorking) const LinearProgressIndicator(color: Color(0xFFD4AF37)),
+                Expanded(
+                  child: _filteredDesigns.isEmpty
+                      ? Center(
+                          child: Text(
+                            _isLoading ? tr('جاري القراءة...', 'Loading...') : tr('لا يوجد تطابق', 'No match'),
+                            style: const TextStyle(color: Colors.white70),
+                          ),
+                        )
+                      : GridView.builder(
+                          padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            crossAxisSpacing: 12,
+                            mainAxisSpacing: 12,
+                            childAspectRatio: 0.70,
+                          ),
+                          itemCount: _filteredDesigns.length,
+                          itemBuilder: (context, index) {
+                            final item = _filteredDesigns[index];
+                            final isSelected = _selectedPaths.contains(item.filePath);
+                            return _DesignGridCard(
+                              design: item,
+                              formattedStitches: numFmt.format(item.stitches),
+                              isSelected: isSelected,
+                              selectionMode: _selectionMode,
+                              onLongPress: () => _toggleSelection(item.filePath),
+                              onTap: () async {
+                                if (_selectionMode) {
+                                  _toggleSelection(item.filePath);
+                                  return;
+                                }
+                                final exportedPath = await Navigator.push<String>(
+                                  context,
+                                  MaterialPageRoute(builder: (_) => DesignDetailScreen(design: item)),
+                                );
+                                if (exportedPath != null && exportedPath.isNotEmpty && mounted) {
+                                  await DesignCacheManager.invalidate(exportedPath);
+                                  final newInfo = await DesignCacheManager.getOrParse(exportedPath);
+                                  if (newInfo != null && mounted) {
+                                    setState(() {
+                                      if (!widget.folderGroup.filePaths.contains(exportedPath)) {
+                                        widget.folderGroup.filePaths.insert(0, exportedPath);
+                                      }
+                                      _designs.removeWhere((d) => d.filePath == exportedPath);
+                                      _designs.insert(0, newInfo);
+                                    });
+                                    _applyFilterAndSort();
+                                  }
+                                }
+                              },
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+            bottomNavigationBar: _selectionMode
+                ? Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF18202E),
+                      border: Border(top: BorderSide(color: Colors.white12)),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isBatchWorking ? null : _batchConvertSelected,
+                            icon: const Icon(Icons.transform, size: 18),
+                            label: Text(
+                              tr('تحويل صيغة', 'Convert'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFD4AF37),
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isBatchWorking ? null : _batchShareSelected,
+                            icon: const Icon(Icons.share, size: 18),
+                            label: Text(
+                              tr('مشاركة', 'Share'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF283852),
+                              foregroundColor: const Color(0xFF56CCF2),
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isBatchWorking ? null : _batchDeleteSelected,
+                            icon: const Icon(Icons.delete_outline, size: 18),
+                            label: Text(
+                              tr('حذف', 'Delete'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.redAccent.withOpacity(0.18),
+                              foregroundColor: Colors.redAccent,
+                              side: BorderSide(color: Colors.redAccent.withOpacity(0.6)),
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : null,
           ),
         );
       },
@@ -1354,7 +1858,18 @@ class _DesignGridCard extends StatelessWidget {
   final EmbDesignInfo design;
   final String formattedStitches;
   final VoidCallback onTap;
-  const _DesignGridCard({required this.design, required this.formattedStitches, required this.onTap});
+  final VoidCallback? onLongPress;
+  final bool isSelected;
+  final bool selectionMode;
+
+  const _DesignGridCard({
+    required this.design,
+    required this.formattedStitches,
+    required this.onTap,
+    this.onLongPress,
+    this.isSelected = false,
+    this.selectionMode = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1364,11 +1879,16 @@ class _DesignGridCard extends StatelessWidget {
 
     return GestureDetector(
       onTap: onTap,
-      child: Container(
+      onLongPress: onLongPress,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
         decoration: BoxDecoration(
           color: const Color(0xFF18202E),
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.white10),
+          border: Border.all(
+            color: isSelected ? const Color(0xFFD4AF37) : Colors.white10,
+            width: isSelected ? 2.4 : 1.0,
+          ),
         ),
         clipBehavior: Clip.antiAlias,
         child: Column(
@@ -1394,6 +1914,8 @@ class _DesignGridCard extends StatelessWidget {
                             ),
                           ),
                   ),
+                  if (isSelected)
+                    Container(color: const Color(0xFFD4AF37).withOpacity(0.18)),
                   Positioned(
                     top: 6,
                     left: 6,
@@ -1410,6 +1932,23 @@ class _DesignGridCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (selectionMode)
+                    Positioned(
+                      top: 6,
+                      right: 6,
+                      child: Container(
+                        width: 24,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          color: isSelected ? const Color(0xFFD4AF37) : const Color(0xFF0E131D).withOpacity(0.7),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 1.6),
+                        ),
+                        child: isSelected
+                            ? const Icon(Icons.check, size: 15, color: Colors.black)
+                            : null,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1556,8 +2095,10 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
           await Share.shareXFiles([XFile(resultPath)], text: '$baseName.$chosenExt');
         } else {
           _lastExportedPath = resultPath;
-          // توليد معاينة التصميم للملف المُصدَّر فوراً ليظهر بصورته مباشرة في المجلد
+          // توليد معاينة التصميم للملف المُصدَّر وتحديث المجلد فوراً
+          await DesignCacheManager.invalidate(resultPath);
           await DesignCacheManager.getOrParse(resultPath);
+          notifyDesignFilesChanged(resultPath);
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -1654,24 +2195,24 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
               ),
             ],
           ),
-          body: ListView(
-            padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF18202E),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Colors.white12),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: Column(
-                  children: [
-                    GestureDetector(
+          body: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF18202E),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white12),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
                       onTap: _openFullScreenViewer,
                       child: Stack(
+                        fit: StackFit.expand,
                         children: [
                           Container(
-                            height: (MediaQuery.of(context).size.height * 0.34).clamp(210.0, 285.0),
                             width: double.infinity,
                             color: Colors.white,
                             child: d.previewJpeg != null
@@ -1730,11 +2271,13 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                         ],
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-                      child: Column(
-                        children: [
-                          // مسار الملف مضغوط بسطر واحد
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // مسار الملف مضغوط بسطر واحد
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                             decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
@@ -1959,83 +2502,111 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                 ),
                               ],
                             ),
-                        ],
-                      ),
+                          if (d.colorSequence.isNotEmpty) ...[
+                            const SizedBox(height: 7),
+                            SizedBox(
+                              width: double.infinity,
+                              child: OutlinedButton.icon(
+                                onPressed: () {
+                                  showModalBottomSheet(
+                                    context: context,
+                                    backgroundColor: const Color(0xFF18202E),
+                                    shape: const RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                                    ),
+                                    builder: (ctx) => SafeArea(
+                                      child: Padding(
+                                        padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Row(
+                                              children: [
+                                                const Icon(Icons.palette_outlined, size: 18, color: Color(0xFFD4AF37)),
+                                                const SizedBox(width: 8),
+                                                Text(
+                                                  '${tr('جدول تسلسل الألوان والتوقفات', 'Color Sequence & Stops')} (${d.colorSequence.length})',
+                                                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 14),
+                                                ),
+                                              ],
+                                            ),
+                                            const SizedBox(height: 10),
+                                            Flexible(
+                                              child: ListView.builder(
+                                                shrinkWrap: true,
+                                                itemCount: d.colorSequence.length,
+                                                itemBuilder: (_, idx) {
+                                                  final ThreadColorStep s = d.colorSequence[idx] as ThreadColorStep;
+                                                  return Container(
+                                                    margin: const EdgeInsets.only(bottom: 6),
+                                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.black26,
+                                                      borderRadius: BorderRadius.circular(10),
+                                                    ),
+                                                    child: Row(
+                                                      children: [
+                                                        Container(
+                                                          width: 22,
+                                                          height: 22,
+                                                          decoration: BoxDecoration(
+                                                            color: Color(s.colorValue),
+                                                            shape: BoxShape.circle,
+                                                            border: Border.all(color: Colors.white54, width: 1.5),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(width: 10),
+                                                        Text(
+                                                          '#${s.stopNumber}',
+                                                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                                                        ),
+                                                        const SizedBox(width: 10),
+                                                        Expanded(
+                                                          child: Text(
+                                                            s.colorName,
+                                                            maxLines: 1,
+                                                            overflow: TextOverflow.ellipsis,
+                                                            style: const TextStyle(color: Colors.white, fontSize: 13),
+                                                          ),
+                                                        ),
+                                                        if (s.stitches > 0)
+                                                          Text(
+                                                            '${numFmt.format(s.stitches)} ${tr('غرزة', 'st')}',
+                                                            style: const TextStyle(color: Color(0xFF56CCF2), fontSize: 12),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                  );
+                                                },
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.palette_outlined, size: 16, color: Color(0xFFD4AF37)),
+                                label: Text(
+                                  '${tr('جدول الألوان والتوقفات', 'Color Sequence')} (${d.colorSequence.length})',
+                                  style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  side: BorderSide(color: const Color(0xFFD4AF37).withOpacity(0.45)),
+                                  padding: const EdgeInsets.symmetric(vertical: 8),
+                                  minimumSize: const Size(0, 36),
+                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                              ),
+                            ),
+                          ],
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              if (d.colorSequence.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF18202E),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.white12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.palette_outlined, size: 18, color: Color(0xFFD4AF37)),
-                          const SizedBox(width: 8),
-                          Text(
-                            '${tr('جدول تسلسل الألوان والتوقفات', 'Color Sequence & Stops')} (${d.colorSequence.length})',
-                            style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 14),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      ...d.colorSequence.map((step) {
-                        final ThreadColorStep s = step as ThreadColorStep;
-                        return Container(
-                          margin: const EdgeInsets.only(bottom: 6),
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: Colors.black26,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Row(
-                            children: [
-                              Container(
-                                width: 22,
-                                height: 22,
-                                decoration: BoxDecoration(
-                                  color: Color(s.colorValue),
-                                  shape: BoxShape.circle,
-                                  border: Border.all(color: Colors.white54, width: 1.5),
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Text(
-                                '#${s.stopNumber}',
-                                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  s.colorName,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                                ),
-                              ),
-                              if (s.stitches > 0)
-                                Text(
-                                  '${numFmt.format(s.stitches)} ${tr('غرزة', 'st')}',
-                                  style: const TextStyle(color: Color(0xFF56CCF2), fontSize: 12),
-                                ),
-                            ],
-                          ),
-                        );
-                      }),
-                    ],
-                  ),
-                ),
-              ],
-            ],
+            ),
           ),
         ),
         );
@@ -2087,12 +2658,21 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
     if (mounted) setState(() => _loadingHd = true);
     Uint8List? hd;
     try {
-      if (isDst) {
-        hd = await DstParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
-      } else if (isDahao) {
-        hd = await DahaoParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
-      } else {
-        hd = await UniversalFormatParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
+      // استخدام محرك TarikPro3DRenderer لإلغاء القفزات العريضة في 3D وعرض سمك الخيط الفيزيائي الحقيقي (~0.38 مم)
+      hd = await TarikPro3DRenderer.renderHighResPreview(
+        widget.design.filePath,
+        maxCanvas: 2200.0,
+        is3D: _is3D,
+        transparentBg: true,
+      );
+      if (hd == null || hd.isEmpty) {
+        if (isDst) {
+          hd = await DstParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
+        } else if (isDahao) {
+          hd = await DahaoParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
+        } else {
+          hd = await UniversalFormatParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
+        }
       }
     } catch (_) {}
 
@@ -2403,7 +2983,7 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   }
 
   Future<void> _loadVector() async {
-    final v = widget.initialVector ?? (widget.design != null ? await VectorDesignLoader.load(widget.design!.filePath) : null);
+    final v = widget.initialVector ?? (widget.design != null ? await loadAnyVectorDesign(widget.design!.filePath) : null);
     if (!mounted) return;
     setState(() {
       _vec = v;
@@ -2779,7 +3359,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   }
 
   Future<void> _load() async {
-    final v = widget.initialVector ?? (widget.design != null ? await VectorDesignLoader.load(widget.design!.filePath) : null);
+    final v = widget.initialVector ?? (widget.design != null ? await loadAnyVectorDesign(widget.design!.filePath) : null);
     if (!mounted) return;
     if (v != null) {
       final Set<int> cols = {};
@@ -2929,15 +3509,17 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
     setState(() => _saving = true);
     try {
       String outPath = joinCleanPath(outDir, '$baseName.$targetExt');
-      String? res = await VectorDesignEditor.exportVectorToFile(_edited!, outPath, targetExt, baseName: baseName);
-      res ??= await VectorDesignEditor.exportVectorToFile(
+      String? res = await TarikProDstEncoder.exportToFile(_edited!, outPath, targetExt, baseName: baseName);
+      res ??= await TarikProDstEncoder.exportToFile(
         _edited!,
         '/storage/emulated/0/Download/$baseName.$targetExt',
         targetExt,
         baseName: baseName,
       );
       if (res != null && await File(res).exists()) {
+        await DesignCacheManager.invalidate(res);
         await DesignCacheManager.getOrParse(res);
+        notifyDesignFilesChanged(res);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -3824,15 +4406,17 @@ class _VectorStitchPainter extends CustomPainter {
       if (!hasMove || activeColor < 0) return;
       final Color baseColor = Color(data.paletteArgb[activeColor % palLen]);
       if (is3D) {
-        final double tw = (scale * 3.1).clamp(1.8, 4.2);
+        final double tw = (scale * 3.8).clamp(0.95, 4.0);
+        final double shOff = (tw * 0.30).clamp(0.25, 1.2);
+        final double hiOff = (tw * 0.18).clamp(0.16, 0.70);
         canvas.save();
-        canvas.translate(tw * 0.35, tw * 0.35);
+        canvas.translate(shOff, shOff);
         canvas.drawPath(
           path,
           Paint()
-            ..color = Colors.black.withOpacity(0.28)
+            ..color = Colors.black.withOpacity(0.26)
             ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 1.18
+            ..strokeWidth = tw * 1.08
             ..strokeCap = StrokeCap.round
             ..strokeJoin = StrokeJoin.round
             ..isAntiAlias = true,
@@ -3842,7 +4426,7 @@ class _VectorStitchPainter extends CustomPainter {
         canvas.drawPath(
           path,
           Paint()
-            ..color = Color.lerp(baseColor, Colors.black, 0.25) ?? baseColor
+            ..color = Color.lerp(baseColor, Colors.black, 0.28) ?? baseColor
             ..style = PaintingStyle.stroke
             ..strokeWidth = tw
             ..strokeCap = StrokeCap.round
@@ -3854,19 +4438,19 @@ class _VectorStitchPainter extends CustomPainter {
           Paint()
             ..color = baseColor
             ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 0.72
+            ..strokeWidth = tw * 0.76
             ..strokeCap = StrokeCap.round
             ..strokeJoin = StrokeJoin.round
             ..isAntiAlias = true,
         );
         canvas.save();
-        canvas.translate(-tw * 0.2, -tw * 0.2);
+        canvas.translate(-hiOff, -hiOff);
         canvas.drawPath(
           path,
           Paint()
-            ..color = (Color.lerp(baseColor, Colors.white, 0.62) ?? Colors.white).withOpacity(0.82)
+            ..color = (Color.lerp(baseColor, Colors.white, 0.58) ?? Colors.white).withOpacity(0.76)
             ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 0.26
+            ..strokeWidth = (tw * 0.24).clamp(0.24, 1.05)
             ..strokeCap = StrokeCap.round
             ..strokeJoin = StrokeJoin.round
             ..isAntiAlias = true,
@@ -3886,22 +4470,36 @@ class _VectorStitchPainter extends CustomPainter {
       hasMove = false;
     }
 
+    final double maxSegSq = is3D ? (120.0 * 120.0) : (145.0 * 145.0);
+    double prevRx = 0.0, prevRy = 0.0;
     for (int i = 0; i < count; i++) {
       final int c = data.stColor[i];
       if (c != activeColor) {
         flush();
         activeColor = c;
       }
-      final double sx = data.stX[i] * scale + offX;
-      final double sy = data.stY[i] * scale + offY;
+      final double rx = data.stX[i];
+      final double ry = data.stY[i];
+      final double sx = rx * scale + offX;
+      final double sy = ry * scale + offY;
       lastX = sx;
       lastY = sy;
-      if (data.stMove[i] != 0 || !hasMove) {
+      bool isJump = data.stMove[i] != 0 || !hasMove;
+      if (!isJump) {
+        final double dx = rx - prevRx;
+        final double dy = ry - prevRy;
+        if (dx * dx + dy * dy > maxSegSq) {
+          isJump = true;
+        }
+      }
+      if (isJump) {
         path.moveTo(sx, sy);
         hasMove = true;
       } else {
         path.lineTo(sx, sy);
       }
+      prevRx = rx;
+      prevRy = ry;
     }
     flush();
 
@@ -4026,23 +4624,40 @@ class _VectorStitchPainter extends CustomPainter {
 
 /// شاشة الكتابة والتطريز المبسّطة: 5 فونطات عربي (A1–A5) + 5 فونطات إنجليزي (E1–E5) بدون أسماء + جدول طول وعرض بالأرقام + Auto-Branching بدون جنبات
 
-class _CmGridAndHandlesOverlay extends StatelessWidget {
-  final VectorDesignData? vec;
+enum _LetteringHandle {
+  none,
+  pan,
+  resizeTL,
+  resizeTR,
+  resizeBR,
+  resizeBL,
+  rotate,
+  curve,
+}
+
+/// لوحة الكتابة التفاعلية بمقياس سنتيمتر حقيقي (1 سم × 1 سم):
+/// - الشبكة تتحرك وتتكبر مع النص تماماً عند التقريب بإصبعين أو التحريك
+/// - عند تغيير عرض النص (من الشريط أو بسحب مقابض الزوايا) يظهر تكبير وتصغير الحروف فعلياً على الشبكة
+/// - مقابض تفاعلية فوق الغرز تعمل 100% مثل الفوتوشوب وويلكم: 4 زوايا للتكبير، مقبض علوي للدوران، ومقبض أخضر للقوس/الدائرة/الموجة
+class _InteractiveLetteringCanvas extends StatefulWidget {
+  final VectorDesignData vec;
   final double widthCm;
   final double rotationDeg;
   final String pathMode;
   final double pathParam;
+  final bool is3D;
   final ValueChanged<double> onWidthCmDrag;
   final ValueChanged<double> onRotationDrag;
   final ValueChanged<double> onPathParamDrag;
   final VoidCallback onInteractionEnd;
 
-  const _CmGridAndHandlesOverlay({
+  const _InteractiveLetteringCanvas({
     required this.vec,
     required this.widthCm,
     required this.rotationDeg,
     required this.pathMode,
     required this.pathParam,
+    required this.is3D,
     required this.onWidthCmDrag,
     required this.onRotationDrag,
     required this.onPathParamDrag,
@@ -4050,112 +4665,292 @@ class _CmGridAndHandlesOverlay extends StatelessWidget {
   });
 
   @override
+  State<_InteractiveLetteringCanvas> createState() => _InteractiveLetteringCanvasState();
+}
+
+class _InteractiveLetteringCanvasState extends State<_InteractiveLetteringCanvas> {
+  double _viewZoom = 1.0;
+  Offset _viewPan = Offset.zero;
+  double _startViewZoom = 1.0;
+  Offset _startViewPan = Offset.zero;
+  Offset _startFocal = Offset.zero;
+  bool _isCameraGesture = false;
+
+  _LetteringHandle _activeHandle = _LetteringHandle.none;
+  double _dragStartWidthCm = 12.0;
+  double _dragStartRotDeg = 0.0;
+  double _dragStartPathParam = 0.35;
+  double _dragStartDist = 50.0;
+  double _dragStartAngle = 0.0;
+  Offset _dragStartPos = Offset.zero;
+  double _liveScalePreview = 1.0;
+  double _liveRotDeltaDeg = 0.0;
+  String? _hudLabel;
+  Size _canvasSize = Size.zero;
+
+  double _pxPerCm(Size size) {
+    // 18 سم افتراضياً عبر عرض اللوحة بحيث يرى المستخدم تكبير الحروف بوضوح من 3 سم حتى 30 سم على مربعات السنتيمتر!
+    final double basePxPerCm = (size.width / 18.0).clamp(14.0, 32.0);
+    return basePxPerCm * _viewZoom;
+  }
+
+  Rect _designScreenRect(Size size) {
+    final double pxPerCm = _pxPerCm(size);
+    final double pxPerUnit = pxPerCm / 100.0; // 100 وحدة = 1 سم
+    final v = widget.vec;
+    final double rawW = max(10.0, v.maxX - v.minX);
+    final double rawH = max(10.0, v.maxY - v.minY);
+    final double drawW = rawW * pxPerUnit * _liveScalePreview;
+    final double drawH = rawH * pxPerUnit * _liveScalePreview;
+    final Offset center = Offset(size.width * 0.5, size.height * 0.5) + _viewPan;
+    return Rect.fromCenter(center: center, width: drawW, height: drawH);
+  }
+
+  Offset _rotatePt(Offset pt, Offset center, double deg) {
+    final double r = deg * pi / 180.0;
+    final double c = cos(r), s = sin(r);
+    final double dx = pt.dx - center.dx;
+    final double dy = pt.dy - center.dy;
+    return Offset(center.dx + dx * c - dy * s, center.dy + dx * s + dy * c);
+  }
+
+  _LetteringHandle _hitTestHandle(Offset pos, Size size) {
+    final Rect box = _designScreenRect(size).inflate(8.0);
+    final Offset center = box.center;
+    const double hitR = 26.0;
+
+    final Offset rotPos = _rotatePt(Offset(box.center.dx, box.top - 26.0), center, _liveRotDeltaDeg);
+    if ((pos - rotPos).distance <= hitR) return _LetteringHandle.rotate;
+
+    if (widget.pathMode != 'linear') {
+      final double curveOffsetPx = (-widget.pathParam * 22.0).clamp(-26.0, 26.0);
+      final Offset curvePos = _rotatePt(Offset(box.center.dx, box.bottom + 24.0 + curveOffsetPx * 0.4), center, _liveRotDeltaDeg);
+      if ((pos - curvePos).distance <= hitR) return _LetteringHandle.curve;
+    }
+
+    final corners = [
+      (_LetteringHandle.resizeTL, _rotatePt(box.topLeft, center, _liveRotDeltaDeg)),
+      (_LetteringHandle.resizeTR, _rotatePt(box.topRight, center, _liveRotDeltaDeg)),
+      (_LetteringHandle.resizeBR, _rotatePt(box.bottomRight, center, _liveRotDeltaDeg)),
+      (_LetteringHandle.resizeBL, _rotatePt(box.bottomLeft, center, _liveRotDeltaDeg)),
+    ];
+    for (final c in corners) {
+      if ((pos - c.$2).distance <= hitR) return c.$1;
+    }
+    return _LetteringHandle.pan;
+  }
+
+  void _onScaleStart(ScaleStartDetails details) {
+    if (_canvasSize == Size.zero) return;
+    if (details.pointerCount >= 2) {
+      _isCameraGesture = true;
+      _activeHandle = _LetteringHandle.none;
+      _startViewZoom = _viewZoom;
+      _startViewPan = _viewPan;
+      _startFocal = details.localFocalPoint;
+      return;
+    }
+
+    _isCameraGesture = false;
+    final pos = details.localFocalPoint;
+    final h = _hitTestHandle(pos, _canvasSize);
+    final Rect box = _designScreenRect(_canvasSize);
+    final Offset center = box.center;
+
+    _activeHandle = h;
+    _dragStartPos = pos;
+    _startViewZoom = _viewZoom;
+    _startViewPan = _viewPan;
+    _startFocal = pos;
+    _dragStartWidthCm = widget.widthCm;
+    _dragStartRotDeg = widget.rotationDeg;
+    _dragStartPathParam = widget.pathParam;
+    _dragStartDist = max(18.0, (pos - center).distance);
+    _dragStartAngle = atan2(pos.dy - center.dy, pos.dx - center.dx);
+    _liveScalePreview = 1.0;
+    _liveRotDeltaDeg = 0.0;
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails details) {
+    if (_canvasSize == Size.zero) return;
+
+    if (_isCameraGesture || details.pointerCount >= 2) {
+      if (!_isCameraGesture) {
+        _isCameraGesture = true;
+        _activeHandle = _LetteringHandle.none;
+        _liveScalePreview = 1.0;
+        _liveRotDeltaDeg = 0.0;
+        _hudLabel = null;
+        _startViewZoom = _viewZoom;
+        _startViewPan = _viewPan;
+        _startFocal = details.localFocalPoint;
+      }
+      setState(() {
+        _viewZoom = (_startViewZoom * details.scale).clamp(0.45, 6.0);
+        _viewPan = _startViewPan + (details.localFocalPoint - _startFocal);
+      });
+      return;
+    }
+
+    final pos = details.localFocalPoint;
+    final Rect box = _designScreenRect(_canvasSize);
+    final Offset center = box.center;
+
+    if (_activeHandle == _LetteringHandle.pan) {
+      setState(() {
+        _viewPan = _startViewPan + (pos - _startFocal);
+      });
+      return;
+    }
+
+    if (_activeHandle == _LetteringHandle.resizeTL ||
+        _activeHandle == _LetteringHandle.resizeTR ||
+        _activeHandle == _LetteringHandle.resizeBR ||
+        _activeHandle == _LetteringHandle.resizeBL) {
+      final double curDist = max(12.0, (pos - center).distance);
+      final double ratio = (curDist / _dragStartDist).clamp(0.25, 3.5);
+      final double nextW = (_dragStartWidthCm * ratio).clamp(3.0, 32.0);
+      setState(() {
+        _liveScalePreview = nextW / max(0.5, _dragStartWidthCm);
+        _hudLabel = '${tr('العرض', 'W')}: ${nextW.toStringAsFixed(1)} ${tr('سم', 'cm')}';
+      });
+      widget.onWidthCmDrag(nextW);
+      return;
+    }
+
+    if (_activeHandle == _LetteringHandle.rotate) {
+      final double curAng = atan2(pos.dy - center.dy, pos.dx - center.dx);
+      double deltaDeg = (curAng - _dragStartAngle) * 180.0 / pi;
+      double nextRot = ((_dragStartRotDeg + deltaDeg) % 360.0 + 360.0) % 360.0;
+      for (final snap in [0.0, 90.0, 180.0, 270.0, 360.0]) {
+        if ((nextRot - snap).abs() < 3.0) {
+          nextRot = snap % 360.0;
+          deltaDeg = nextRot - _dragStartRotDeg;
+          break;
+        }
+      }
+      setState(() {
+        _liveRotDeltaDeg = deltaDeg;
+        _hudLabel = '${tr('دوران', 'Rotate')}: ${nextRot.round()}°';
+      });
+      widget.onRotationDrag(nextRot);
+      return;
+    }
+
+    if (_activeHandle == _LetteringHandle.curve) {
+      final double dy = pos.dy - _dragStartPos.dy;
+      final double nextP = (_dragStartPathParam - dy * 0.011).clamp(-1.0, 1.0);
+      setState(() {
+        _hudLabel = '${tr('انحناء', 'Curve')}: ${(nextP * 100).round()}%';
+      });
+      widget.onPathParamDrag(nextP);
+      return;
+    }
+  }
+
+  void _onScaleEnd(ScaleEndDetails details) {
+    final bool needsRegen = _activeHandle != _LetteringHandle.none && _activeHandle != _LetteringHandle.pan;
+    setState(() {
+      _activeHandle = _LetteringHandle.none;
+      _liveScalePreview = 1.0;
+      _liveRotDeltaDeg = 0.0;
+      _hudLabel = null;
+      _isCameraGesture = false;
+    });
+    if (needsRegen) {
+      widget.onInteractionEnd();
+    }
+  }
+
+  void _resetView() {
+    setState(() {
+      _viewZoom = 1.0;
+      _viewPan = Offset.zero;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (ctx, c) {
-        final double w = c.maxWidth;
-        final double h = c.maxHeight;
-        final double boxW = (w * (widthCm / 26.0)).clamp(110.0, w - 36.0);
-        final double boxH = (h * 0.44).clamp(76.0, h - 56.0);
-        final double left = (w - boxW) * 0.5;
-        final double top = (h - boxH) * 0.5;
-
+        _canvasSize = Size(c.maxWidth, c.maxHeight);
+        final double pxPerCm = _pxPerCm(_canvasSize);
         return Stack(
           children: [
             Positioned.fill(
-              child: IgnorePointer(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onDoubleTap: _resetView,
+                onScaleStart: _onScaleStart,
+                onScaleUpdate: _onScaleUpdate,
+                onScaleEnd: _onScaleEnd,
                 child: CustomPaint(
-                  painter: _CmGridPainter(
-                    widthCm: widthCm,
-                    vec: vec,
+                  painter: _InteractiveLetteringPainter(
+                    vec: widget.vec,
+                    pxPerCm: pxPerCm,
+                    viewPan: _viewPan,
+                    liveScalePreview: _liveScalePreview,
+                    liveRotDeltaDeg: _liveRotDeltaDeg,
+                    pathMode: widget.pathMode,
+                    pathParam: widget.pathParam,
+                    activeHandle: _activeHandle,
+                    is3D: widget.is3D,
+                  ),
+                  size: Size.infinite,
+                ),
+              ),
+            ),
+            if (_hudLabel != null)
+              Positioned(
+                top: 8,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0E131D).withOpacity(0.90),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFD4AF37)),
+                    ),
+                    child: Text(
+                      _hudLabel!,
+                      style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              bottom: 6,
+              left: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0E131D).withOpacity(0.72),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '1cm • ${widget.widthCm.toStringAsFixed(1)}×${((widget.vec.heightMm ?? 0) / 10.0).toStringAsFixed(1)}cm',
+                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 6,
+              right: 8,
+              child: Material(
+                color: const Color(0xFF0E131D).withOpacity(0.78),
+                borderRadius: BorderRadius.circular(8),
+                child: InkWell(
+                  onTap: _resetView,
+                  borderRadius: BorderRadius.circular(8),
+                  child: const Padding(
+                    padding: EdgeInsets.all(5),
+                    child: Icon(Icons.fit_screen, size: 16, color: Color(0xFFD4AF37)),
                   ),
                 ),
               ),
             ),
-            if (vec != null)
-              Positioned(
-                left: left,
-                top: top,
-                width: boxW,
-                height: boxH,
-                child: Transform.rotate(
-                  angle: rotationDeg * pi / 180.0,
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      IgnorePointer(
-                        child: Container(
-                          decoration: BoxDecoration(
-                            border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.75), width: 1.3),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        right: -12,
-                        bottom: -12,
-                        child: GestureDetector(
-                          onPanUpdate: (d) {
-                            final nextW = (widthCm + d.delta.dx * 0.08).clamp(3.0, 32.0);
-                            onWidthCmDrag(nextW);
-                          },
-                          onPanEnd: (_) => onInteractionEnd(),
-                          child: Container(
-                            width: 24,
-                            height: 24,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFFD4AF37),
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(Icons.open_in_full, size: 13, color: Colors.black),
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        top: -28,
-                        left: boxW * 0.5 - 12,
-                        child: GestureDetector(
-                          onPanUpdate: (d) {
-                            final nextRot = (rotationDeg + d.delta.dx * 1.2 + d.delta.dy * 0.6) % 360.0;
-                            onRotationDrag(nextRot);
-                          },
-                          onPanEnd: (_) => onInteractionEnd(),
-                          child: Container(
-                            width: 24,
-                            height: 24,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFF56CCF2),
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(Icons.rotate_right, size: 14, color: Colors.black),
-                          ),
-                        ),
-                      ),
-                      if (pathMode != 'linear')
-                        Positioned(
-                          bottom: -24,
-                          left: boxW * 0.5 - 12,
-                          child: GestureDetector(
-                            onPanUpdate: (d) {
-                              final nextP = (pathParam + d.delta.dy * 0.012).clamp(-1.0, 1.0);
-                              onPathParamDrag(nextP);
-                            },
-                            onPanEnd: (_) => onInteractionEnd(),
-                            child: Container(
-                              width: 24,
-                              height: 24,
-                              decoration: const BoxDecoration(
-                                color: Colors.greenAccent,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(Icons.tune, size: 14, color: Colors.black),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
           ],
         );
       },
@@ -4163,44 +4958,279 @@ class _CmGridAndHandlesOverlay extends StatelessWidget {
   }
 }
 
-class _CmGridPainter extends CustomPainter {
-  final double widthCm;
-  final VectorDesignData? vec;
-  const _CmGridPainter({required this.widthCm, this.vec});
+class _InteractiveLetteringPainter extends CustomPainter {
+  final VectorDesignData vec;
+  final double pxPerCm;
+  final Offset viewPan;
+  final double liveScalePreview;
+  final double liveRotDeltaDeg;
+  final String pathMode;
+  final double pathParam;
+  final _LetteringHandle activeHandle;
+  final bool is3D;
+
+  const _InteractiveLetteringPainter({
+    required this.vec,
+    required this.pxPerCm,
+    required this.viewPan,
+    required this.liveScalePreview,
+    required this.liveRotDeltaDeg,
+    required this.pathMode,
+    required this.pathParam,
+    required this.activeHandle,
+    required this.is3D,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final double pxPerCm = (size.width / 16.0).clamp(18.0, 48.0);
+    final Offset origin = Offset(size.width * 0.5, size.height * 0.5) + viewPan;
+
+    // 1) رسم شبكة السنتيمتر الحقيقية (تتحرك وتتكبر مع النص 100%)
+    final double halfCmPx = pxPerCm * 0.5;
     final Paint minorPaint = Paint()
       ..color = const Color(0xFFE2E8F0)
       ..strokeWidth = 0.7;
     final Paint majorPaint = Paint()
       ..color = const Color(0xFF94A3B8).withOpacity(0.55)
       ..strokeWidth = 1.1;
+    final Paint axisPaint = Paint()
+      ..color = const Color(0xFF64748B).withOpacity(0.45)
+      ..strokeWidth = 1.3;
 
-    for (double x = 0; x <= size.width; x += pxPerCm * 0.5) {
-      final bool isCm = ((x / pxPerCm) - (x / pxPerCm).round()).abs() < 0.05;
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), isCm ? majorPaint : minorPaint);
-    }
-    for (double y = 0; y <= size.height; y += pxPerCm * 0.5) {
-      final bool isCm = ((y / pxPerCm) - (y / pxPerCm).round()).abs() < 0.05;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), isCm ? majorPaint : minorPaint);
+    if (halfCmPx >= 5.0) {
+      final int minCol = ((-origin.dx) / halfCmPx).floor() - 1;
+      final int maxCol = ((size.width - origin.dx) / halfCmPx).ceil() + 1;
+      for (int c = minCol; c <= maxCol; c++) {
+        final double x = origin.dx + c * halfCmPx;
+        final Paint p = (c == 0) ? axisPaint : ((c & 1) == 0 ? majorPaint : minorPaint);
+        canvas.drawLine(Offset(x, 0), Offset(x, size.height), p);
+      }
+
+      final int minRow = ((-origin.dy) / halfCmPx).floor() - 1;
+      final int maxRow = ((size.height - origin.dy) / halfCmPx).ceil() + 1;
+      for (int r = minRow; r <= maxRow; r++) {
+        final double y = origin.dy + r * halfCmPx;
+        final Paint p = (r == 0) ? axisPaint : ((r & 1) == 0 ? majorPaint : minorPaint);
+        canvas.drawLine(Offset(0, y), Offset(size.width, y), p);
+      }
     }
 
-    final TextPainter tp = TextPainter(
-      textDirection: TextDirection.ltr,
-      text: TextSpan(
-        text: '1cm • ${widthCm.toStringAsFixed(1)}cm',
-        style: const TextStyle(color: Color(0xFF475569), fontSize: 10, fontWeight: FontWeight.bold),
-      ),
-    )..layout();
-    tp.paint(canvas, Offset(size.width - tp.width - 8, size.height - tp.height - 6));
+    if (!vec.hasBounds || vec.stX.length < 2) return;
+
+    // 2) رسم الغرز بالمقياس الفيزيائي الفعلي (100 وحدة = 1 سم = pxPerCm بكسل)
+    final double scale = (pxPerCm / 100.0) * liveScalePreview;
+    final double rawCx = (vec.minX + vec.maxX) * 0.5;
+    final double rawCy = (vec.minY + vec.maxY) * 0.5;
+
+    canvas.save();
+    canvas.translate(origin.dx, origin.dy);
+    if (liveRotDeltaDeg.abs() > 0.05) {
+      canvas.rotate(liveRotDeltaDeg * pi / 180.0);
+    }
+
+    final int n = vec.stX.length;
+    final int palLen = max(1, vec.paletteArgb.length);
+    Path path = Path();
+    int activeColor = -1;
+    bool hasMove = false;
+    final double maxSegSq = is3D ? (120.0 * 120.0) : (145.0 * 145.0);
+    double prevRx = 0.0, prevRy = 0.0;
+
+    void flush() {
+      if (!hasMove || activeColor < 0) return;
+      final Color baseColor = Color(vec.paletteArgb[activeColor % palLen]);
+      if (is3D) {
+        final double tw = (scale * 3.8).clamp(0.95, 4.0);
+        final double shOff = (tw * 0.30).clamp(0.25, 1.2);
+        final double hiOff = (tw * 0.18).clamp(0.16, 0.70);
+
+        canvas.save();
+        canvas.translate(shOff, shOff);
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = Colors.black.withOpacity(0.26)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw * 1.08
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.restore();
+
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = Color.lerp(baseColor, Colors.black, 0.28) ?? baseColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = baseColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw * 0.76
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.save();
+        canvas.translate(-hiOff, -hiOff);
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = (Color.lerp(baseColor, Colors.white, 0.58) ?? Colors.white).withOpacity(0.76)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = (tw * 0.24).clamp(0.24, 1.05)
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+        canvas.restore();
+      } else {
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = baseColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = (scale * 1.6).clamp(0.55, 1.0)
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+      }
+      path = Path();
+      hasMove = false;
+    }
+
+    for (int i = 0; i < n; i++) {
+      final int c = vec.stColor[i];
+      if (c != activeColor) {
+        flush();
+        activeColor = c;
+      }
+      final double rx = vec.stX[i];
+      final double ry = vec.stY[i];
+      final double sx = (rx - rawCx) * scale;
+      final double sy = (ry - rawCy) * scale;
+      bool isJump = vec.stMove[i] != 0 || !hasMove;
+      if (!isJump) {
+        final double dx = rx - prevRx;
+        final double dy = ry - prevRy;
+        if (dx * dx + dy * dy > maxSegSq) {
+          isJump = true;
+        }
+      }
+      if (isJump) {
+        path.moveTo(sx, sy);
+        hasMove = true;
+      } else {
+        path.lineTo(sx, sy);
+      }
+      prevRx = rx;
+      prevRy = ry;
+    }
+    flush();
+
+    // 3) رسم إطار التحديد والمقابض التفاعلية فوق النص مباشرةً (مثل فوتوشوب وويلكم)
+    final double drawW = max(10.0, vec.maxX - vec.minX) * scale;
+    final double drawH = max(10.0, vec.maxY - vec.minY) * scale;
+    final Rect box = Rect.fromCenter(center: Offset.zero, width: drawW, height: drawH).inflate(8.0);
+
+    canvas.drawRect(
+      box,
+      Paint()
+        ..color = const Color(0xFFD4AF37).withOpacity(0.85)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4,
+    );
+
+    // 4 مقابض الزوايا للتكبير والتصغير (صفراء بارزة)
+    final corners = [
+      (_LetteringHandle.resizeTL, box.topLeft),
+      (_LetteringHandle.resizeTR, box.topRight),
+      (_LetteringHandle.resizeBR, box.bottomRight),
+      (_LetteringHandle.resizeBL, box.bottomLeft),
+    ];
+    for (final cn in corners) {
+      final bool act = activeHandle == cn.$1;
+      final double r = act ? 10.5 : 8.5;
+      canvas.drawCircle(cn.$2, r, Paint()..color = act ? const Color(0xFF56CCF2) : const Color(0xFFD4AF37));
+      canvas.drawCircle(
+        cn.$2,
+        r,
+        Paint()
+          ..color = const Color(0xFF0E131D)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6,
+      );
+    }
+
+    // مقبض الدوران العلوي (سماوي بارز مع خط وصل)
+    final Offset rotPos = Offset(0, box.top - 26.0);
+    canvas.drawLine(
+      Offset(0, box.top),
+      rotPos,
+      Paint()
+        ..color = const Color(0xFF0284C7)
+        ..strokeWidth = 1.6,
+    );
+    final bool rotAct = activeHandle == _LetteringHandle.rotate;
+    canvas.drawCircle(rotPos, rotAct ? 11.5 : 9.5, Paint()..color = rotAct ? const Color(0xFFD4AF37) : const Color(0xFF56CCF2));
+    canvas.drawCircle(
+      rotPos,
+      rotAct ? 11.5 : 9.5,
+      Paint()
+        ..color = const Color(0xFF0E131D)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6,
+    );
+    canvas.drawArc(
+      Rect.fromCircle(center: rotPos, radius: 4.5),
+      -pi * 0.7,
+      pi * 1.4,
+      false,
+      Paint()
+        ..color = const Color(0xFF0E131D)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6,
+    );
+
+    // مقبض الانحناء الأخضر التفاعلي (قوس / دائري / متعرج)
+    if (pathMode != 'linear') {
+      final double curveOffsetPx = (-pathParam * 22.0).clamp(-26.0, 26.0);
+      final Offset curvePos = Offset(0, box.bottom + 24.0 + curveOffsetPx * 0.4);
+      final Path guide = Path()
+        ..moveTo(box.left, box.bottom + 6.0)
+        ..quadraticBezierTo(0, curvePos.dy, box.right, box.bottom + 6.0);
+      canvas.drawPath(
+        guide,
+        Paint()
+          ..color = const Color(0xFF16A34A).withOpacity(0.65)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
+      );
+      final bool curveAct = activeHandle == _LetteringHandle.curve;
+      canvas.drawCircle(curvePos, curveAct ? 11.5 : 9.5, Paint()..color = curveAct ? const Color(0xFFD4AF37) : Colors.greenAccent);
+      canvas.drawCircle(
+        curvePos,
+        curveAct ? 11.5 : 9.5,
+        Paint()
+          ..color = const Color(0xFF0E131D)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6,
+      );
+    }
+
+    canvas.restore();
   }
 
   @override
-  bool shouldRepaint(covariant _CmGridPainter oldDelegate) {
-    return oldDelegate.widthCm != widthCm || oldDelegate.vec != vec;
-  }
+  bool shouldRepaint(covariant _InteractiveLetteringPainter oldDelegate) => true;
 }
 
 class TextToEmbroideryScreen extends StatefulWidget {
@@ -4272,8 +5302,8 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
     _enProFonts.clear();
     final List<EmbFontMeta> extraAr = [];
     final List<EmbFontMeta> extraEn = [];
-    final arCodeRe = RegExp(r'^A([1-5])$', caseSensitive: false);
-    final enCodeRe = RegExp(r'^E([1-5])$', caseSensitive: false);
+    final arCodeRe = RegExp(r'^A(\d+)$', caseSensitive: false);
+    final enCodeRe = RegExp(r'^E(\d+)$', caseSensitive: false);
     for (final f in fonts) {
       final code = f.nameEn.trim();
       final mAr = arCodeRe.firstMatch(code);
@@ -4291,25 +5321,32 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
       }
     }
     for (final f in extraAr) {
-      for (int s = 1; s <= 5; s++) {
-        if (!_arProFonts.containsKey(s)) {
-          _arProFonts[s] = f;
-          break;
-        }
+      int s = 1;
+      while (_arProFonts.containsKey(s)) {
+        s++;
       }
+      _arProFonts[s] = f;
     }
     for (final f in extraEn) {
-      for (int s = 1; s <= 5; s++) {
-        if (!_enProFonts.containsKey(s)) {
-          _enProFonts[s] = f;
-          break;
-        }
+      int s = 1;
+      while (_enProFonts.containsKey(s)) {
+        s++;
       }
+      _enProFonts[s] = f;
     }
     setState(() {
       _loadingCatalog = false;
     });
     await _generate();
+  }
+
+  List<int> _visibleFontSlots() {
+    final map = _arabicGroup ? _arProFonts : _enProFonts;
+    int maxSlot = 5;
+    for (final k in map.keys) {
+      if (k > maxSlot) maxSlot = k;
+    }
+    return List.generate(maxSlot, (i) => i + 1);
   }
 
   void _scheduleLiveGenerate() {
@@ -4345,7 +5382,15 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   Future<void> _generate() async {
     final txt = _textCtrl.text.trim();
-    if (txt.isEmpty) return;
+    if (txt.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _vec = null;
+          _generating = false;
+        });
+      }
+      return;
+    }
 
     setState(() {
       _generating = true;
@@ -4474,7 +5519,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           ? joinCleanPath((await getTemporaryDirectory()).path, '$safeName.$ext')
           : joinCleanPath('/storage/emulated/0/Download', '$safeName.$ext');
 
-      final res = await VectorDesignEditor.exportVectorToFile(
+      final res = await TarikProDstEncoder.exportToFile(
         _vec!,
         outPath,
         ext,
@@ -4483,14 +5528,19 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
       if (res != null && await File(res).exists()) {
         if (shareAfter) {
           await Share.shareXFiles([XFile(res)], text: '$safeName.$ext');
-        } else if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+        } else {
+          await DesignCacheManager.invalidate(res);
+          await DesignCacheManager.getOrParse(res);
+          notifyDesignFilesChanged(res);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('${tr('تم حفظ ملف التطريز في:', 'Saved embroidery file to:')}\n$res'),
               backgroundColor: const Color(0xFF2E7D32),
               duration: const Duration(seconds: 4),
             ),
           );
+          }
         }
       }
     } finally {
@@ -4596,17 +5646,17 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           ),
           Expanded(
             child: Container(
-              margin: const EdgeInsets.fromLTRB(12, 2, 12, 8),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+              margin: const EdgeInsets.fromLTRB(10, 2, 10, 6),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
               clipBehavior: Clip.antiAlias,
-              child: (_generating || _loadingCatalog)
+              child: (_loadingCatalog && _vec == null)
                   ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
                   : (_vec == null
                       ? Center(
                           child: Padding(
                             padding: const EdgeInsets.all(20),
                             child: Text(
-                              _hintMsg ?? tr('اكتب نصاً واضغط توليد', 'Enter text and tap Create'),
+                              _hintMsg ?? tr('اكتب نصاً ليظهر فوراً كغرز', 'Type text to preview stitches live'),
                               textAlign: TextAlign.center,
                               style: const TextStyle(color: Colors.black54, fontSize: 13, fontWeight: FontWeight.w600),
                             ),
@@ -4614,40 +5664,34 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                         )
                       : Stack(
                           children: [
-                            _CmGridAndHandlesOverlay(
-                              vec: _vec,
-                              widthCm: _widthCm,
-                              rotationDeg: _rotationDeg,
-                              pathMode: _pathMode,
-                              pathParam: _pathParam,
-                              onWidthCmDrag: (w) {
-                                setState(() {
-                                  _widthCm = w;
-                                  _widthCmCtrl.text = w.toStringAsFixed(1);
-                                });
-                              },
-                              onRotationDrag: (r) => setState(() => _rotationDeg = r),
-                              onPathParamDrag: (p) => setState(() => _pathParam = p),
-                              onInteractionEnd: _scheduleLiveGenerate,
-                            ),
-                            InteractiveViewer(
-                              minScale: 0.7,
-                              maxScale: 10.0,
-                              child: CustomPaint(
-                                painter: _VectorStitchPainter(
-                                  data: _vec!,
-                                  limit: _vec!.stX.length,
-                                  showNeedle: false,
-                                  is3D: _is3DPreview,
-                                ),
-                                size: Size.infinite,
+                            Positioned.fill(
+                              child: _InteractiveLetteringCanvas(
+                                vec: _vec!,
+                                widthCm: _widthCm,
+                                rotationDeg: _rotationDeg,
+                                pathMode: _pathMode,
+                                pathParam: _pathParam,
+                                is3D: _is3DPreview,
+                                onWidthCmDrag: (w) {
+                                  setState(() {
+                                    _widthCm = w;
+                                    _widthCmCtrl.text = w.toStringAsFixed(1);
+                                    if (_lockAspect) _customHeightCm = null;
+                                  });
+                                },
+                                onRotationDrag: (r) => setState(() => _rotationDeg = r),
+                                onPathParamDrag: (p) {
+                                  setState(() => _pathParam = p);
+                                  _scheduleLiveGenerate();
+                                },
+                                onInteractionEnd: _generate,
                               ),
                             ),
                             Positioned(
-                              top: 8,
+                              top: 6,
                               left: 8,
                               child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                 decoration: BoxDecoration(
                                   color: const Color(0xFF0E131D).withOpacity(0.84),
                                   borderRadius: BorderRadius.circular(10),
@@ -4659,6 +5703,23 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                 ),
                               ),
                             ),
+                            if (_generating)
+                              Positioned(
+                                top: 8,
+                                right: 8,
+                                child: Container(
+                                  padding: const EdgeInsets.all(5),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF0E131D).withOpacity(0.84),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)),
+                                  ),
+                                ),
+                              ),
                           ],
                         )),
             ),
@@ -4719,17 +5780,18 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                         ),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [1, 2, 3, 4, 5].map((numIdx) {
-                              final bool sel = _fontNumber == numIdx;
-                              final String code = '${_arabicGroup ? 'A' : 'E'}$numIdx';
-                              final Color activeCol = _arabicGroup ? const Color(0xFFD4AF37) : const Color(0xFF56CCF2);
-                              final EmbFontMeta? slotMeta = _arabicGroup ? _arProFonts[numIdx] : _enProFonts[numIdx];
-                              final bool isWilcomSlot = slotMeta != null && slotMeta.id.startsWith('wilcom_');
-                              return Expanded(
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: SizedBox(
+                            height: 40,
+                            child: ListView(
+                              scrollDirection: Axis.horizontal,
+                              children: _visibleFontSlots().map((numIdx) {
+                                final bool sel = _fontNumber == numIdx;
+                                final String code = '${_arabicGroup ? 'A' : 'E'}$numIdx';
+                                final Color activeCol = _arabicGroup ? const Color(0xFFD4AF37) : const Color(0xFF56CCF2);
+                                final EmbFontMeta? slotMeta = _arabicGroup ? _arProFonts[numIdx] : _enProFonts[numIdx];
+                                final bool isWilcomSlot = slotMeta != null && slotMeta.id.startsWith('wilcom_');
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 2.5),
                                   child: InkWell(
                                     onTap: () {
                                       if (_fontNumber != numIdx) {
@@ -4739,7 +5801,8 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                     },
                                     borderRadius: BorderRadius.circular(10),
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(vertical: 7),
+                                      constraints: const BoxConstraints(minWidth: 46),
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                                       decoration: BoxDecoration(
                                         color: sel ? activeCol : Colors.white10,
                                         borderRadius: BorderRadius.circular(10),
@@ -4749,6 +5812,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                         ),
                                       ),
                                       child: Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           Text(
@@ -4757,7 +5821,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                             style: TextStyle(
                                               color: sel ? Colors.black : Colors.white,
                                               fontWeight: FontWeight.bold,
-                                              fontSize: 13,
+                                              fontSize: 12.5,
                                             ),
                                           ),
                                           if (isWilcomSlot)
@@ -4774,9 +5838,9 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                       ),
                                     ),
                                   ),
-                                ),
-                              );
-                            }).toList(),
+                                );
+                              }).toList(),
+                            ),
                           ),
                         ),
                       ],
@@ -5210,7 +6274,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
   }
 
   Future<void> _load() async {
-    final v = widget.initialVector ?? (widget.design != null ? await VectorDesignLoader.load(widget.design!.filePath) : null);
+    final v = widget.initialVector ?? (widget.design != null ? await loadAnyVectorDesign(widget.design!.filePath) : null);
     if (!mounted) return;
     if (v != null && v.stX.length >= 2) {
       final objs = TarikProObjectEditor.segment(v);
@@ -5818,11 +6882,13 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
         baseName = '${widget.defaultBaseName}_${DateTime.now().millisecondsSinceEpoch}';
       }
 
-      String? res = await VectorDesignEditor.exportVectorToFile(_composed!, joinCleanPath(outDir, '$baseName.$targetExt'), targetExt, baseName: baseName);
-      res ??= await VectorDesignEditor.exportVectorToFile(_composed!, '/storage/emulated/0/Download/$baseName.$targetExt', targetExt, baseName: baseName);
+      String? res = await TarikProDstEncoder.exportToFile(_composed!, joinCleanPath(outDir, '$baseName.$targetExt'), targetExt, baseName: baseName);
+      res ??= await TarikProDstEncoder.exportToFile(_composed!, '/storage/emulated/0/Download/$baseName.$targetExt', targetExt, baseName: baseName);
 
       if (res != null && await File(res).exists()) {
+        await DesignCacheManager.invalidate(res);
         await DesignCacheManager.getOrParse(res);
+        notifyDesignFilesChanged(res);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -7078,4 +8144,4 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - Pro v4
+// Tarik emb - Pro v6.2 (Protected)
