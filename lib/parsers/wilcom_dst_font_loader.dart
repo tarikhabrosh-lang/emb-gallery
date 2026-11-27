@@ -3,8 +3,10 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
 
+typedef _JsonMap = Map<String, dynamic>;
+
 /// محرك قراءة وتقطيع ملفات الفونطات العربية الأصلية بصيغة Tajima DST (A1, a3, a4)
-/// تم التحقق من البنية الفعلية للملفات الثلاثة: 6 صفوف = 133 حرفاً (18 + 21 + 23 + 23 + 38 + 10)
+/// البنية الفعلية للملفات الثلاثة: 6 صفوف = 133 حرفاً (18 + 21 + 23 + 23 + 38 + 10)
 class WilcomDstFontLoader {
   static final Map<String, String> _jsonCache = {};
 
@@ -69,12 +71,12 @@ class WilcomDstFontLoader {
 
   // فهارس الحروف المستقرة على السطر لحساب خط السطر (Baseline) بدقة
   static const List<List<int>> _baselineAnchorIndices = [
-    [0, 1, 3, 4, 5, 6, 10, 11], // الصف 1: ا أ آ ب ت ث د ذ
-    [0, 1, 4, 6, 10, 11, 18, 19], // الصف 2: ط ظ ف ك ه ة لا لأ
-    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19], // الصف 3
-    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19], // الصف 4
-    [0, 1, 3, 4, 5, 6, 10, 11, 18, 19, 22, 24, 28, 29], // الصف 5
-    [1, 2, 3, 4, 5, 6, 7, 8, 9], // الصف 6
+    [0, 1, 3, 4, 5, 6, 10, 11],
+    [0, 1, 4, 6, 10, 11, 18, 19],
+    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19],
+    [0, 1, 2, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19],
+    [0, 1, 3, 4, 5, 6, 10, 11, 18, 19, 22, 24, 28, 29],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9],
   ];
 
   /// تحميل ملف DST من الأصول وتحويله مع التخزين المؤقت
@@ -123,11 +125,10 @@ class WilcomDstFontLoader {
     final rows = _clusterIntoRows(runs, 6);
     if (rows.length != 6) return null;
 
-    // التحقق التلقائي من عدد حروف الصف الخامس (A1 و a3 و a4 جميعها تحتوي على 38 حرفاً)
     final row5NaturalClusters = _mergeOverlappingClusters(rows[4]);
     final bool use38Row5 = row5HasFinalYehHamza || row5NaturalClusters.length >= 38;
 
-    final rowKeyLists = <List<String>>[
+    final List<List<String>> rowKeyLists = [
       _row1Keys,
       _row2Keys,
       _row3Keys,
@@ -136,7 +137,7 @@ class WilcomDstFontLoader {
       _row6Keys,
     ];
 
-    final Map<String, Map<String, dynamic>> glyphsMap = {};
+    final Map<String, _JsonMap> glyphsMap = {};
     double capH = 180.0;
 
     for (int rIdx = 0; rIdx < 6; rIdx++) {
@@ -209,7 +210,7 @@ class WilcomDstFontLoader {
       }
     }
 
-    final Map<String, dynamic> fontObj = {
+    final _JsonMap fontObj = {
       'nameEn': nameEn,
       'rtl': true,
       'nativeStitch': true,
@@ -434,13 +435,13 @@ class WilcomDstFontLoader {
     return ys[ys.length ~/ 2];
   }
 
-  static Map<String, dynamic> _buildGlyphJson(
+  static _JsonMap _buildGlyphJson(
     _GlyphCluster cluster,
     double rowBaselineY,
   ) {
     final double ox = cluster.minX;
     final double w = math.max(8.0, cluster.maxX - cluster.minX);
-    final List> elements = [];
+    final List<_JsonMap> elements = [];
 
     for (final run in cluster.runs) {
       final List<double> normPts = List<double>.filled(run.pts.length, 0.0);
@@ -458,23 +459,24 @@ class WilcomDstFontLoader {
     };
   }
 
-  static Map<String, dynamic> _synthesizeFinalYehHamza(
-    Map<String, dynamic> baseYeh,
-    Map<String, dynamic>? hamzaGlyph,
+  static _JsonMap _synthesizeFinalYehHamza(
+    _JsonMap baseYeh,
+    _JsonMap? hamzaGlyph,
     double capH,
   ) {
     final double baseW = (baseYeh['w'] as num).toDouble();
-    final List<dynamic> baseEls = (baseYeh['e'] as List<dynamic>);
-    final List> outEls = baseEls
-        .map((e) => Map<String, dynamic>.from(e as Map))
-        .toList();
+    final List<dynamic> baseEls = baseYeh['e'] as List<dynamic>;
+    final List<_JsonMap> outEls = [];
+    for (final el in baseEls) {
+      outEls.add(_JsonMap.from(el as Map));
+    }
 
     if (hamzaGlyph != null) {
       final double hW = (hamzaGlyph['w'] as num).toDouble();
-      final List<dynamic> hEls = (hamzaGlyph['e'] as List<dynamic>);
+      final List<dynamic> hEls = hamzaGlyph['e'] as List<dynamic>;
       double hMinY = double.infinity, hMaxY = -double.infinity;
       for (final el in hEls) {
-        final pts = (el['p'] as List<dynamic>);
+        final pts = el['p'] as List<dynamic>;
         for (int i = 1; i < pts.length; i += 2) {
           final y = (pts[i] as num).toDouble();
           if (y < hMinY) hMinY = y;
@@ -486,7 +488,7 @@ class WilcomDstFontLoader {
         final double targetBottomY = -capH * 0.38;
         final double shiftY = targetBottomY - hMaxY;
         for (final el in hEls) {
-          final pts = (el['p'] as List<dynamic>);
+          final pts = el['p'] as List<dynamic>;
           final List<double> shifted = List<double>.filled(pts.length, 0.0);
           for (int i = 0; i < pts.length; i += 2) {
             shifted[i] = _r1((pts[i] as num).toDouble() + shiftX);
