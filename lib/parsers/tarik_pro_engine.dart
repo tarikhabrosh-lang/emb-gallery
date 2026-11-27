@@ -6,100 +6,438 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'emb_parser.dart';
 import 'wilcom_dst_font_loader.dart';
 
-/// كتالوج الفونطات الموحّد:
-/// - يقرأ الفونطات العربية الجديدة (A1, A3, A4) مباشرةً من ملفات .DST الأصلية في assets/emb_fonts/
-/// - يحافظ على فونط A2 (رسم أبو وسيم) وفونطات E1..E4 المدمجة في emb_parser.dart بنسبة 100% دون تعديلها
+/// خزنة تشفير الخطوط الخاصة بـ Tarik EMB (ChaCha20 RFC 8439 + HMAC-SHA256):
+/// - تفك تشفير ملفات الخطوط المحمية (.tfnt) داخل الذاكرة العشوائية (RAM) فقط بدون حفظ أي ملف .DST مكشوف على الجهاز
+/// - ترفض أي ملف تم العبث به أو تعديل بايت واحد فيه عبر التحقق من توقيع HMAC-SHA256
+class TarikFontVault {
+  static const List<int> _seedA = [
+    0x7A, 0x3C, 0x91, 0xE4, 0x52, 0xB8, 0x0F, 0x6D,
+    0xC3, 0x19, 0x84, 0x4E, 0xA7, 0x25, 0xF1, 0x68,
+    0x3B, 0xD2, 0x59, 0x80, 0x14, 0xCE, 0x77, 0xA2,
+    0x46, 0x9B, 0x0D, 0xF5, 0x2E, 0x83, 0x61, 0xB9,
+  ];
+
+  static const List<int> _seedB = [
+    0x2E, 0x5A, 0xC4, 0x17, 0x89, 0x3D, 0xF2, 0x41,
+    0x6B, 0x90, 0x2F, 0xD5, 0x1C, 0x7E, 0x4A, 0xB3,
+    0x85, 0x11, 0xE6, 0x39, 0xC0, 0x54, 0x28, 0x7F,
+    0xA1, 0x4C, 0x96, 0x23, 0xDE, 0x67, 0x18, 0x50,
+  ];
+
+  static const List<int> _sha256K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  static Uint8List _deriveMasterKey() {
+    final out = Uint8List(32);
+    for (int i = 0; i < 32; i++) {
+      out[i] = (_seedA[i] ^ _seedB[(i * 7 + 3) & 31] ^ ((i * 29 + 0x5B) & 0xFF)) & 0xFF;
+    }
+    return out;
+  }
+
+  static int _rotl32(int v, int c) => ((v << c) & 0xFFFFFFFF) | ((v & 0xFFFFFFFF) >>> (32 - c));
+  static int _rotr32(int v, int c) => ((v & 0xFFFFFFFF) >>> c) | ((v << (32 - c)) & 0xFFFFFFFF);
+
+  static int _readU32LE(Uint8List b, int off) =>
+      b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24);
+
+  static void _qr(Uint32List s, int a, int b, int c, int d) {
+    s[a] = (s[a] + s[b]) & 0xFFFFFFFF;
+    s[d] = _rotl32(s[d] ^ s[a], 16);
+    s[c] = (s[c] + s[d]) & 0xFFFFFFFF;
+    s[b] = _rotl32(s[b] ^ s[c], 12);
+    s[a] = (s[a] + s[b]) & 0xFFFFFFFF;
+    s[d] = _rotl32(s[d] ^ s[a], 8);
+    s[c] = (s[c] + s[d]) & 0xFFFFFFFF;
+    s[b] = _rotl32(s[b] ^ s[c], 7);
+  }
+
+  static Uint8List _chacha20Block(Uint8List key, int counter, Uint8List nonce) {
+    final state = Uint32List(16);
+    state[0] = 0x61707865;
+    state[1] = 0x3320646e;
+    state[2] = 0x79622d32;
+    state[3] = 0x6b206574;
+    for (int i = 0; i < 8; i++) {
+      state[4 + i] = _readU32LE(key, i * 4);
+    }
+    state[12] = counter & 0xFFFFFFFF;
+    state[13] = _readU32LE(nonce, 0);
+    state[14] = _readU32LE(nonce, 4);
+    state[15] = _readU32LE(nonce, 8);
+
+    final w = Uint32List.fromList(state);
+    for (int r = 0; r < 10; r++) {
+      _qr(w, 0, 4, 8, 12);
+      _qr(w, 1, 5, 9, 13);
+      _qr(w, 2, 6, 10, 14);
+      _qr(w, 3, 7, 11, 15);
+      _qr(w, 0, 5, 10, 15);
+      _qr(w, 1, 6, 11, 12);
+      _qr(w, 2, 7, 8, 13);
+      _qr(w, 3, 4, 9, 14);
+    }
+
+    final out = Uint8List(64);
+    for (int i = 0; i < 16; i++) {
+      final int v = (w[i] + state[i]) & 0xFFFFFFFF;
+      out[i * 4] = v & 0xFF;
+      out[i * 4 + 1] = (v >>> 8) & 0xFF;
+      out[i * 4 + 2] = (v >>> 16) & 0xFF;
+      out[i * 4 + 3] = (v >>> 24) & 0xFF;
+    }
+    return out;
+  }
+
+  static Uint8List _chacha20Xor(Uint8List key, int startCounter, Uint8List nonce, Uint8List input) {
+    final out = Uint8List(input.length);
+    int pos = 0;
+    int ctr = startCounter;
+    while (pos < input.length) {
+      final ks = _chacha20Block(key, ctr, nonce);
+      ctr = (ctr + 1) & 0xFFFFFFFF;
+      final int chunk = math.min(64, input.length - pos);
+      for (int i = 0; i < chunk; i++) {
+        out[pos + i] = input[pos + i] ^ ks[i];
+      }
+      pos += chunk;
+    }
+    return out;
+  }
+
+  static Uint8List _sha256(Uint8List data) {
+    int h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    int h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+
+    final int origLen = data.length;
+    final int rem = (origLen + 1) % 64;
+    final int padZeros = rem <= 56 ? (56 - rem) : (120 - rem);
+    final int totalLen = origLen + 1 + padZeros + 8;
+    final padded = Uint8List(totalLen);
+    padded.setRange(0, origLen, data);
+    padded[origLen] = 0x80;
+
+    final int bitLen = origLen * 8;
+    final int hiBits = bitLen >>> 32;
+    final int loBits = bitLen & 0xFFFFFFFF;
+    final int lenOff = totalLen - 8;
+    padded[lenOff] = (hiBits >>> 24) & 0xFF;
+    padded[lenOff + 1] = (hiBits >>> 16) & 0xFF;
+    padded[lenOff + 2] = (hiBits >>> 8) & 0xFF;
+    padded[lenOff + 3] = hiBits & 0xFF;
+    padded[lenOff + 4] = (loBits >>> 24) & 0xFF;
+    padded[lenOff + 5] = (loBits >>> 16) & 0xFF;
+    padded[lenOff + 6] = (loBits >>> 8) & 0xFF;
+    padded[lenOff + 7] = loBits & 0xFF;
+
+    final w = Uint32List(64);
+    for (int off = 0; off < totalLen; off += 64) {
+      for (int i = 0; i < 16; i++) {
+        final int j = off + i * 4;
+        w[i] = (padded[j] << 24) | (padded[j + 1] << 16) | (padded[j + 2] << 8) | padded[j + 3];
+      }
+      for (int i = 16; i < 64; i++) {
+        final int s0 = _rotr32(w[i - 15], 7) ^ _rotr32(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        final int s1 = _rotr32(w[i - 2], 17) ^ _rotr32(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 0xFFFFFFFF;
+      }
+
+      int a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (int i = 0; i < 64; i++) {
+        final int s1 = _rotr32(e, 6) ^ _rotr32(e, 11) ^ _rotr32(e, 25);
+        final int ch = (e & f) ^ ((~e & 0xFFFFFFFF) & g);
+        final int t1 = (h + s1 + ch + _sha256K[i] + w[i]) & 0xFFFFFFFF;
+        final int s0 = _rotr32(a, 2) ^ _rotr32(a, 13) ^ _rotr32(a, 22);
+        final int maj = (a & b) ^ (a & c) ^ (b & c);
+        final int t2 = (s0 + maj) & 0xFFFFFFFF;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & 0xFFFFFFFF;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & 0xFFFFFFFF;
+      }
+
+      h0 = (h0 + a) & 0xFFFFFFFF;
+      h1 = (h1 + b) & 0xFFFFFFFF;
+      h2 = (h2 + c) & 0xFFFFFFFF;
+      h3 = (h3 + d) & 0xFFFFFFFF;
+      h4 = (h4 + e) & 0xFFFFFFFF;
+      h5 = (h5 + f) & 0xFFFFFFFF;
+      h6 = (h6 + g) & 0xFFFFFFFF;
+      h7 = (h7 + h) & 0xFFFFFFFF;
+    }
+
+    final out = Uint8List(32);
+    final hs = [h0, h1, h2, h3, h4, h5, h6, h7];
+    for (int i = 0; i < 8; i++) {
+      final int v = hs[i];
+      out[i * 4] = (v >>> 24) & 0xFF;
+      out[i * 4 + 1] = (v >>> 16) & 0xFF;
+      out[i * 4 + 2] = (v >>> 8) & 0xFF;
+      out[i * 4 + 3] = v & 0xFF;
+    }
+    return out;
+  }
+
+  static Uint8List _hmacSha256(Uint8List key, Uint8List msg) {
+    final k = Uint8List(64);
+    if (key.length > 64) {
+      final hk = _sha256(key);
+      k.setRange(0, 32, hk);
+    } else {
+      k.setRange(0, key.length, key);
+    }
+
+    final inner = Uint8List(64 + msg.length);
+    for (int i = 0; i < 64; i++) {
+      inner[i] = k[i] ^ 0x36;
+    }
+    inner.setRange(64, inner.length, msg);
+    final innerHash = _sha256(inner);
+
+    final outer = Uint8List(96);
+    for (int i = 0; i < 64; i++) {
+      outer[i] = k[i] ^ 0x5c;
+    }
+    outer.setRange(64, 96, innerHash);
+    return _sha256(outer);
+  }
+
+  static bool isEncryptedTfnt(Uint8List bytes) {
+    return bytes.length >= 53 &&
+        bytes[0] == 0x54 && // T
+        bytes[1] == 0x46 && // F
+        bytes[2] == 0x4E && // N
+        bytes[3] == 0x54 && // T
+        bytes[4] == 0x01;
+  }
+
+  /// فك تشفير ملف .tfnt داخل الذاكرة والتحقق من توقيعه (يرجع null عند أي تلاعب)
+  static Uint8List? decrypt(Uint8List blob) {
+    if (!isEncryptedTfnt(blob)) return null;
+    final key = _deriveMasterKey();
+    final header = Uint8List.sublistView(blob, 0, 20);
+    final nonce = Uint8List.sublistView(blob, 8, 20);
+    final tag = Uint8List.sublistView(blob, 20, 52);
+    final cipher = Uint8List.sublistView(blob, 52);
+
+    final macKeyBlock = _chacha20Block(key, 0, nonce);
+    final macKey = Uint8List.sublistView(macKeyBlock, 0, 32);
+
+    final authInput = Uint8List(header.length + cipher.length);
+    authInput.setRange(0, header.length, header);
+    authInput.setRange(header.length, authInput.length, cipher);
+    final expectedTag = _hmacSha256(macKey, authInput);
+
+    int diff = 0;
+    for (int i = 0; i < 32; i++) {
+      diff |= (tag[i] ^ expectedTag[i]);
+    }
+    if (diff != 0) return null;
+
+    return _chacha20Xor(key, 1, nonce, cipher);
+  }
+}
+
+/// كتالوج الفونطات المحمي والخاص بمالك التطبيق فقط:
+/// 1) يحافظ على فونط A2 (رسم أبو وسيم) وفونطات E1..E4 المدمجة في emb_parser.dart
+/// 2) يكتشف تلقائياً فقط الخطوط المدمجة داخل مجلد assets/emb_fonts/ (المشفّرة .tfnt بأولوية أولى، ثم .dst)
+/// 3) مغلق تماماً أمام المستخدمين — لا يمكن للعميل إضافة أو تعديل أو استخراج الخطوط من التطبيق
 class TarikProFontCatalog {
   static List<EmbFontMeta>? _cachedIndex;
   static final Map<String, String> _rawFontCache = {};
 
-  static const EmbFontMeta _metaA1 = EmbFontMeta(
-    id: 'wilcom_a1',
-    nameAr: 'A1',
-    nameEn: 'A1',
-    rtl: true,
-    capH: 260.0,
-    spaceW: 150.0,
-    letterSp: 21.0,
-    lineH: 385.0,
-    minScale: 0.40,
-    maxScale: 2.8,
-    glyphCount: 133,
-    file: 'dst_asset://A1.DST',
-  );
+  static Future<List<String>> _discoverBundledFontAssets() async {
+    final Set<String> found = {};
 
-  static const EmbFontMeta _metaA3 = EmbFontMeta(
-    id: 'wilcom_a3',
-    nameAr: 'A3',
-    nameEn: 'A3',
-    rtl: true,
-    capH: 260.0,
-    spaceW: 150.0,
-    letterSp: 21.0,
-    lineH: 385.0,
-    minScale: 0.40,
-    maxScale: 2.8,
-    glyphCount: 133,
-    file: 'dst_asset://a3.DST',
-  );
+    try {
+      final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      for (final assetPath in manifest.listAssets()) {
+        final lower = assetPath.toLowerCase();
+        if (lower.startsWith('assets/emb_fonts/') &&
+            (lower.endsWith('.tfnt') || lower.endsWith('.dst'))) {
+          found.add(assetPath);
+        }
+      }
+    } catch (_) {
+      try {
+        final raw = await rootBundle.loadString('AssetManifest.json');
+        final Map<String, dynamic> map = jsonDecode(raw) as Map<String, dynamic>;
+        for (final key in map.keys) {
+          final lower = key.toLowerCase();
+          if (lower.startsWith('assets/emb_fonts/') &&
+              (lower.endsWith('.tfnt') || lower.endsWith('.dst'))) {
+            found.add(key);
+          }
+        }
+      } catch (_) {}
+    }
 
-  static const EmbFontMeta _metaA4 = EmbFontMeta(
-    id: 'wilcom_a4',
-    nameAr: 'A4',
-    nameEn: 'A4',
-    rtl: true,
-    capH: 260.0,
-    spaceW: 150.0,
-    letterSp: 21.0,
-    lineH: 385.0,
-    minScale: 0.40,
-    maxScale: 2.8,
-    glyphCount: 133,
-    file: 'dst_asset://a4.DST',
-  );
+    if (found.isEmpty) {
+      found.addAll(const [
+        'assets/emb_fonts/A1.tfnt',
+        'assets/emb_fonts/a3.tfnt',
+        'assets/emb_fonts/a4.tfnt',
+        'assets/emb_fonts/A1.DST',
+        'assets/emb_fonts/a3.DST',
+        'assets/emb_fonts/a4.DST',
+      ]);
+    }
+
+    // الأولوية دائماً للملفات المشفّرة (.tfnt) قبل أي ملف .dst
+    final list = found.toList()
+      ..sort((a, b) {
+        final aEnc = a.toLowerCase().endsWith('.tfnt') ? 0 : 1;
+        final bEnc = b.toLowerCase().endsWith('.tfnt') ? 0 : 1;
+        if (aEnc != bEnc) return aEnc.compareTo(bEnc);
+        return a.toLowerCase().compareTo(b.toLowerCase());
+      });
+    return list;
+  }
+
+  static String _stemOfPath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final fileName = normalized.split('/').last;
+    return fileName.replaceAll(RegExp(r'\.[^.]+$'), '').trim();
+  }
+
+  static String _safeIdHash(String input) {
+    int h = 0x811c9dc5;
+    for (int i = 0; i < input.length; i++) {
+      h ^= input.codeUnitAt(i);
+      h = (h * 0x01000193) & 0xFFFFFFFF;
+    }
+    return h.toRadixString(16);
+  }
 
   static Future<List<EmbFontMeta>> loadIndex() async {
     if (_cachedIndex != null) return _cachedIndex!;
 
     final List<EmbFontMeta> base = await InkStitchFontCatalog.loadIndex();
-    final List<EmbFontMeta> merged = [];
+    final Map<int, EmbFontMeta> arSlots = {};
+    final List<EmbFontMeta> enFonts = [];
     final Set<String> seenIds = {};
-    final Set<String> seenCodes = {};
+    final Set<String> seenStems = {};
 
-    void addUnique(EmbFontMeta f) {
+    // 1) تثبيت A2 الأصلي المرسوم يدوياً من emb_parser.dart أولاً
+    for (final f in base) {
       final code = f.nameEn.trim().toUpperCase();
-      if (seenIds.contains(f.id) || (code.isNotEmpty && seenCodes.contains(code))) {
-        return;
-      }
-      merged.add(f);
-      seenIds.add(f.id);
-      if (code.isNotEmpty) seenCodes.add(code);
-    }
-
-    // 1) A1 من ملف A1.DST
-    addUnique(_metaA1);
-
-    // 2) A2 الأصلي المحفوظ من emb_parser.dart أولاً
-    for (final f in base) {
-      if (f.nameEn.trim().toUpperCase() == 'A2' || f.id == 'wilcom_a2') {
-        addUnique(f);
+      if (code == 'A2' || f.id == 'wilcom_a2') {
+        arSlots[2] = f;
+        seenIds.add(f.id);
+        seenStems.add('a2');
       }
     }
 
-    // 3) A3 و A4 من ملفي a3.DST و a4.DST
-    addUnique(_metaA3);
-    addUnique(_metaA4);
-
-    // 4) بقية الفونطات (E1..E4 وأي خطوط إضافية)
-    for (final f in base) {
-      addUnique(f);
+    int nextFreeArSlot() {
+      int s = 1;
+      while (arSlots.containsKey(s)) {
+        s++;
+      }
+      return s;
     }
 
-    _cachedIndex = merged;
+    final RegExp arNumRe = RegExp(r'^A(\d+)$', caseSensitive: false);
+    final bundledAssets = await _discoverBundledFontAssets();
+    final List<String> unnamedAssets = [];
+
+    // 2) الخطوط المرقّمة داخل assets/emb_fonts/ (A1.tfnt, a3.tfnt, a4.tfnt, A5.tfnt...)
+    for (final assetPath in bundledAssets) {
+      final stem = _stemOfPath(assetPath);
+      final stemLow = stem.toLowerCase();
+      if (seenStems.contains(stemLow)) continue;
+
+      final m = arNumRe.firstMatch(stem);
+      if (m != null) {
+        final int slot = int.parse(m.group(1)!);
+        if (slot == 2 && arSlots.containsKey(2)) continue;
+        if (!arSlots.containsKey(slot)) {
+          final String code = 'A$slot';
+          final String id = 'wilcom_a$slot';
+          final bool isEnc = assetPath.toLowerCase().endsWith('.tfnt');
+          arSlots[slot] = EmbFontMeta(
+            id: id,
+            nameAr: code,
+            nameEn: code,
+            rtl: true,
+            capH: 260.0,
+            spaceW: 150.0,
+            letterSp: 21.0,
+            lineH: 385.0,
+            minScale: 0.40,
+            maxScale: 2.8,
+            glyphCount: 133,
+            file: '${isEnc ? 'tfnt_asset://' : 'dst_asset://'}$assetPath',
+          );
+          seenIds.add(id);
+          seenStems.add(stemLow);
+        }
+      } else {
+        unnamedAssets.add(assetPath);
+      }
+    }
+
+    // 3) أي خطوط إضافية مسماة بأسماء حرة داخل assets/emb_fonts/ (محمية داخل الـ APK فقط)
+    for (final assetPath in unnamedAssets) {
+      final stem = _stemOfPath(assetPath);
+      final stemLow = stem.toLowerCase();
+      if (seenStems.contains(stemLow)) continue;
+      final int slot = nextFreeArSlot();
+      final String code = 'A$slot';
+      final String id = 'wilcom_asset_${_safeIdHash(assetPath)}';
+      final bool isEnc = assetPath.toLowerCase().endsWith('.tfnt');
+      arSlots[slot] = EmbFontMeta(
+        id: id,
+        nameAr: stem.isNotEmpty ? stem : code,
+        nameEn: code,
+        rtl: true,
+        capH: 260.0,
+        spaceW: 150.0,
+        letterSp: 21.0,
+        lineH: 385.0,
+        minScale: 0.40,
+        maxScale: 2.8,
+        glyphCount: 133,
+        file: '${isEnc ? 'tfnt_asset://' : 'dst_asset://'}$assetPath',
+      );
+      seenIds.add(id);
+      seenStems.add(stemLow);
+    }
+
+    // 4) بقية الخطوط المدمجة من emb_parser.dart (E1..E4)
+    for (final f in base) {
+      if (seenIds.contains(f.id)) continue;
+      if (f.rtl) {
+        final int slot = nextFreeArSlot();
+        arSlots[slot] = f;
+        seenIds.add(f.id);
+      } else {
+        enFonts.add(f);
+        seenIds.add(f.id);
+      }
+    }
+
+    final List<int> sortedArKeys = arSlots.keys.toList()..sort();
+    _cachedIndex = [
+      for (final k in sortedArKeys) arSlots[k]!,
+      ...enFonts,
+    ];
     return _cachedIndex!;
   }
 
@@ -108,44 +446,38 @@ class TarikProFontCatalog {
     if (cached != null) return cached;
 
     String? raw;
-    if (meta.id == 'wilcom_a1') {
+    if (meta.file.startsWith('tfnt_asset://')) {
+      final assetPath = meta.file.substring('tfnt_asset://'.length);
+      final double overlap = meta.nameEn.toUpperCase() == 'A3' ? 0.028 : 0.032;
+      try {
+        final bd = await rootBundle.load(assetPath);
+        final Uint8List encBytes = bd.buffer.asUint8List(bd.offsetInBytes, bd.lengthInBytes);
+        raw = await Isolate.run(() {
+          final Uint8List? plainDst = TarikFontVault.decrypt(encBytes);
+          if (plainDst == null || plainDst.length <= 512) return null;
+          return WilcomDstFontLoader.parseDstBytesToFontJson(
+            bytes: plainDst,
+            nameEn: meta.nameEn,
+            row5HasFinalYehHamza: true,
+            joinOverlapRatio: overlap,
+          );
+        });
+      } catch (_) {}
+    } else if (meta.file.startsWith('dst_asset://')) {
+      final assetPath = meta.file.substring('dst_asset://'.length);
+      final double overlap = meta.nameEn.toUpperCase() == 'A3' ? 0.028 : 0.032;
+      final List<String> candidates = [assetPath];
+      if (assetPath.endsWith('.DST')) {
+        candidates.add('${assetPath.substring(0, assetPath.length - 4)}.dst');
+      } else if (assetPath.endsWith('.dst')) {
+        candidates.add('${assetPath.substring(0, assetPath.length - 4)}.DST');
+      }
       raw = await WilcomDstFontLoader.loadFontJson(
-        fontId: 'wilcom_a1',
-        nameEn: 'A1',
-        assetCandidates: const [
-          'assets/emb_fonts/A1.DST',
-          'assets/emb_fonts/a1.dst',
-          'assets/emb_fonts/A1.dst',
-          'assets/emb_fonts/a1.DST',
-        ],
+        fontId: meta.id,
+        nameEn: meta.nameEn,
+        assetCandidates: candidates,
         row5HasFinalYehHamza: true,
-        joinOverlapRatio: 0.032,
-      );
-    } else if (meta.id == 'wilcom_a3') {
-      raw = await WilcomDstFontLoader.loadFontJson(
-        fontId: 'wilcom_a3',
-        nameEn: 'A3',
-        assetCandidates: const [
-          'assets/emb_fonts/a3.DST',
-          'assets/emb_fonts/A3.DST',
-          'assets/emb_fonts/a3.dst',
-          'assets/emb_fonts/A3.dst',
-        ],
-        row5HasFinalYehHamza: true,
-        joinOverlapRatio: 0.028,
-      );
-    } else if (meta.id == 'wilcom_a4') {
-      raw = await WilcomDstFontLoader.loadFontJson(
-        fontId: 'wilcom_a4',
-        nameEn: 'A4',
-        assetCandidates: const [
-          'assets/emb_fonts/a4.DST',
-          'assets/emb_fonts/A4.DST',
-          'assets/emb_fonts/a4.dst',
-          'assets/emb_fonts/A4.dst',
-        ],
-        row5HasFinalYehHamza: true,
-        joinOverlapRatio: 0.032,
+        joinOverlapRatio: overlap,
       );
     } else {
       raw = await InkStitchFontCatalog.loadRawFontJson(meta);
