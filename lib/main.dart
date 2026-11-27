@@ -98,7 +98,7 @@ Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
     }
   } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
     result = await DahaoParser.parseFile(path, maxCanvas: 720.0);
-    if (result != null && lower.endsWith('.dha')) {
+    if (result != null) {
       final calVec = await loadAnyVectorDesign(path);
       if (calVec != null && calVec.stX.length >= 2) {
         final calPng = await TarikPro3DRenderer.renderVectorToPng(
@@ -157,7 +157,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v8');
+    final dir = Directory('${supportDir.path}/design_cache_v9');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -2053,7 +2053,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   bool _isSharing = false;
   bool _isExportingDst = false;
   String? _lastExportedPath;
-  Uint8List? _sharpPreviewBytes;
+  VectorDesignData? _liveVec;
   bool _loadingSharp = false;
   bool _detail3D = false;
   int _decorTheme = 0; // 0=ذهبي ولؤلؤي، 1=فضي ولؤلؤي، 2=لؤلؤي، 3=ملوّن
@@ -2061,24 +2061,21 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSharpPreview();
+    _loadLiveVector();
   }
 
-  Future<void> _loadSharpPreview() async {
+  Future<void> _loadLiveVector() async {
     final path = widget.design.filePath;
     if (!VectorDesignLoader.supportsVectorView(path)) return;
     if (mounted) setState(() => _loadingSharp = true);
     try {
-      final bytes = await TarikPro3DRenderer.renderHighResPreview(
-        path,
-        maxCanvas: 1800.0,
-        is3D: _detail3D,
-        transparentBg: false,
-        decorTheme: _decorTheme,
-      );
+      final vec = await loadAnyVectorDesign(path);
+      if (vec != null && (vec.seqX.isNotEmpty || vec.beadX.isNotEmpty)) {
+        await TarikProPbrSprites.ensureLoaded();
+      }
       if (mounted) {
         setState(() {
-          if (bytes != null && bytes.isNotEmpty) _sharpPreviewBytes = bytes;
+          _liveVec = vec;
           _loadingSharp = false;
         });
       }
@@ -2101,7 +2098,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   }
 
   void _openFullScreenViewer() {
-    if (widget.design.previewJpeg == null && _sharpPreviewBytes == null) return;
+    if (widget.design.previewJpeg == null && _liveVec == null) return;
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -2326,22 +2323,30 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                             width: double.infinity,
                             height: double.infinity,
                             color: Colors.white,
-                            child: (_sharpPreviewBytes ?? d.previewJpeg) != null
-                                ? InteractiveViewer(
-                                    minScale: 0.8,
-                                    maxScale: 10.0,
-                                    child: SizedBox.expand(
-                                      child: Image.memory(
-                                        (_sharpPreviewBytes ?? d.previewJpeg)!,
-                                        width: double.infinity,
-                                        height: double.infinity,
-                                        fit: BoxFit.contain,
-                                        filterQuality: FilterQuality.high,
-                                        isAntiAlias: true,
-                                        gaplessPlayback: true,
-                                      ),
-                                    ),
+                            child: _liveVec != null
+                                ? _LiveVectorViewport(
+                                    data: _liveVec!,
+                                    is3D: _detail3D,
+                                    decorTheme: _decorTheme,
+                                    bgColor: Colors.white,
+                                    showCmGrid: false,
                                   )
+                                : (d.previewJpeg != null
+                                    ? InteractiveViewer(
+                                        minScale: 0.8,
+                                        maxScale: 12.0,
+                                        child: SizedBox.expand(
+                                          child: Image.memory(
+                                            d.previewJpeg!,
+                                            width: double.infinity,
+                                            height: double.infinity,
+                                            fit: BoxFit.contain,
+                                            filterQuality: FilterQuality.high,
+                                            isAntiAlias: true,
+                                            gaplessPlayback: true,
+                                          ),
+                                        ),
+                                      )
                                 : Center(
                                     child: Column(
                                       mainAxisAlignment: MainAxisAlignment.center,
@@ -2356,7 +2361,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                         ),
                                       ],
                                     ),
-                                  ),
+                                  )),
                           ),
                           if (_loadingSharp)
                             const Positioned(
@@ -2368,7 +2373,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                 child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4AF37)),
                               ),
                             ),
-                          if ((_sharpPreviewBytes ?? d.previewJpeg) != null)
+                          if (_liveVec != null || d.previewJpeg != null)
                             Positioned(
                               bottom: 8,
                               left: 8,
@@ -2404,10 +2409,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                       child: InkWell(
                                         onTap: _loadingSharp
                                             ? null
-                                            : () {
-                                                setState(() => _detail3D = !_detail3D);
-                                                _loadSharpPreview();
-                                              },
+                                            : () => setState(() => _detail3D = !_detail3D),
                                         borderRadius: BorderRadius.circular(18),
                                         child: Padding(
                                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -2431,10 +2433,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                       child: InkWell(
                                         onTap: _loadingSharp
                                             ? null
-                                            : () {
-                                                setState(() => _decorTheme = (_decorTheme + 1) % 4);
-                                                _loadSharpPreview();
-                                              },
+                                            : () => setState(() => _decorTheme = (_decorTheme + 1) % 4),
                                         borderRadius: BorderRadius.circular(18),
                                         child: Padding(
                                           padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
@@ -2816,25 +2815,27 @@ class FullScreenDesignViewer extends StatefulWidget {
 
 class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   final TransformationController _transformController = TransformationController();
+  final GlobalKey<_LiveVectorViewportState> _liveKey = GlobalKey<_LiveVectorViewportState>();
   TapDownDetails? _doubleTapDetails;
   Color _canvasBg = Colors.white;
-  bool _enhanceClarity = true;
+  bool _showCmGrid = false;
   bool _is3D = false;
   int _decorTheme = 0;
-  double _currentScale = 1.0;
-  Uint8List? _hdBytes;
-  bool _loadingHd = false;
+  VectorDesignData? _liveVec;
+  bool _loadingVec = false;
 
   @override
   void initState() {
     super.initState();
     _is3D = widget.initialIs3D;
     _decorTheme = widget.initialDecorTheme;
-    _transformController.addListener(() {
-      final scale = _transformController.value.getMaxScaleOnAxis();
-      if ((scale - _currentScale).abs() > 0.05) setState(() => _currentScale = scale);
-    });
-    _loadHdIfSupported();
+    _loadVectorIfSupported();
+  }
+
+  @override
+  void dispose() {
+    _transformController.dispose();
+    super.dispose();
   }
 
   String _decorThemeLabel(int t) {
@@ -2846,46 +2847,22 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
     }
   }
 
-  @override
-  void dispose() {
-    _transformController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _loadHdIfSupported() async {
-    final lower = widget.design.filePath.toLowerCase();
-    final isDst = lower.endsWith('.dst');
-    final isDahao = lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe');
-    final isUniversal = UniversalFormatParser.isSupported(lower);
-    if (!isDst && !isDahao && !isUniversal) return;
-
-    if (mounted) setState(() => _loadingHd = true);
-    Uint8List? hd;
+  Future<void> _loadVectorIfSupported() async {
+    if (!VectorDesignLoader.supportsVectorView(widget.design.filePath)) return;
+    if (mounted) setState(() => _loadingVec = true);
     try {
-      // استخدام محرك TarikPro3DRenderer لإلغاء القفزات العريضة في 3D وعرض سمك الخيط الفيزيائي الحقيقي (~0.38 مم)
-      hd = await TarikPro3DRenderer.renderHighResPreview(
-        widget.design.filePath,
-        maxCanvas: 2200.0,
-        is3D: _is3D,
-        transparentBg: true,
-        decorTheme: _decorTheme,
-      );
-      if (hd == null || hd.isEmpty) {
-        if (isDst) {
-          hd = await DstParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
-        } else if (isDahao) {
-          hd = await DahaoParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
-        } else {
-          hd = await UniversalFormatParser.renderHighResPreview(widget.design.filePath, maxCanvas: 2200.0, is3D: _is3D);
-        }
+      final vec = await loadAnyVectorDesign(widget.design.filePath);
+      if (vec != null && (vec.seqX.isNotEmpty || vec.beadX.isNotEmpty)) {
+        await TarikProPbrSprites.ensureLoaded();
       }
-    } catch (_) {}
-
-    if (mounted) {
-      setState(() {
-        if (hd != null && hd.isNotEmpty) _hdBytes = hd;
-        _loadingHd = false;
-      });
+      if (mounted) {
+        setState(() {
+          _liveVec = vec;
+          _loadingVec = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingVec = false);
     }
   }
 
@@ -2903,16 +2880,6 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   @override
   Widget build(BuildContext context) {
     final d = widget.design;
-    final displayBytes = _hdBytes ?? d.previewJpeg!;
-    final imageWidget = Image.memory(
-      displayBytes,
-      width: double.infinity,
-      height: double.infinity,
-      fit: BoxFit.contain,
-      filterQuality: FilterQuality.high,
-      isAntiAlias: true,
-      gaplessPlayback: true,
-    );
     return Scaffold(
       backgroundColor: _canvasBg,
       appBar: AppBar(
@@ -2920,7 +2887,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
         foregroundColor: Colors.white,
         title: Directionality(textDirection: TextDirection.ltr, child: Text(d.fileName, style: const TextStyle(fontSize: 14))),
         actions: [
-          if (_loadingHd)
+          if (_loadingVec)
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 10),
               child: Center(
@@ -2931,35 +2898,54 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                 ),
               ),
             ),
-          IconButton(onPressed: () => _transformController.value = Matrix4.identity(), icon: const Icon(Icons.fit_screen)),
+          IconButton(
+            onPressed: () {
+              if (_liveVec != null) {
+                _liveKey.currentState?.resetView();
+              } else {
+                _transformController.value = Matrix4.identity();
+              }
+            },
+            icon: const Icon(Icons.fit_screen),
+          ),
         ],
       ),
       body: Stack(
         children: [
           Positioned.fill(
-            child: GestureDetector(
-              onDoubleTapDown: (details) => _doubleTapDetails = details,
-              onDoubleTap: _handleDoubleTap,
-              child: InteractiveViewer(
-                transformationController: _transformController,
-                minScale: 0.5,
-                maxScale: 12.0,
-                boundaryMargin: const EdgeInsets.all(120),
-                child: Center(
-                  child: _enhanceClarity
-                      ? ColorFiltered(
-                          colorFilter: const ColorFilter.matrix([
-                            1.28, -0.09, -0.09, 0, -14,
-                            -0.09, 1.28, -0.09, 0, -14,
-                            -0.09, -0.09, 1.28, 0, -14,
-                            0, 0, 0, 1, 0,
-                          ]),
-                          child: imageWidget,
-                        )
-                      : imageWidget,
-                ),
-              ),
-            ),
+            child: _liveVec != null
+                ? _LiveVectorViewport(
+                    key: _liveKey,
+                    data: _liveVec!,
+                    is3D: _is3D,
+                    decorTheme: _decorTheme,
+                    bgColor: _canvasBg,
+                    showCmGrid: _showCmGrid,
+                    maxZoom: 35.0,
+                  )
+                : (d.previewJpeg != null
+                    ? GestureDetector(
+                        onDoubleTapDown: (details) => _doubleTapDetails = details,
+                        onDoubleTap: _handleDoubleTap,
+                        child: InteractiveViewer(
+                          transformationController: _transformController,
+                          minScale: 0.5,
+                          maxScale: 16.0,
+                          boundaryMargin: const EdgeInsets.all(120),
+                          child: SizedBox.expand(
+                            child: Image.memory(
+                              d.previewJpeg!,
+                              width: double.infinity,
+                              height: double.infinity,
+                              fit: BoxFit.contain,
+                              filterQuality: FilterQuality.high,
+                              isAntiAlias: true,
+                              gaplessPlayback: true,
+                            ),
+                          ),
+                        ),
+                      )
+                    : const SizedBox.shrink()),
           ),
           Positioned(
             bottom: MediaQuery.of(context).padding.bottom + 14,
@@ -2987,14 +2973,9 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (VectorDesignLoader.supportsVectorView(d.filePath)) ...[
+                      if (_liveVec != null) ...[
                         TextButton.icon(
-                          onPressed: _loadingHd
-                              ? null
-                              : () {
-                                  setState(() => _is3D = !_is3D);
-                                  _loadHdIfSupported();
-                                },
+                          onPressed: () => setState(() => _is3D = !_is3D),
                           style: TextButton.styleFrom(
                             backgroundColor: _is3D ? const Color(0xFFD4AF37).withOpacity(0.26) : Colors.white10,
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -3010,14 +2991,9 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                           ),
                         ),
                         const SizedBox(width: 6),
-                        if (d.sequinsCount > 0 || d.beadsCount > 0) ...[
+                        if (_liveVec!.seqX.isNotEmpty || _liveVec!.beadX.isNotEmpty) ...[
                           TextButton(
-                            onPressed: _loadingHd
-                                ? null
-                                : () {
-                                    setState(() => _decorTheme = (_decorTheme + 1) % 4);
-                                    _loadHdIfSupported();
-                                  },
+                            onPressed: () => setState(() => _decorTheme = (_decorTheme + 1) % 4),
                             style: TextButton.styleFrom(
                               backgroundColor: const Color(0xFFD4AF37).withOpacity(0.20),
                               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
@@ -3029,19 +3005,19 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                           ),
                           const SizedBox(width: 6),
                         ],
+                        TextButton.icon(
+                          onPressed: () => setState(() => _showCmGrid = !_showCmGrid),
+                          style: TextButton.styleFrom(
+                            backgroundColor: _showCmGrid ? Colors.tealAccent.withOpacity(0.22) : Colors.white10,
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          ),
+                          icon: Icon(Icons.grid_on, size: 15, color: _showCmGrid ? Colors.tealAccent : Colors.white60),
+                          label: Text(
+                            '1cm',
+                            style: TextStyle(color: _showCmGrid ? Colors.tealAccent : Colors.white60, fontSize: 11.5, fontWeight: FontWeight.bold),
+                          ),
+                        ),
                       ],
-                      TextButton.icon(
-                        onPressed: () => setState(() => _enhanceClarity = !_enhanceClarity),
-                        style: TextButton.styleFrom(
-                          backgroundColor: _enhanceClarity ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        ),
-                        icon: Icon(Icons.auto_fix_high, size: 15, color: _enhanceClarity ? const Color(0xFFD4AF37) : Colors.white60),
-                        label: Text(
-                          tr('وضوح عالٍ', 'HD'),
-                          style: TextStyle(color: _enhanceClarity ? const Color(0xFFD4AF37) : Colors.white60, fontSize: 12),
-                        ),
-                      ),
                     ],
                   ),
                 ],
@@ -3051,6 +3027,170 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
         ],
       ),
     );
+  }
+}
+
+/// عارض متجهي حي فائق النقاء (Live Vector Viewport):
+/// - كلما كبّرت التصميم (حتى 35x) تزيد الدقة تلقائياً نسبةً وتناسباً بدون أي بكسلة!
+/// - يحافظ على سماكة خط 2D ثابتة وحادة عند كل مستويات التكبير
+/// - يرسم الخيط المبروم 3D الحقيقي (0.41 مم، برمة 51°، وتدرّج نقطتَي الإبرة) والخرز والترتر PBR 256×256 بدقة مجهرية
+class _LiveVectorViewport extends StatefulWidget {
+  final VectorDesignData data;
+  final bool is3D;
+  final int decorTheme;
+  final Color bgColor;
+  final bool showCmGrid;
+  final double maxZoom;
+
+  const _LiveVectorViewport({
+    super.key,
+    required this.data,
+    required this.is3D,
+    this.decorTheme = 0,
+    this.bgColor = Colors.white,
+    this.showCmGrid = false,
+    this.maxZoom = 30.0,
+  });
+
+  @override
+  State<_LiveVectorViewport> createState() => _LiveVectorViewportState();
+}
+
+class _LiveVectorViewportState extends State<_LiveVectorViewport> {
+  double _zoom = 1.0;
+  Offset _pan = Offset.zero;
+  double _startZoom = 1.0;
+  Offset _startPan = Offset.zero;
+  Offset _startFocal = Offset.zero;
+  Size _viewSize = Size.zero;
+
+  void resetView() {
+    setState(() {
+      _zoom = 1.0;
+      _pan = Offset.zero;
+    });
+  }
+
+  void _onScaleStart(ScaleStartDetails d) {
+    _startZoom = _zoom;
+    _startPan = _pan;
+    _startFocal = d.localFocalPoint;
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    if (_viewSize == Size.zero) return;
+    final double nextZoom = (_startZoom * d.scale).clamp(0.5, widget.maxZoom);
+    final Offset center = Offset(_viewSize.width * 0.5, _viewSize.height * 0.5);
+    final Offset focalFromCenter = _startFocal - center;
+    final double ratio = nextZoom / _startZoom;
+    final Offset nextPan = (_startPan - focalFromCenter) * ratio + focalFromCenter + (d.localFocalPoint - _startFocal);
+    setState(() {
+      _zoom = nextZoom;
+      _pan = nextPan;
+    });
+  }
+
+  void _onDoubleTap() {
+    if ((_zoom - 1.0).abs() > 0.05 || _pan.distance > 2.0) {
+      resetView();
+    } else {
+      setState(() => _zoom = 4.0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (ctx, c) {
+        _viewSize = Size(c.maxWidth, c.maxHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onDoubleTap: _onDoubleTap,
+          onScaleStart: _onScaleStart,
+          onScaleUpdate: _onScaleUpdate,
+          child: ColoredBox(
+            color: widget.bgColor,
+            child: CustomPaint(
+              painter: _LiveVectorViewportPainter(
+                data: widget.data,
+                is3D: widget.is3D,
+                decorTheme: widget.decorTheme,
+                showCmGrid: widget.showCmGrid,
+                zoom: _zoom,
+                pan: _pan,
+              ),
+              size: Size.infinite,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _LiveVectorViewportPainter extends CustomPainter {
+  final VectorDesignData data;
+  final bool is3D;
+  final int decorTheme;
+  final bool showCmGrid;
+  final double zoom;
+  final Offset pan;
+
+  const _LiveVectorViewportPainter({
+    required this.data,
+    required this.is3D,
+    required this.decorTheme,
+    required this.showCmGrid,
+    required this.zoom,
+    required this.pan,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (!data.hasBounds || data.stX.length < 2) return;
+    final double rawW = max(1.0, data.maxX - data.minX);
+    final double rawH = max(1.0, data.maxY - data.minY);
+    const double pad = 22.0;
+    final double baseScale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
+    final double scale = baseScale * zoom;
+    final double baseOffX = (size.width - rawW * baseScale) * 0.5 - data.minX * baseScale;
+    final double baseOffY = (size.height - rawH * baseScale) * 0.5 - data.minY * baseScale;
+    final double cx = size.width * 0.5;
+    final double cy = size.height * 0.5;
+    final double offX = (baseOffX - cx) * zoom + cx + pan.dx;
+    final double offY = (baseOffY - cy) * zoom + cy + pan.dy;
+
+    if (showCmGrid) {
+      TarikUnifiedCanvasRenderer.drawCmGrid(
+        canvas,
+        size,
+        scale: scale,
+        originX: offX,
+        originY: offY,
+      );
+    }
+
+    TarikUnifiedCanvasRenderer.paintDesign(
+      canvas: canvas,
+      data: data,
+      scale: scale,
+      offX: offX,
+      offY: offY,
+      is3D: is3D,
+      decorTheme: decorTheme,
+      visibleRect: Offset.zero & size,
+      stroke2DPx: TarikRenderSpecs.stroke2DScreenPx,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _LiveVectorViewportPainter oldDelegate) {
+    return oldDelegate.data != data ||
+        oldDelegate.is3D != is3D ||
+        oldDelegate.decorTheme != decorTheme ||
+        oldDelegate.showCmGrid != showCmGrid ||
+        oldDelegate.zoom != zoom ||
+        oldDelegate.pan != pan;
   }
 }
 
@@ -3210,6 +3350,7 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
 
   Future<void> _loadVector() async {
     final v = widget.initialVector ?? (widget.design != null ? await loadAnyVectorDesign(widget.design!.filePath) : null);
+    if (v != null && (v.seqX.isNotEmpty || v.beadX.isNotEmpty)) { await TarikProPbrSprites.ensureLoaded(); }
     if (!mounted) return;
     setState(() {
       _vec = v;
@@ -3509,6 +3650,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   VectorDesignData? _edited;
   bool _loading = true;
   bool _saving = false;
+  bool _editor3D = false;
 
   double _scaleX = 1.0;
   double _scaleY = 1.0;
@@ -3588,6 +3730,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
 
   Future<void> _load() async {
     final v = widget.initialVector ?? (widget.design != null ? await loadAnyVectorDesign(widget.design!.filePath) : null);
+    if (v != null && (v.seqX.isNotEmpty || v.beadX.isNotEmpty)) { await TarikProPbrSprites.ensureLoaded(); }
     if (!mounted) return;
     if (v != null) {
       final Set<int> cols = {};
@@ -3813,6 +3956,22 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
         title: Text(tr('تعديل الفلم', 'Edit Design'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
         actions: [
           if (_edited != null) ...[
+            TextButton(
+              onPressed: () => setState(() => _editor3D = !_editor3D),
+              style: TextButton.styleFrom(
+                backgroundColor: _editor3D ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                minimumSize: Size.zero,
+              ),
+              child: Text(
+                '3D',
+                style: TextStyle(
+                  color: _editor3D ? const Color(0xFFD4AF37) : Colors.white60,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 11.5,
+                ),
+              ),
+            ),
             IconButton(
               icon: const Icon(Icons.play_circle_outline, color: Color(0xFFD4AF37), size: 21),
               tooltip: tr('محاكاة الغرز', 'Simulate'),
@@ -3873,7 +4032,9 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                   data: _edited!,
                                   limit: _edited!.stX.length,
                                   showNeedle: false,
+                                  is3D: _editor3D,
                                   showOriginCrosshair: _startAnchor >= 1 && _startAnchor <= 9,
+                                  showCmGrid: true,
                                 ),
                                 size: Size.infinite,
                               ),
@@ -4669,6 +4830,8 @@ class _VectorStitchPainter extends CustomPainter {
   final bool showNeedle;
   final bool is3D;
   final bool showOriginCrosshair;
+  final bool showCmGrid;
+  final double zoomFactor;
 
   _VectorStitchPainter({
     required this.data,
@@ -4676,6 +4839,8 @@ class _VectorStitchPainter extends CustomPainter {
     required this.showNeedle,
     this.is3D = false,
     this.showOriginCrosshair = false,
+    this.showCmGrid = false,
+    this.zoomFactor = 1.0,
   });
 
   @override
@@ -4690,184 +4855,34 @@ class _VectorStitchPainter extends CustomPainter {
     final double offX = (size.width - rawW * scale) * 0.5 - data.minX * scale;
     final double offY = (size.height - rawH * scale) * 0.5 - data.minY * scale;
 
+    if (showCmGrid) {
+      TarikUnifiedCanvasRenderer.drawCmGrid(
+        canvas,
+        size,
+        scale: scale,
+        originX: offX,
+        originY: offY,
+      );
+    }
+
     final int count = limit.clamp(0, data.stX.length);
-    final int palLen = data.paletteArgb.length;
-    Path path = Path();
-    int activeColor = -1;
-    bool hasMove = false;
-    double lastX = 0, lastY = 0;
+    TarikUnifiedCanvasRenderer.paintDesign(
+      canvas: canvas,
+      data: data,
+      scale: scale,
+      offX: offX,
+      offY: offY,
+      is3D: is3D,
+      decorTheme: 0,
+      stitchLimit: count,
+      stroke2DPx: TarikRenderSpecs.stroke2DScreenPx / max(1.0, zoomFactor),
+    );
 
-    void flush() {
-      if (!hasMove || activeColor < 0) return;
-      final Color baseColor = Color(data.paletteArgb[activeColor % palLen]);
-      if (is3D) {
-        final double tw = (scale * 3.8).clamp(0.95, 4.0);
-        final double shOff = (tw * 0.30).clamp(0.25, 1.2);
-        final double hiOff = (tw * 0.18).clamp(0.16, 0.70);
-        canvas.save();
-        canvas.translate(shOff, shOff);
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = Colors.black.withOpacity(0.18)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 1.08
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.restore();
-
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = Color.lerp(baseColor, Colors.black, 0.24) ?? baseColor
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = tw
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = baseColor
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 0.76
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.save();
-        canvas.translate(-hiOff, -hiOff);
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = (Color.lerp(baseColor, Colors.white, 0.58) ?? Colors.white).withOpacity(0.76)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = (tw * 0.24).clamp(0.24, 1.05)
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.restore();
-      } else {
-        final paint = Paint()
-          ..color = baseColor
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.65
-          ..strokeCap = StrokeCap.round
-          ..strokeJoin = StrokeJoin.round
-          ..isAntiAlias = true;
-        canvas.drawPath(path, paint);
-      }
-      path = Path();
-      hasMove = false;
-    }
-
-    final double maxSegSq = is3D ? (120.0 * 120.0) : (145.0 * 145.0);
-    double prevRx = 0.0, prevRy = 0.0;
-    for (int i = 0; i < count; i++) {
-      final int c = data.stColor[i];
-      if (c != activeColor) {
-        flush();
-        activeColor = c;
-      }
-      final double rx = data.stX[i];
-      final double ry = data.stY[i];
-      final double sx = rx * scale + offX;
-      final double sy = ry * scale + offY;
-      lastX = sx;
-      lastY = sy;
-      bool isJump = data.stMove[i] != 0 || !hasMove;
-      if (!isJump) {
-        final double dx = rx - prevRx;
-        final double dy = ry - prevRy;
-        if (dx * dx + dy * dy > maxSegSq) {
-          isJump = true;
-        }
-      }
-      if (isJump) {
-        path.moveTo(sx, sy);
-        hasMove = true;
-      } else {
-        path.lineTo(sx, sy);
-      }
-      prevRx = rx;
-      prevRy = ry;
-    }
-    flush();
-
-    // رسم الترتر والخرز على لوحة المتجهات الحية (للمحاكاة وتعديل الفلم)
-    final double progressRatio = data.stX.isNotEmpty ? (count / data.stX.length).clamp(0.0, 1.0) : 1.0;
-    if (data.seqX.isNotEmpty) {
-      final int seqLim = (data.seqX.length * progressRatio).round().clamp(0, data.seqX.length);
-      const seqColors = [
-        Color(0xFFE53935),
-        Color(0xFFFB8C00),
-        Color(0xFF1E88E5),
-        Color(0xFF8E24AA),
-      ];
-      const seqRadiiUnits = [15.0, 22.0, 28.0, 35.0];
-      for (int i = 0; i < seqLim; i++) {
-        final int code = data.seqCode[i];
-        int b = 0;
-        if (code == 2 || code == 6) {
-          b = 1;
-        } else if (code == 3 || code == 16) {
-          b = 2;
-        } else if (code == 4 || code == 8 || code == 32) {
-          b = 3;
-        }
-        final double sx = data.seqX[i] * scale + offX;
-        final double sy = data.seqY[i] * scale + offY;
-        final double r = (seqRadiiUnits[b] * scale).clamp(1.6, 12.0);
-        canvas.drawCircle(
-          Offset(sx, sy),
-          r,
-          Paint()
-            ..color = seqColors[b]
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = (r * 0.28).clamp(0.7, 2.0)
-            ..isAntiAlias = true,
-        );
-      }
-    }
-
-    if (data.beadX.isNotEmpty) {
-      final int beadLim = (data.beadX.length * progressRatio).round().clamp(0, data.beadX.length);
-      const beadColors = [
-        Color(0xFFD4A017),
-        Color(0xFF00ACC1),
-        Color(0xFF8E24AA),
-      ];
-      final double r = (12.0 * scale).clamp(1.4, 6.5);
-      for (int i = 0; i < beadLim; i++) {
-        final int c = data.beadCode[i];
-        final int b = (c == 2) ? 1 : (c == 3 ? 2 : 0);
-        final double sx = data.beadX[i] * scale + offX;
-        final double sy = data.beadY[i] * scale + offY;
-        canvas.drawCircle(Offset(sx, sy), r, Paint()..color = beadColors[b]);
-        if (r >= 2.0) {
-          canvas.drawCircle(
-            Offset(sx - r * 0.25, sy - r * 0.25),
-            r * 0.32,
-            Paint()..color = const Color(0xBFFFFFFF),
-          );
-        }
-      }
-    }
-
-    // علامة نقطة البداية والنهاية (⊕ خضراء/حمراء واضحة مثل برنامج ويلكم عند الإحداثي (0,0))
     if (showOriginCrosshair) {
       final double ox = offX;
       final double oy = offY;
       const double arm = 12.0;
-      canvas.drawCircle(
-        Offset(ox, oy),
-        9.0,
-        Paint()..color = Colors.white.withOpacity(0.85),
-      );
+      canvas.drawCircle(Offset(ox, oy), 9.0, Paint()..color = Colors.white.withOpacity(0.85));
       canvas.drawCircle(
         Offset(ox, oy),
         8.0,
@@ -4891,6 +4906,8 @@ class _VectorStitchPainter extends CustomPainter {
     }
 
     if (showNeedle && count > 0) {
+      final double lastX = data.stX[count - 1] * scale + offX;
+      final double lastY = data.stY[count - 1] * scale + offY;
       const double arm = 9.0;
       final crossShadow = Paint()
         ..color = Colors.black.withOpacity(0.45)
@@ -4912,7 +4929,9 @@ class _VectorStitchPainter extends CustomPainter {
     return oldDelegate.limit != limit ||
         oldDelegate.data != data ||
         oldDelegate.is3D != is3D ||
-        oldDelegate.showOriginCrosshair != showOriginCrosshair;
+        oldDelegate.showOriginCrosshair != showOriginCrosshair ||
+        oldDelegate.showCmGrid != showCmGrid ||
+        oldDelegate.zoomFactor != zoomFactor;
   }
 }
 
@@ -5280,40 +5299,20 @@ class _InteractiveLetteringPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final Offset origin = Offset(size.width * 0.5, size.height * 0.5) + viewPan;
 
-    // 1) رسم شبكة السنتيمتر الحقيقية (تتحرك وتتكبر مع النص 100%)
-    final double halfCmPx = pxPerCm * 0.5;
-    final Paint minorPaint = Paint()
-      ..color = const Color(0xFFE2E8F0)
-      ..strokeWidth = 0.7;
-    final Paint majorPaint = Paint()
-      ..color = const Color(0xFF94A3B8).withOpacity(0.55)
-      ..strokeWidth = 1.1;
-    final Paint axisPaint = Paint()
-      ..color = const Color(0xFF64748B).withOpacity(0.45)
-      ..strokeWidth = 1.3;
-
-    if (halfCmPx >= 5.0) {
-      final int minCol = ((-origin.dx) / halfCmPx).floor() - 1;
-      final int maxCol = ((size.width - origin.dx) / halfCmPx).ceil() + 1;
-      for (int c = minCol; c <= maxCol; c++) {
-        final double x = origin.dx + c * halfCmPx;
-        final Paint p = (c == 0) ? axisPaint : ((c & 1) == 0 ? majorPaint : minorPaint);
-        canvas.drawLine(Offset(x, 0), Offset(x, size.height), p);
-      }
-
-      final int minRow = ((-origin.dy) / halfCmPx).floor() - 1;
-      final int maxRow = ((size.height - origin.dy) / halfCmPx).ceil() + 1;
-      for (int r = minRow; r <= maxRow; r++) {
-        final double y = origin.dy + r * halfCmPx;
-        final Paint p = (r == 0) ? axisPaint : ((r & 1) == 0 ? majorPaint : minorPaint);
-        canvas.drawLine(Offset(0, y), Offset(size.width, y), p);
-      }
-    }
+    // 1) رسم شبكة السنتيمتر الحقيقية الموحّدة (100 وحدة = 1 سم)
+    final double baseUnitScale = pxPerCm / TarikRenderSpecs.unitsPerCm;
+    TarikUnifiedCanvasRenderer.drawCmGrid(
+      canvas,
+      size,
+      scale: baseUnitScale,
+      originX: origin.dx,
+      originY: origin.dy,
+    );
 
     if (!vec.hasBounds || vec.stX.length < 2) return;
 
-    // 2) رسم الغرز بالمقياس الفيزيائي الفعلي (100 وحدة = 1 سم = pxPerCm بكسل)
-    final double scale = (pxPerCm / 100.0) * liveScalePreview;
+    // 2) رسم الغرز بالمحرك الموحّد (2D ثابت السماكة أو 3D خيط مبروم حقيقي 0.41 مم)
+    final double scale = baseUnitScale * liveScalePreview;
     final double rawCx = (vec.minX + vec.maxX) * 0.5;
     final double rawCy = (vec.minY + vec.maxY) * 0.5;
 
@@ -5323,113 +5322,16 @@ class _InteractiveLetteringPainter extends CustomPainter {
       canvas.rotate(liveRotDeltaDeg * pi / 180.0);
     }
 
-    final int n = vec.stX.length;
-    final int palLen = max(1, vec.paletteArgb.length);
-    Path path = Path();
-    int activeColor = -1;
-    bool hasMove = false;
-    final double maxSegSq = is3D ? (120.0 * 120.0) : (145.0 * 145.0);
-    double prevRx = 0.0, prevRy = 0.0;
-
-    void flush() {
-      if (!hasMove || activeColor < 0) return;
-      final Color baseColor = Color(vec.paletteArgb[activeColor % palLen]);
-      if (is3D) {
-        final double tw = (scale * 3.8).clamp(0.95, 4.0);
-        final double shOff = (tw * 0.30).clamp(0.25, 1.2);
-        final double hiOff = (tw * 0.18).clamp(0.16, 0.70);
-
-        canvas.save();
-        canvas.translate(shOff, shOff);
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = Colors.black.withOpacity(0.18)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 1.08
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.restore();
-
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = Color.lerp(baseColor, Colors.black, 0.24) ?? baseColor
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = tw
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = baseColor
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = tw * 0.76
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.save();
-        canvas.translate(-hiOff, -hiOff);
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = (Color.lerp(baseColor, Colors.white, 0.58) ?? Colors.white).withOpacity(0.76)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = (tw * 0.24).clamp(0.24, 1.05)
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-        canvas.restore();
-      } else {
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = baseColor
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = (scale * 1.6).clamp(0.55, 1.0)
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..isAntiAlias = true,
-        );
-      }
-      path = Path();
-      hasMove = false;
-    }
-
-    for (int i = 0; i < n; i++) {
-      final int c = vec.stColor[i];
-      if (c != activeColor) {
-        flush();
-        activeColor = c;
-      }
-      final double rx = vec.stX[i];
-      final double ry = vec.stY[i];
-      final double sx = (rx - rawCx) * scale;
-      final double sy = (ry - rawCy) * scale;
-      bool isJump = vec.stMove[i] != 0 || !hasMove;
-      if (!isJump) {
-        final double dx = rx - prevRx;
-        final double dy = ry - prevRy;
-        if (dx * dx + dy * dy > maxSegSq) {
-          isJump = true;
-        }
-      }
-      if (isJump) {
-        path.moveTo(sx, sy);
-        hasMove = true;
-      } else {
-        path.lineTo(sx, sy);
-      }
-      prevRx = rx;
-      prevRy = ry;
-    }
-    flush();
+    TarikUnifiedCanvasRenderer.paintDesign(
+      canvas: canvas,
+      data: vec,
+      scale: scale,
+      offX: -rawCx * scale,
+      offY: -rawCy * scale,
+      is3D: is3D,
+      decorTheme: 0,
+      stroke2DPx: TarikRenderSpecs.stroke2DScreenPx,
+    );
 
     // 3) رسم إطار التحديد والمقابض التفاعلية فوق النص مباشرةً (مثل فوتوشوب وويلكم)
     final double drawW = max(10.0, vec.maxX - vec.minX) * scale;
@@ -7828,7 +7730,7 @@ class _ObjectEditorCanvasPainter extends CustomPainter {
         Paint()
           ..color = col.withOpacity(opacity)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = isSel ? 0.85 : 0.55
+          ..strokeWidth = isSel ? TarikRenderSpecs.stroke2DScreenPx : (TarikRenderSpecs.stroke2DScreenPx * 0.85)
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true,
@@ -8473,4 +8375,4 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - Pro v6.3
+// Tarik emb - Pro v6.4
