@@ -71,6 +71,30 @@ Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
   EmbDesignInfo? result;
   if (lower.endsWith('.dst')) {
     result = await DstParser.parseFile(path, maxCanvas: 720.0);
+    if (result != null) {
+      final v3d = await loadAnyVectorDesign(path);
+      if (v3d != null && v3d.stX.length >= 2) {
+        final png3d = await TarikPro3DRenderer.renderVectorToPng(v3d, maxCanvas: 720.0, is3D: true, transparentBg: false, decorTheme: 0);
+        if (png3d != null) {
+          result = EmbDesignInfo(
+            filePath: result.filePath,
+            fileName: result.fileName,
+            previewJpeg: png3d,
+            stitches: result.stitches,
+            colorCount: result.colorCount,
+            stopsCount: result.stopsCount,
+            jumpsCount: result.jumpsCount,
+            sequinsCount: result.sequinsCount,
+            beadsCount: result.beadsCount,
+            trimsCount: result.trimsCount,
+            machineType: result.machineType,
+            colorSequence: result.colorSequence,
+            widthMm: result.widthMm,
+            heightMm: result.heightMm,
+          );
+        }
+      }
+    }
   } else if (lower.endsWith('.emb')) {
     result = await EmbParser.parseFile(path);
     if (result != null && result.previewJpeg != null && result.previewJpeg!.isNotEmpty) {
@@ -104,7 +128,7 @@ Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
         final calPng = await TarikPro3DRenderer.renderVectorToPng(
           calVec,
           maxCanvas: 720.0,
-          is3D: false,
+          is3D: true,
           transparentBg: false,
           decorTheme: 0,
         );
@@ -157,7 +181,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v9');
+    final dir = Directory('${supportDir.path}/design_cache_v10');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -1596,7 +1620,7 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
     final List<String> targets = List<String>.from(_selectedPaths);
 
     for (final srcPath in targets) {
-      if (!UniversalExporter.canExport(srcPath)) continue;
+      if (srcPath.toLowerCase().endsWith('.emb') || !UniversalExporter.canExport(srcPath)) continue;
       final fileName = srcPath.split(Platform.pathSeparator).last;
       final baseName = fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
       final parentDir = File(srcPath).parent.path;
@@ -1841,6 +1865,7 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                     ),
                     child: Row(
                       children: [
+                        if (_selectedPaths.any((p) => !p.toLowerCase().endsWith('.emb')))
                         Expanded(
                           child: ElevatedButton.icon(
                             onPressed: _isBatchWorking ? null : _batchConvertSelected,
@@ -2054,14 +2079,23 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   bool _isExportingDst = false;
   String? _lastExportedPath;
   VectorDesignData? _liveVec;
+  Color _embBgColor = Colors.white;
   bool _loadingSharp = false;
-  bool _detail3D = false;
   int _decorTheme = 0; // 0=ذهبي ولؤلؤي، 1=فضي ولؤلؤي، 2=لؤلؤي، 3=ملوّن
 
   @override
   void initState() {
     super.initState();
     _loadLiveVector();
+    _detectEmbBg();
+  }
+
+  Future<void> _detectEmbBg() async {
+    if (!widget.design.filePath.toLowerCase().endsWith('.emb')) return;
+    final bytes = widget.design.previewJpeg;
+    if (bytes == null || bytes.isEmpty) return;
+    final col = await TarikProEmbImageEnhancer.detectBgColor(bytes);
+    if (mounted) setState(() => _embBgColor = col);
   }
 
   Future<void> _loadLiveVector() async {
@@ -2104,8 +2138,8 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
       MaterialPageRoute(
         builder: (_) => FullScreenDesignViewer(
           design: widget.design,
-          initialIs3D: _detail3D,
           initialDecorTheme: _decorTheme,
+          initialBgColor: _embBgColor,
         ),
       ),
     );
@@ -2322,11 +2356,11 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                           Container(
                             width: double.infinity,
                             height: double.infinity,
-                            color: Colors.white,
+                            color: _embBgColor,
                             child: _liveVec != null
                                 ? _LiveVectorViewport(
                                     data: _liveVec!,
-                                    is3D: _detail3D,
+                                    is3D: true,
                                     decorTheme: _decorTheme,
                                     bgColor: Colors.white,
                                     showCmGrid: false,
@@ -2399,32 +2433,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                       ),
                                     ),
                                   ),
-                                  if (VectorDesignLoader.supportsVectorView(d.filePath)) ...[
-                                    const SizedBox(width: 6),
-                                    Material(
-                                      color: _detail3D
-                                          ? const Color(0xFFD4AF37)
-                                          : const Color(0xFF0E131D).withOpacity(0.86),
-                                      borderRadius: BorderRadius.circular(18),
-                                      child: InkWell(
-                                        onTap: _loadingSharp
-                                            ? null
-                                            : () => setState(() => _detail3D = !_detail3D),
-                                        borderRadius: BorderRadius.circular(18),
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                          child: Text(
-                                            '3D',
-                                            style: TextStyle(
-                                              color: _detail3D ? Colors.black : const Color(0xFFD4AF37),
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
+
                                   if (VectorDesignLoader.supportsVectorView(d.filePath) && (d.sequinsCount > 0 || d.beadsCount > 0)) ...[
                                     const SizedBox(width: 6),
                                     Material(
@@ -2629,7 +2638,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                             const SizedBox(height: 7),
                           ],
                           // صف الأوامر 3: تصدير وحفظ + تصدير ومشاركة (ظاهر دائماً بدون رفع الشاشة)
-                          if (UniversalExporter.canExport(d.filePath))
+                          if (!d.filePath.toLowerCase().endsWith('.emb') && UniversalExporter.canExport(d.filePath))
                             Row(
                               children: [
                                 Expanded(
@@ -2801,13 +2810,13 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
 
 class FullScreenDesignViewer extends StatefulWidget {
   final EmbDesignInfo design;
-  final bool initialIs3D;
   final int initialDecorTheme;
+  final Color initialBgColor;
   const FullScreenDesignViewer({
     super.key,
     required this.design,
-    this.initialIs3D = false,
     this.initialDecorTheme = 0,
+    this.initialBgColor = Colors.white,
   });
   @override
   State<FullScreenDesignViewer> createState() => _FullScreenDesignViewerState();
@@ -2819,7 +2828,6 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   TapDownDetails? _doubleTapDetails;
   Color _canvasBg = Colors.white;
   bool _showCmGrid = false;
-  bool _is3D = false;
   int _decorTheme = 0;
   VectorDesignData? _liveVec;
   bool _loadingVec = false;
@@ -2827,7 +2835,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   @override
   void initState() {
     super.initState();
-    _is3D = widget.initialIs3D;
+    _canvasBg = widget.initialBgColor;
     _decorTheme = widget.initialDecorTheme;
     _loadVectorIfSupported();
   }
@@ -2917,7 +2925,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                 ? _LiveVectorViewport(
                     key: _liveKey,
                     data: _liveVec!,
-                    is3D: _is3D,
+                    is3D: true,
                     decorTheme: _decorTheme,
                     bgColor: _canvasBg,
                     showCmGrid: _showCmGrid,
@@ -2974,23 +2982,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (_liveVec != null) ...[
-                        TextButton.icon(
-                          onPressed: () => setState(() => _is3D = !_is3D),
-                          style: TextButton.styleFrom(
-                            backgroundColor: _is3D ? const Color(0xFFD4AF37).withOpacity(0.26) : Colors.white10,
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          ),
-                          icon: Icon(Icons.view_in_ar, size: 15, color: _is3D ? const Color(0xFFD4AF37) : Colors.white60),
-                          label: Text(
-                            '3D',
-                            style: TextStyle(
-                              color: _is3D ? const Color(0xFFD4AF37) : Colors.white60,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
+
                         if (_liveVec!.seqX.isNotEmpty || _liveVec!.beadX.isNotEmpty) ...[
                           TextButton(
                             onPressed: () => setState(() => _decorTheme = (_decorTheme + 1) % 4),
@@ -3328,11 +3320,12 @@ class StitchSimulatorScreen extends StatefulWidget {
 
 class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   VectorDesignData? _vec;
+  List<int> _colorStarts = [0];
   bool _loading = true;
   bool _playing = false;
   int _currentStitch = 0;
-  int _speedIndex = 3; // 3x افتراضي
-  static const List<int> _speedSteps = [1, 4, 12, 30, 80, 200, 450];
+  int _speedIndex = 0; // يبدأ من أبطأ سرعة (0.2x)
+  static const List<int> _speedSteps = [1, 3, 8, 20, 55, 140, 350];
   static const List<String> _speedLabels = ['0.2x', '0.5x', '1x', '3x', '8x', '20x', '45x'];
   Timer? _timer;
 
@@ -3348,14 +3341,71 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
     super.dispose();
   }
 
+  List<int> _computeColorStarts(VectorDesignData v) {
+    final List<int> starts = [0];
+    for (int i = 1; i < v.stColor.length; i++) {
+      if (v.stColor[i] != v.stColor[i - 1]) {
+        starts.add(i);
+      }
+    }
+    return starts;
+  }
+
+  int get _activeColorBlock {
+    int idx = 0;
+    for (int i = 0; i < _colorStarts.length; i++) {
+      if (_currentStitch >= _colorStarts[i]) {
+        idx = i;
+      } else {
+        break;
+      }
+    }
+    return idx;
+  }
+
+  void _jumpToNextColor() {
+    if (_vec == null || _colorStarts.isEmpty) return;
+    final int cur = _activeColorBlock;
+    if (cur + 1 < _colorStarts.length) {
+      setState(() => _currentStitch = _colorStarts[cur + 1]);
+    } else {
+      _pausePlayback();
+      setState(() => _currentStitch = _vec!.stX.length);
+    }
+  }
+
+  void _jumpToPrevColor() {
+    if (_vec == null || _colorStarts.isEmpty) return;
+    final int cur = _activeColorBlock;
+    if (_currentStitch > _colorStarts[cur] + 2) {
+      setState(() => _currentStitch = _colorStarts[cur]);
+    } else if (cur > 0) {
+      setState(() => _currentStitch = _colorStarts[cur - 1]);
+    } else {
+      setState(() => _currentStitch = 0);
+    }
+  }
+
+  void _stopPlayback() {
+    _timer?.cancel();
+    setState(() {
+      _playing = false;
+      _currentStitch = 0;
+    });
+  }
+
   Future<void> _loadVector() async {
     final v = widget.initialVector ?? (widget.design != null ? await loadAnyVectorDesign(widget.design!.filePath) : null);
-    if (v != null && (v.seqX.isNotEmpty || v.beadX.isNotEmpty)) { await TarikProPbrSprites.ensureLoaded(); }
+    if (v != null && (v.seqX.isNotEmpty || v.beadX.isNotEmpty)) {
+      await TarikProPbrSprites.ensureLoaded();
+    }
     if (!mounted) return;
     setState(() {
       _vec = v;
+      _colorStarts = v != null ? _computeColorStarts(v) : [0];
       _loading = false;
       _currentStitch = 0;
+      _speedIndex = 0; // أبطأ سرعة
     });
     if (v != null && v.stX.length > 2) {
       _startPlayback();
@@ -3370,7 +3420,7 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
     }
     _timer?.cancel();
     setState(() => _playing = true);
-    _timer = Timer.periodic(const Duration(milliseconds: 30), (_) {
+    _timer = Timer.periodic(const Duration(milliseconds: 35), (_) {
       if (!mounted || _vec == null) return;
       final step = _speedSteps[_speedIndex];
       final next = _currentStitch + step;
@@ -3395,11 +3445,14 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   Widget build(BuildContext context) {
     final total = _vec?.stX.length ?? 0;
     final numFmt = intl.NumberFormat('#,###');
+    final int curColorNum = _activeColorBlock + 1;
+    final int totalColors = max(1, _colorStarts.length);
+
     return Scaffold(
       backgroundColor: const Color(0xFF0E131D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
-        title: Text(tr('محاكاة سير الغرز', 'Stitch Simulator'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        title: Text(tr('محاكاة سير الغرز (3D)', 'Stitch Simulator (3D)'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
@@ -3417,16 +3470,21 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                         clipBehavior: Clip.antiAlias,
                         child: InteractiveViewer(
                           minScale: 0.8,
-                          maxScale: 8.0,
+                          maxScale: 16.0,
                           child: CustomPaint(
-                            painter: _VectorStitchPainter(data: _vec!, limit: _currentStitch, showNeedle: true),
+                            painter: _VectorStitchPainter(
+                              data: _vec!,
+                              limit: _currentStitch,
+                              showNeedle: true,
+                              is3D: true,
+                            ),
                             size: Size.infinite,
                           ),
                         ),
                       ),
                     ),
                     Container(
-                      padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 14),
+                      padding: EdgeInsets.fromLTRB(14, 10, 14, MediaQuery.of(context).padding.bottom + 12),
                       decoration: const BoxDecoration(
                         color: Color(0xFF18202E),
                         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -3439,11 +3497,11 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                             children: [
                               Text(
                                 '${tr('الغرزة', 'Stitch')}: ${numFmt.format(_currentStitch)} / ${numFmt.format(total)}',
-                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 13),
+                                style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12.5),
                               ),
                               Text(
-                                '${((_currentStitch / max(1, total)) * 100).toStringAsFixed(0)}%',
-                                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 13),
+                                '${tr('اللون', 'Color')}: $curColorNum / $totalColors  •  ${((_currentStitch / max(1, total)) * 100).toStringAsFixed(0)}%',
+                                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12.5),
                               ),
                             ],
                           ),
@@ -3458,66 +3516,68 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                             },
                           ),
                           Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
+                              // ترجيع لون
                               IconButton(
-                                onPressed: () {
-                                  _pausePlayback();
-                                  setState(() => _currentStitch = 0);
-                                },
-                                icon: const Icon(Icons.replay, color: Colors.white70),
-                                tooltip: tr('إعادة', 'Reset'),
+                                onPressed: _jumpToPrevColor,
+                                icon: const Icon(Icons.skip_previous, color: Color(0xFF56CCF2), size: 26),
+                                tooltip: tr('اللون السابق', 'Prev Color'),
                               ),
+                              // ستوب (إيقاف وإعادة للصفر)
+                              IconButton(
+                                onPressed: _stopPlayback,
+                                icon: const Icon(Icons.stop_circle_outlined, color: Colors.redAccent, size: 26),
+                                tooltip: tr('ستوب', 'Stop'),
+                              ),
+                              // تشغيل / إيقاف مؤقت
                               ElevatedButton.icon(
                                 onPressed: _playing ? _pausePlayback : _startPlayback,
-                                icon: Icon(_playing ? Icons.pause : Icons.play_arrow, size: 24),
-                                label: Text(_playing ? tr('إيقاف', 'Pause') : tr('تشغيل', 'Play')),
+                                icon: Icon(_playing ? Icons.pause : Icons.play_arrow, size: 22),
+                                label: Text(
+                                  _playing ? tr('إيقاف', 'Pause') : tr('تشغيل', 'Play'),
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5),
+                                ),
                                 style: ElevatedButton.styleFrom(
                                   backgroundColor: const Color(0xFFD4AF37),
                                   foregroundColor: Colors.black,
-                                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                                 ),
                               ),
+                              // تقديم لون
+                              IconButton(
+                                onPressed: _jumpToNextColor,
+                                icon: const Icon(Icons.skip_next, color: Color(0xFF56CCF2), size: 26),
+                                tooltip: tr('اللون التالي', 'Next Color'),
+                              ),
+                              // التحكم بالسرعة
                               Container(
                                 decoration: BoxDecoration(
                                   color: Colors.white10,
-                                  borderRadius: BorderRadius.circular(12),
+                                  borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     IconButton(
-                                      onPressed: _speedIndex > 0
-                                          ? () => setState(() => _speedIndex--)
-                                          : null,
-                                      icon: const Icon(Icons.remove, size: 18),
+                                      onPressed: _speedIndex > 0 ? () => setState(() => _speedIndex--) : null,
+                                      icon: const Icon(Icons.remove, size: 16),
                                       color: const Color(0xFFD4AF37),
                                       disabledColor: Colors.white24,
-                                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                      constraints: const BoxConstraints(minWidth: 30, minHeight: 34),
                                       padding: EdgeInsets.zero,
-                                      tooltip: tr('إبطاء', 'Slower'),
                                     ),
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                                      child: Text(
-                                        _speedLabels[_speedIndex],
-                                        style: const TextStyle(
-                                          color: Color(0xFFD4AF37),
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 13,
-                                        ),
-                                      ),
+                                    Text(
+                                      _speedLabels[_speedIndex],
+                                      style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 11.5),
                                     ),
                                     IconButton(
-                                      onPressed: _speedIndex < _speedSteps.length - 1
-                                          ? () => setState(() => _speedIndex++)
-                                          : null,
-                                      icon: const Icon(Icons.add, size: 18),
+                                      onPressed: _speedIndex < _speedSteps.length - 1 ? () => setState(() => _speedIndex++) : null,
+                                      icon: const Icon(Icons.add, size: 16),
                                       color: const Color(0xFFD4AF37),
                                       disabledColor: Colors.white24,
-                                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                      constraints: const BoxConstraints(minWidth: 30, minHeight: 34),
                                       padding: EdgeInsets.zero,
-                                      tooltip: tr('تسريع', 'Faster'),
                                     ),
                                   ],
                                 ),
@@ -3650,7 +3710,6 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
   VectorDesignData? _edited;
   bool _loading = true;
   bool _saving = false;
-  bool _editor3D = false;
 
   double _scaleX = 1.0;
   double _scaleY = 1.0;
@@ -3956,22 +4015,6 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
         title: Text(tr('تعديل الفلم', 'Edit Design'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
         actions: [
           if (_edited != null) ...[
-            TextButton(
-              onPressed: () => setState(() => _editor3D = !_editor3D),
-              style: TextButton.styleFrom(
-                backgroundColor: _editor3D ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                minimumSize: Size.zero,
-              ),
-              child: Text(
-                '3D',
-                style: TextStyle(
-                  color: _editor3D ? const Color(0xFFD4AF37) : Colors.white60,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 11.5,
-                ),
-              ),
-            ),
             IconButton(
               icon: const Icon(Icons.play_circle_outline, color: Color(0xFFD4AF37), size: 21),
               tooltip: tr('محاكاة الغرز', 'Simulate'),
@@ -4032,7 +4075,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
                                   data: _edited!,
                                   limit: _edited!.stX.length,
                                   showNeedle: false,
-                                  is3D: _editor3D,
+                                  is3D: true,
                                   showOriginCrosshair: _startAnchor >= 1 && _startAnchor <= 9,
                                   showCmGrid: true,
                                 ),
@@ -4837,7 +4880,7 @@ class _VectorStitchPainter extends CustomPainter {
     required this.data,
     required this.limit,
     required this.showNeedle,
-    this.is3D = false,
+    this.is3D = true,
     this.showOriginCrosshair = false,
     this.showCmGrid = false,
     this.zoomFactor = 1.0,
@@ -5437,7 +5480,7 @@ class TextToEmbroideryScreen extends StatefulWidget {
 }
 
 class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
-  final TextEditingController _textCtrl = TextEditingController(text: 'طارق');
+  final TextEditingController _textCtrl = TextEditingController(text: 'بسم الله');
   final TextEditingController _widthCmCtrl = TextEditingController(text: '12.0');
   final TextEditingController _heightCmCtrl = TextEditingController(text: '3.5');
 
@@ -5445,7 +5488,6 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   bool _generating = false;
   bool _saving = false;
   bool _loadingCatalog = true;
-  bool _is3DPreview = false; // العرض العادي بخيط رفيع وواضح افتراضياً مع زر 3D
 
   // اختيار مبسّط: لغة الفونط (A = عربي، E = إنجليزي) + رقم الفونط (1..5)
   bool _arabicGroup = true;
@@ -5712,22 +5754,6 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
         ),
         actions: [
           if (_vec != null) ...[
-            TextButton(
-              onPressed: () => setState(() => _is3DPreview = !_is3DPreview),
-              style: TextButton.styleFrom(
-                backgroundColor: _is3DPreview ? const Color(0xFFD4AF37).withOpacity(0.22) : Colors.white10,
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                minimumSize: Size.zero,
-              ),
-              child: Text(
-                '3D',
-                style: TextStyle(
-                  color: _is3DPreview ? const Color(0xFFD4AF37) : Colors.white60,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-              ),
-            ),
             IconButton(
               icon: const Icon(Icons.tune, color: Colors.greenAccent, size: 21),
               tooltip: tr('تعديل الفلم (البداية والإطار)', 'Edit Film (Start & Frame)'),
@@ -5820,7 +5846,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                 rotationDeg: _rotationDeg,
                                 pathMode: _pathMode,
                                 pathParam: _pathParam,
-                                is3D: _is3DPreview,
+                                is3D: true,
                                 onWidthCmDrag: (w) {
                                   setState(() {
                                     _widthCm = w;
@@ -5901,7 +5927,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                 if (!_arProFonts.containsKey(_fontNumber) && _arProFonts.containsKey(2)) {
                                   _fontNumber = 2;
                                 }
-                                if (_textCtrl.text.trim() == 'Tarik') _textCtrl.text = 'طارق';
+                                if (_textCtrl.text.trim() == 'Tarik') _textCtrl.text = 'بسم الله';
                               });
                               _generate();
                             }
@@ -5921,7 +5947,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                                 if (!_enProFonts.containsKey(_fontNumber) && _enProFonts.containsKey(1)) {
                                   _fontNumber = 1;
                                 }
-                                if (_textCtrl.text.trim() == 'طارق') _textCtrl.text = 'Tarik';
+                                if (_textCtrl.text.trim() == 'بسم الله') _textCtrl.text = 'Tarik';
                               });
                               _generate();
                             }
@@ -8375,4 +8401,4 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - Pro v6.4
+// Tarik emb - Pro v6.5
