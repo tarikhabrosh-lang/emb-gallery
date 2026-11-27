@@ -1817,12 +1817,12 @@ class TarikProFontEngine {
       if (rawSpans.isEmpty) continue;
       rawSpans.sort((a, b) => a.$1.compareTo(b.$1));
 
-      // دمج الفترات المتداخلة والمتجاورة (Interval Union — يمنع أي تداخل أو فاصل بين أجزاء الحرف!)
+      // دمج الفترات المتداخلة بدقة عالمية (تسامح 0.12 مم فقط لإغلاق التقاء الأعمدة دون سد فتحات الحرف أو تشويه حوافه)
       final List<(double, double)> merged = [rawSpans.first];
       for (int k = 1; k < rawSpans.length; k++) {
         final cur = rawSpans[k];
         final last = merged.last;
-        if (cur.$1 <= last.$2 + 3.5) {
+        if (cur.$1 <= last.$2 + 1.2) {
           merged[merged.length - 1] = (last.$1, math.max(last.$2, cur.$2));
         } else {
           merged.add(cur);
@@ -1924,17 +1924,25 @@ class TarikProFontEngine {
     final List<dynamic>? rawR1 = el['r1'] as List<dynamic>?;
     final List<dynamic>? rawR2 = el['r2'] as List<dynamic>?;
     if (rawR1 == null || rawR2 == null || rawR1.length < 4 || rawR2.length < 4) return;
-    final int n1 = rawR1.length ~/ 2;
-    final int n2 = rawR2.length ~/ 2;
+
+    // إعادة أخذ عينات متناسقة على جانبي العمود (24 مقطعاً) لمنع أي انكسار أو فجوة عند المنحنيات الحادة
+    final b1 = _buildScaledPoly(rawR1, ox, oy, scale);
+    final b2 = _buildScaledPoly(rawR2, ox, oy, scale);
+    final double maxLen = math.max(b1.$3, b2.$3);
+    if (maxLen < 1.5) return;
+
+    final int segs = (maxLen / 8.0).ceil().clamp(6, 48);
     final List<double> px = [];
     final List<double> py = [];
-    for (int i = 0; i < n1; i++) {
-      px.add(ox + (rawR1[i * 2] as num).toDouble() * scale);
-      py.add(oy + (rawR1[i * 2 + 1] as num).toDouble() * scale);
+    for (int i = 0; i <= segs; i++) {
+      final pt = _samplePoly(b1.$1, b1.$2, b1.$3, i / segs);
+      px.add(pt.$1);
+      py.add(pt.$2);
     }
-    for (int i = n2 - 1; i >= 0; i--) {
-      px.add(ox + (rawR2[i * 2] as num).toDouble() * scale);
-      py.add(oy + (rawR2[i * 2 + 1] as num).toDouble() * scale);
+    for (int i = segs; i >= 0; i--) {
+      final pt = _samplePoly(b2.$1, b2.$2, b2.$3, i / segs);
+      px.add(pt.$1);
+      py.add(pt.$2);
     }
     outX.add(px);
     outY.add(py);
@@ -2140,30 +2148,73 @@ class TarikProDahaoCalibrator {
   }
 }
 
-/// الثوابت الهندسية الموحّدة لجميع شاشات التطبيق (معرض، تفاصيل، تكبير، محاكاة، تعديل، كتابة)
+/// الثوابت الهندسية الموحّدة لجميع شاشات التطبيق (عرض 3D فقط في كامل التطبيق)
 class TarikRenderSpecs {
   static const double unitsPerMm = 10.0;
   static const double unitsPerCm = 100.0;
-  /// عرض الخيط الحقيقي في العرض ثلاثي الأبعاد (0.41 مم = 4.1 وحدة 0.1 مم)
+  /// عرض الخيط الحقيقي في العرض ثلاثي الأبعاد (0.41 مم = 4.1 وحدة)
   static const double threadWidthUnits3D = 4.1;
-  /// زاوية برمة الخيط الحلزونية (~51 درجة)
-  static const double threadTwistAngleRad = 51.0 * math.pi / 180.0;
-  /// طول دورة البرمة الواحدة (~0.95 مم)
-  static const double threadTwistPitchUnits = 9.5;
-  /// سماكة الخط الثابتة والموحّدة للعرض ثنائي الأبعاد (2D) على كل الشاشات ومستويات التكبير
+  /// زاوية برمة الخيط الحلزونية المفتوحة (20 درجة لإطالة البرمة وانسيابيتها)
+  static const double threadTwistAngleRad = 20.0 * math.pi / 180.0;
+  /// طول دورة البرمة الواحدة (~1.45 مم لتتناسب مع زاوية 20°)
+  static const double threadTwistPitchUnits = 14.5;
+  /// سماكة خط التحديد الهندسي في محرر العناصر فقط
   static const double stroke2DScreenPx = 1.05;
   /// حدود إلغاء القفزات العابرة
   static const double maxStitchUnits3D = 120.0;
   static const double maxStitchUnits2D = 145.0;
-  /// مقاسات الترتر والخرز المعايرة (3.0 مم و 5.0 مم)
+  /// مقاسات الترتر المعايرة: A = 3.0 مم، B = 5.0 مم
   static const List<double> seqDiamUnits = [30.0, 50.0, 30.0, 50.0];
-  static const double beadDiamUnits = 30.0;
+  /// مقاسات الخرز المعايرة: A = 2.5×2.5 مم، B = 4.0×4.0 مم، C = 5.0×2.5 مم
+  static const double beadADiamUnits = 25.0;
+  static const double beadBDiamUnits = 40.0;
+  static const double beadCLenUnits = 50.0;
+  static const double beadCHeightUnits = 25.0;
 }
 
-/// محسّن معاينات ملفات `.EMB` بدون أي مسح أو تغيير للخلفية الأصلية:
-/// - يحافظ على لون الخلفية الأساسي 100% (الأسود أسود، الرمادي رمادي، الأبيض أبيض) بدون أي شوائب حول الحواف
-/// - يقص الهوامش الخارجية الموحّدة فقط مع هامش أمان من نفس الخلفية وتحسين تباين وحدّة ناعم
+/// محسّن معاينات ملفات `.EMB` مع الحفاظ التام على لون الخلفية الأساسي وتمديده لآخر البطاقة بدون حواف بيضاء
 class TarikProEmbImageEnhancer {
+  static final Map<int, Color> _bgColorCache = {};
+
+  /// استخراج لون الخلفية الأساسي لصورة `.EMB` من الزوايا الأربعة لتلوين كامل البطاقة به بدون حواف بيضاء
+  static Future<Color> detectBgColor(Uint8List rawBytes) async {
+    final int key = rawBytes.length ^
+        (rawBytes.isNotEmpty ? rawBytes[0] << 8 : 0) ^
+        (rawBytes.length > 128 ? rawBytes[128] << 16 : 0) ^
+        (rawBytes.length > 256 ? rawBytes[rawBytes.length - 1] << 24 : 0);
+    final cached = _bgColorCache[key];
+    if (cached != null) return cached;
+    try {
+      final codec = await ui.instantiateImageCodec(rawBytes);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      final int w = img.width;
+      final int h = img.height;
+      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+      img.dispose();
+      codec.dispose();
+      if (bd == null || w < 4 || h < 4) return Colors.white;
+      final Uint8List src = bd.buffer.asUint8List();
+      final List<int> cornerIdx = [
+        0,
+        (w - 1) * 4,
+        (h - 1) * w * 4,
+        ((h - 1) * w + (w - 1)) * 4,
+      ];
+      int r = 0, g = 0, b = 0;
+      for (final ci in cornerIdx) {
+        r += src[ci];
+        g += src[ci + 1];
+        b += src[ci + 2];
+      }
+      final col = Color.fromARGB(255, r ~/ 4, g ~/ 4, b ~/ 4);
+      _bgColorCache[key] = col;
+      return col;
+    } catch (_) {
+      return Colors.white;
+    }
+  }
+
   static Future<Uint8List?> enhancePreview(Uint8List rawBytes) async {
     try {
       final codec = await ui.instantiateImageCodec(rawBytes);
@@ -2178,7 +2229,6 @@ class TarikProEmbImageEnhancer {
 
       final Uint8List src = bd.buffer.asUint8List();
 
-      // قراءة لون الخلفية الأساسي من الزوايا الأربعة فقط لتحديد الهوامش الفارغة (دون مسحه أو تبييضه!)
       final List<int> cornerIdx = [
         0,
         (w - 1) * 4,
@@ -2219,17 +2269,15 @@ class TarikProEmbImageEnhancer {
       }
 
       if (maxX <= minX + 4 || maxY <= minY + 4) return rawBytes;
-      // إبقاء هامش أمان 5 بكسل من نفس لون الخلفية الأصلية
-      minX = math.max(0, minX - 5);
-      minY = math.max(0, minY - 5);
-      maxX = math.min(w - 1, maxX + 5);
-      maxY = math.min(h - 1, maxY + 5);
+      minX = math.max(0, minX - 4);
+      minY = math.max(0, minY - 4);
+      maxX = math.min(w - 1, maxX + 4);
+      maxY = math.min(h - 1, maxY + 4);
 
       final int cw = maxX - minX + 1;
       final int ch = maxY - minY + 1;
       final out = Uint8List(cw * ch * 4);
 
-      // تحسين غير مدمّر للتباين والتشبع مع الحفاظ التام على بكسلات الخلفية الأصلية كما هي!
       for (int y = 0; y < ch; y++) {
         final int srcRow = (minY + y) * w * 4;
         final int dstRow = y * cw * 4;
@@ -2270,20 +2318,31 @@ class TarikProEmbImageEnhancer {
   }
 }
 
-/// مولّد وكاش الخامات الفوتوغرافية فائقة الدقة (256×256 PBR Sprites) للخرز والترتر:
-/// - دقة 256×256 تضمن نقاءً فائقاً حتى عند التكبير الشديد (10x..30x) بدون أي بكسلة
-/// - ألوان واضحة وفارقة وموحّدة بين المعاينة والتكبير: ذهبي، برونزي/بني، فضي، لؤلؤي، ياقوتي، وكريستالي
+/// مولّد وكاش الخامات الفوتوغرافية فائقة الدقة (256×256 PBR Sprites):
+/// - الترتر: قرص معدني مقعّر بدقة 256×256 (A=3 مم، B=5 مم)
+/// - الخرز A و B: مربّع مكسور الحواف (2.5×2.5 مم و 4.0×4.0 مم) بتدرّج ناصع من المنتصف وغامق من الأطراف
+/// - الخرز C: مستطيل مكسور الحواف (5.0×2.5 مم) بتدرّج ناصع من المنتصف وغامق من الأطراف يدور باتجاه الخيط
 class TarikProPbrSprites {
   static ui.Image? seqGold;
   static ui.Image? seqBronze;
   static ui.Image? seqSilver;
   static ui.Image? seqPearl;
   static ui.Image? seqRuby;
-  static ui.Image? beadPearl;
-  static ui.Image? beadGold;
-  static ui.Image? beadBronze;
-  static ui.Image? beadSilver;
-  static ui.Image? beadCrystal;
+
+  // خرز مربع مكسور الحواف (A: 2.5x2.5mm, B: 4.0x4.0mm)
+  static ui.Image? beadSqPearl;
+  static ui.Image? beadSqGold;
+  static ui.Image? beadSqBronze;
+  static ui.Image? beadSqSilver;
+  static ui.Image? beadSqCrystal;
+
+  // خرز مستطيل مكسور الحواف (C: 5.0x2.5mm باتجاه الخيط)
+  static ui.Image? beadRectPearl;
+  static ui.Image? beadRectGold;
+  static ui.Image? beadRectBronze;
+  static ui.Image? beadRectSilver;
+  static ui.Image? beadRectCrystal;
+
   static bool _ready = false;
   static Future<void>? _loadingFuture;
 
@@ -2302,11 +2361,18 @@ class TarikProPbrSprites {
     seqPearl = await _buildSequin(const [240, 234, 224], const [255, 255, 252], const [142, 132, 122], iridescent: true);
     seqRuby = await _buildSequin(const [214, 34, 62], const [255, 205, 215], const [88, 10, 22]);
 
-    beadPearl = await _buildBead(const [246, 242, 234], const [255, 255, 255], const [138, 130, 120], isPearl: true);
-    beadGold = await _buildBead(const [232, 178, 38], const [255, 248, 195], const [104, 66, 10]);
-    beadBronze = await _buildBead(const [166, 98, 44], const [248, 208, 165], const [64, 32, 8]);
-    beadSilver = await _buildBead(const [198, 206, 218], const [255, 255, 255], const [74, 82, 96]);
-    beadCrystal = await _buildBead(const [20, 168, 192], const [220, 252, 255], const [8, 64, 78]);
+    beadSqPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 256, h: 256);
+    beadSqGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 256, h: 256);
+    beadSqBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 256, h: 256);
+    beadSqSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 256, h: 256);
+    beadSqCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 256, h: 256);
+
+    beadRectPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 256, h: 128);
+    beadRectGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 256, h: 128);
+    beadRectBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 256, h: 128);
+    beadRectSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 256, h: 128);
+    beadRectCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 256, h: 128);
+
     _ready = true;
   }
 
@@ -2372,45 +2438,66 @@ class TarikProPbrSprites {
     return c.future;
   }
 
-  static Future<ui.Image> _buildBead(
+  /// خرز مربّع أو مستطيل مكسور الحواف (Chamfered / Rounded Box SDF) بتدرّج لوني ناصع من المنتصف وغامق من الأطراف
+  static Future<ui.Image> _buildChamferedBead(
     List<int> baseRgb,
     List<int> hiRgb,
     List<int> shRgb, {
-    bool isPearl = false,
-    int size = 256,
+    required int w,
+    required int h,
   }) async {
     final Uint8List pixels = await Isolate.run(() {
-      final out = Uint8List(size * size * 4);
-      const double l1x = -0.48, l1y = -0.54, l1z = 0.69;
-      const double h1x = -0.261, h1y = -0.294, h1z = 0.919;
-      for (int py = 0; py < size; py++) {
-        final double y = -1.2 + (2.4 * py / (size - 1));
-        for (int px = 0; px < size; px++) {
-          final double x = -1.2 + (2.4 * px / (size - 1));
-          final double r = math.sqrt(x * x + y * y);
-          final double rSh = math.sqrt((x - 0.09) * (x - 0.09) + (y - 0.11) * (y - 0.11));
-          final double shA = ((0.98 - rSh) / 0.24).clamp(0.0, 1.0) * 0.34;
-          final double sa = ((0.94 - r) / 0.03).clamp(0.0, 1.0);
+      final out = Uint8List(w * h * 4);
+      final double aspect = w / h; // 1.0 للمربّع، 2.0 للمستطيل (5×2.5 مم)
+      final double hx = 0.88 * aspect;
+      final double hy = 0.88;
+      const double cornerR = 0.28; // كسر الحواف (Chamfered rounded corner)
+
+      double sdRoundedBox(double px, double py, double bx, double by, double r) {
+        final double qx = px.abs() - (bx - r);
+        final double qy = py.abs() - (by - r);
+        final double ox = math.max(qx, 0.0);
+        final double oy = math.max(qy, 0.0);
+        return math.sqrt(ox * ox + oy * oy) + math.min(math.max(qx, qy), 0.0) - r;
+      }
+
+      for (int py = 0; py < h; py++) {
+        final double y = -1.18 + (2.36 * py / (h - 1));
+        for (int px = 0; px < w; px++) {
+          final double x = (-1.18 + (2.36 * px / (w - 1))) * aspect;
+
+          // ظل خفيف ناعم تحت الخرزة
+          final double dSh = sdRoundedBox(x - 0.07, y - 0.09, hx + 0.02, hy + 0.02, cornerR);
+          final double shA = ((0.14 - dSh) / 0.22).clamp(0.0, 1.0) * 0.34;
+
+          final double d = sdRoundedBox(x, y, hx, hy, cornerR);
+          final double bodyA = ((-d) / 0.045).clamp(0.0, 1.0);
+
           double cR = 0, cG = 0, cB = 0;
-          if (sa > 0.001) {
-            final double rn = (r / 0.94).clamp(0.0, 1.0);
-            final double nx = x / 0.94, ny = y / 0.94;
-            final double nz = math.sqrt((1.0 - rn * rn).clamp(0.0, 1.0));
-            final double ndotl = (nx * l1x + ny * l1y + nz * l1z).clamp(0.0, 1.0);
-            final double ndoth = (nx * h1x + ny * h1y + nz * h1z).clamp(0.0, 1.0);
-            final double fres = math.pow(1.0 - nz, 2.5).toDouble();
-            final double spec = math.pow(ndoth, isPearl ? 26.0 : 32.0).toDouble();
-            final double diff = isPearl ? math.pow(ndotl, 0.78).toDouble() : ndotl;
-            cR = shRgb[0] * (0.28 + 0.54 * (1.0 - ndotl)) + baseRgb[0] * (0.82 * diff) + hiRgb[0] * (0.98 * spec + 0.30 * fres);
-            cG = shRgb[1] * (0.28 + 0.54 * (1.0 - ndotl)) + baseRgb[1] * (0.82 * diff) + hiRgb[1] * (0.98 * spec + 0.30 * fres);
-            cB = shRgb[2] * (0.28 + 0.54 * (1.0 - ndotl)) + baseRgb[2] * (0.82 * diff) + hiRgb[2] * (0.98 * spec + 0.30 * fres);
+          if (bodyA > 0.001) {
+            // المسافة المعيّرة من المنتصف إلى الأطراف (0 = المركز الناصع، 1 = الأطراف الغامقة)
+            final double nx = x / hx;
+            final double ny = y / hy;
+            final double centerDist = math.sqrt(nx * nx * 0.85 + ny * ny * 0.85).clamp(0.0, 1.0);
+            // عامل السطوع: ناصع جداً في المنتصف ويتدرّج للظل الغامق عند الأطراف
+            final double dome = math.pow(1.0 - centerDist, 0.72).toDouble();
+            // شطفة حواف حادة قريبة من المحيط
+            final double edgeDark = ((-d) / 0.22).clamp(0.0, 1.0);
+            // بريق سطوع حريري ناصع في قلب الخرزة
+            final double spec = math.exp(-((nx + 0.08) * (nx + 0.08) * 6.5 + (ny + 0.10) * (ny + 0.10) * 7.5));
+
+            final double shadeT = (dome * 0.68 + edgeDark * 0.32).clamp(0.0, 1.0);
+            cR = shRgb[0] * (1.0 - shadeT) + baseRgb[0] * shadeT + (hiRgb[0] - baseRgb[0]) * (0.45 * dome + 0.78 * spec);
+            cG = shRgb[1] * (1.0 - shadeT) + baseRgb[1] * shadeT + (hiRgb[1] - baseRgb[1]) * (0.45 * dome + 0.78 * spec);
+            cB = shRgb[2] * (1.0 - shadeT) + baseRgb[2] * shadeT + (hiRgb[2] - baseRgb[2]) * (0.45 * dome + 0.78 * spec);
           }
-          final double oa = sa + shA * (1.0 - sa);
-          final int o = (py * size + px) * 4;
+
+          final double oa = bodyA + shA * (1.0 - bodyA);
+          final int o = (py * w + px) * 4;
           if (oa > 1e-4) {
-            out[o] = ((cR * sa) / oa).clamp(0, 255).round();
-            out[o + 1] = ((cG * sa) / oa).clamp(0, 255).round();
-            out[o + 2] = ((cB * sa) / oa).clamp(0, 255).round();
+            out[o] = ((cR * bodyA) / oa).clamp(0, 255).round();
+            out[o + 1] = ((cG * bodyA) / oa).clamp(0, 255).round();
+            out[o + 2] = ((cB * bodyA) / oa).clamp(0, 255).round();
             out[o + 3] = (oa * 255.0).clamp(0, 255).round();
           }
         }
@@ -2418,7 +2505,7 @@ class TarikProPbrSprites {
       return out;
     });
     final c = Completer<ui.Image>();
-    ui.decodeImageFromPixels(pixels, size, size, ui.PixelFormat.rgba8888, c.complete);
+    ui.decodeImageFromPixels(pixels, w, h, ui.PixelFormat.rgba8888, c.complete);
     return c.future;
   }
 
@@ -2430,27 +2517,29 @@ class TarikProPbrSprites {
     } else if (decorTheme == 3) {
       return bucket == 0 ? seqRuby : (bucket == 1 ? seqGold : (bucket == 2 ? seqSilver : seqPearl));
     }
-    // الافتراضي الموحّد (ذهبي + برونزي + لؤلؤي بدرجات واضحة وفارقة)
     return bucket == 1 ? seqGold : (bucket == 2 ? seqBronze : (bucket == 3 ? seqPearl : seqGold));
   }
 
   static ui.Image? beadFor(int code, int decorTheme) {
+    final bool isRectC = code == 3;
     if (decorTheme == 1) {
-      return code == 2 ? beadSilver : beadPearl;
+      if (isRectC) return beadRectSilver;
+      return code == 2 ? beadSqSilver : beadSqPearl;
     } else if (decorTheme == 2) {
-      return beadPearl;
+      return isRectC ? beadRectPearl : beadSqPearl;
     } else if (decorTheme == 3) {
-      return code == 2 ? beadCrystal : (code == 3 ? beadGold : beadPearl);
+      if (isRectC) return beadRectGold;
+      return code == 2 ? beadSqCrystal : beadSqPearl;
     }
-    return code == 2 ? beadGold : (code == 3 ? beadBronze : beadPearl);
+    if (isRectC) return beadRectBronze;
+    return code == 2 ? beadSqGold : beadSqPearl;
   }
 }
 
-/// المحرك المركزي الموحّد للرسم (Single Source of Truth):
-/// - 2D: سماكة خط واحدة ثابتة وحادة (1.05 بكسل شاشة) على كل الشاشات ومستويات التكبير
-/// - 3D: خيط مبروم حقيقي بعرض 0.41 مم وزاوية برمة 51° وتدرّج إضاءة من الظل عند نقطتَي نزول الإبرة إلى ذروة السطوع في المنتصف
-/// - الخرز والترتر: خامات PBR 256×256 بدقة تزيد تلقائياً مع التكبير وبألوان موحّدة وفارقة
-/// - شبكة السنتيمتر الحقيقية: 100 وحدة = 1.0 سم في الفونطات وتعديل الفلم
+/// المحرك المركزي الموحّد للرسم ثلاثي الأبعاد (3D ONLY):
+/// - خيط مبروم حقيقي بعرض 0.41 مم وزاوية برمة 20° وتدرّج إضاءة من الظل عند نقطتَي نزول الإبرة إلى ذروة السطوع في المنتصف
+/// - الترتر: A=3 مم، B=5 مم بخامات 256×256
+/// - الخرز: A=2.5×2.5 مم مربع مكسور الحواف، B=4×4 مم مربع مكسور الحواف، C=5×2.5 مم مستطيل يدور باتجاه الخيط
 class TarikUnifiedCanvasRenderer {
   /// رسم شبكة 1 سم × 1 سم حقيقية مرتبطة بمقياس التصميم (100 وحدة = 1 سم)
   static void drawCmGrid(
@@ -2491,14 +2580,38 @@ class TarikUnifiedCanvasRenderer {
     }
   }
 
-  /// رسم التصميم المتجهي الموحّد (2D ثابت السماكة أو 3D خيط مبروم حقيقي + خرز وترتر PBR)
+  /// إيجاد زاوية الخيط الحقيقية عند موقع خرزة مستطيلة C لتدور مع اتجاه الغرزة بدقة
+  static double _findThreadAngleAt(VectorDesignData data, double bx, double by) {
+    final int n = data.stX.length;
+    if (n < 2) return 0.0;
+    double bestDistSq = 1e12;
+    double bestAngle = 0.0;
+    for (int i = 1; i < n; i++) {
+      if (data.stMove[i] != 0) continue;
+      final double dx = data.stX[i] - bx;
+      final double dy = data.stY[i] - by;
+      final double d2 = dx * dx + dy * dy;
+      if (d2 < bestDistSq) {
+        final double sx = data.stX[i] - data.stX[i - 1];
+        final double sy = data.stY[i] - data.stY[i - 1];
+        if (sx * sx + sy * sy > 4.0) {
+          bestDistSq = d2;
+          bestAngle = math.atan2(sy, sx);
+          if (d2 < 4.0) break;
+        }
+      }
+    }
+    return bestAngle;
+  }
+
+  /// رسم التصميم المتجهي بالعرض ثلاثي الأبعاد الموحّد (3D Only) + خرز وترتر PBR
   static void paintDesign({
     required Canvas canvas,
     required VectorDesignData data,
     required double scale,
     required double offX,
     required double offY,
-    required bool is3D,
+    bool is3D = true, // العرض 3D فقط في كامل التطبيق
     int decorTheme = 0,
     int? stitchLimit,
     Rect? visibleRect,
@@ -2513,9 +2626,7 @@ class TarikUnifiedCanvasRenderer {
     final Uint8List stMove = data.stMove;
     final Uint8List stColor = data.stColor;
 
-    final double maxSegSq = is3D
-        ? (TarikRenderSpecs.maxStitchUnits3D * TarikRenderSpecs.maxStitchUnits3D)
-        : (TarikRenderSpecs.maxStitchUnits2D * TarikRenderSpecs.maxStitchUnits2D);
+    const double maxSegSq = TarikRenderSpecs.maxStitchUnits3D * TarikRenderSpecs.maxStitchUnits3D;
 
     final double cullPad = visibleRect != null ? math.max(24.0, scale * 60.0) : 0.0;
     final double vLeft = visibleRect != null ? visibleRect.left - cullPad : -1e9;
@@ -2523,35 +2634,271 @@ class TarikUnifiedCanvasRenderer {
     final double vTop = visibleRect != null ? visibleRect.top - cullPad : -1e9;
     final double vBottom = visibleRect != null ? visibleRect.bottom + cullPad : 1e9;
 
-    if (!is3D) {
-      // ================== 2D موحّد: سماكة ثابتة حادة ونقية ==================
-      Path currentPath = Path();
+    // ================== 3D موحّد: الخيط المبروم الحقيقي (0.41 مم، برمة 20°، تدرّج نقطتَي الإبرة) ==================
+    final double tw = (scale * TarikRenderSpecs.threadWidthUnits3D).clamp(1.15, 28.0);
+
+    int visCount = 0;
+    if (tw >= 1.8) {
+      double pSx = 0, pSy = 0;
+      for (int i = 0; i < nSt; i++) {
+        final double sx = stX[i] * scale + offX;
+        final double sy = stY[i] * scale + offY;
+        if (i > 0 && stMove[i] == 0) {
+          if (math.max(pSx, sx) >= vLeft &&
+              math.min(pSx, sx) <= vRight &&
+              math.max(pSy, sy) >= vTop &&
+              math.min(pSy, sy) <= vBottom) {
+            visCount++;
+            if (visCount > 15000) break;
+          }
+        }
+        pSx = sx;
+        pSy = sy;
+      }
+    }
+
+    final bool usePerStitchTwisted = tw >= 1.8 && visCount <= 15000;
+
+    if (usePerStitchTwisted) {
+      final bool drawTwistPlies = tw >= 2.8;
+      final double pitchPx = math.max(4.0, TarikRenderSpecs.threadTwistPitchUnits * scale);
+      final double shOff = (tw * 0.20).clamp(0.35, 3.2);
+      const double lx = -0.7071, ly = -0.7071;
+
+      final Paint shadowPaint = Paint()
+        ..color = Colors.black.withOpacity(0.18)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = tw * 1.04
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      final Paint bodyPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = tw
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      final Paint hiPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = (tw * 0.24).clamp(0.45, 4.5)
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      final Paint twistShadowPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = (tw * 0.13).clamp(0.4, 2.4)
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      final Paint twistLightPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = (tw * 0.12).clamp(0.35, 2.2)
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      double prevRx = 0.0, prevRy = 0.0;
+      double prevSx = 0.0, prevSy = 0.0;
+      int prevCol = -1;
+      bool hasPrev = false;
+
+      for (int i = 0; i < nSt; i++) {
+        final int cIdx = stColor[i];
+        final double rx = stX[i];
+        final double ry = stY[i];
+        final double sx = rx * scale + offX;
+        final double sy = ry * scale + offY;
+
+        bool isJump = stMove[i] != 0 || !hasPrev || cIdx != prevCol;
+        if (!isJump) {
+          final double dxR = rx - prevRx;
+          final double dyR = ry - prevRy;
+          if (dxR * dxR + dyR * dyR > maxSegSq) isJump = true;
+        }
+
+        if (!isJump &&
+            math.max(prevSx, sx) >= vLeft &&
+            math.min(prevSx, sx) <= vRight &&
+            math.max(prevSy, sy) >= vTop &&
+            math.min(prevSy, sy) <= vBottom) {
+          final double dx = sx - prevSx;
+          final double dy = sy - prevSy;
+          final double segLen = math.sqrt(dx * dx + dy * dy);
+          if (segLen >= 0.4) {
+            final double ux = dx / segLen;
+            final double uy = dy / segLen;
+            final double nx = -uy;
+            final double ny = ux;
+            final double align = (nx * lx + ny * ly).abs();
+
+            final Color baseColor = Color(data.paletteArgb[cIdx % palLen]);
+            final Color darkEnd = Color.lerp(baseColor, Colors.black, 0.52) ?? baseColor;
+            final Color midBody = Color.lerp(
+                  Color.lerp(baseColor, Colors.black, 0.06) ?? baseColor,
+                  Color.lerp(baseColor, Colors.white, 0.14) ?? baseColor,
+                  align,
+                ) ??
+                baseColor;
+            final Color peakCenter = Color.lerp(baseColor, Colors.white, 0.28 + 0.36 * align) ?? Colors.white;
+
+            final Offset p0 = Offset(prevSx, prevSy);
+            final Offset p1 = Offset(sx, sy);
+
+            // 1) ظل ناعم تحت الغرزة
+            canvas.drawLine(p0.translate(shOff, shOff), p1.translate(shOff, shOff), shadowPaint);
+
+            // 2) جسم الخيط المتدرج من ظل نقطتَي نزول الإبرة إلى ذروة السطوع في المنتصف
+            bodyPaint.shader = ui.Gradient.linear(
+              p0,
+              p1,
+              [darkEnd, midBody, peakCenter, midBody, darkEnd],
+              const [0.0, 0.19, 0.50, 0.81, 1.0],
+            );
+            canvas.drawLine(p0, p1, bodyPaint);
+
+            // 3) خط لمعان الحرير الرفيع على الحافة المضيئة
+            final double hiShift = tw * 0.17;
+            final Offset h0 = Offset(prevSx + ux * (segLen * 0.15) - hiShift, prevSy + uy * (segLen * 0.15) - hiShift);
+            final Offset h1 = Offset(sx - ux * (segLen * 0.15) - hiShift, sy - uy * (segLen * 0.15) - hiShift);
+            hiPaint.shader = ui.Gradient.linear(
+              h0,
+              h1,
+              [
+                peakCenter.withOpacity(0.05),
+                Colors.white.withOpacity(0.45 + 0.35 * align),
+                peakCenter.withOpacity(0.05),
+              ],
+              const [0.0, 0.5, 1.0],
+            );
+            canvas.drawLine(h0, h1, hiPaint);
+
+            // 4) برمة الخيط الحلزونية المفتوحة بزاوية 20° (طويلة وانسيابية على طول الغرزة)
+            if (drawTwistPlies && segLen > pitchPx * 0.55) {
+              twistShadowPaint.color = darkEnd.withOpacity(0.48);
+              twistLightPaint.color = peakCenter.withOpacity(0.46);
+              final double halfW = tw * 0.42;
+              final double slant = math.min(
+                segLen * 0.32,
+                halfW / math.tan(TarikRenderSpecs.threadTwistAngleRad), // زاوية 20° المفتوحة
+              );
+              final int plies = (segLen / pitchPx).floor().clamp(1, 18);
+              for (int k = 1; k <= plies; k++) {
+                final double t = k / (plies + 1);
+                final double cx = prevSx + dx * t;
+                final double cy = prevSy + dy * t;
+                final Offset a = Offset(cx - nx * halfW - ux * slant, cy - ny * halfW - uy * slant);
+                final Offset b = Offset(cx + nx * halfW + ux * slant, cy + ny * halfW + uy * slant);
+                canvas.drawLine(a, b, twistShadowPaint);
+                canvas.drawLine(
+                  a.translate(ux * (pitchPx * 0.18), uy * (pitchPx * 0.18)),
+                  b.translate(ux * (pitchPx * 0.18), uy * (pitchPx * 0.18)),
+                  twistLightPaint,
+                );
+              }
+            }
+          }
+        }
+
+        prevRx = rx;
+        prevRy = ry;
+        prevSx = sx;
+        prevSy = sy;
+        prevCol = cIdx;
+        hasPrev = true;
+      }
+    } else {
+      // النظرة البعيدة الكاملة السريعة للتصاميم الضخمة (8 حاويات إضاءة حريرية ثلاثية الأبعاد 0.41 مم)
+      const double lx = -0.7071, ly = -0.7071;
+      List<Path> angleBuckets = List.generate(8, (_) => Path());
+      List<bool> bucketUsed = List.filled(8, false);
+      Path fullColorPath = Path();
+      bool hasAnySeg = false;
       int activeColorIdx = -1;
-      bool hasSeg = false;
       double prevRx = 0.0, prevRy = 0.0;
       double prevSx = 0.0, prevSy = 0.0;
       bool hasPrev = false;
 
-      void flush2D() {
-        if (!hasSeg || activeColorIdx < 0) return;
+      void flush3DColor() {
+        if (!hasAnySeg || activeColorIdx < 0) return;
+        final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
+        final double shOff = (tw * 0.24).clamp(0.25, 1.2);
+        final double hiOff = (tw * 0.15).clamp(0.16, 0.7);
+
+        canvas.save();
+        canvas.translate(shOff, shOff);
         canvas.drawPath(
-          currentPath,
+          fullColorPath,
           Paint()
-            ..color = Color(data.paletteArgb[activeColorIdx % palLen])
+            ..color = Colors.black.withOpacity(0.16)
             ..style = PaintingStyle.stroke
-            ..strokeWidth = stroke2DPx
+            ..strokeWidth = tw * 1.05
             ..strokeCap = StrokeCap.round
             ..strokeJoin = StrokeJoin.round
             ..isAntiAlias = true,
         );
-        currentPath = Path();
-        hasSeg = false;
+        canvas.restore();
+
+        canvas.drawPath(
+          fullColorPath,
+          Paint()
+            ..color = Color.lerp(baseColor, Colors.black, 0.28) ?? baseColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = tw
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+
+        for (int b = 0; b < 8; b++) {
+          if (!bucketUsed[b]) continue;
+          final double midAng = (b + 0.5) * (math.pi / 8.0);
+          final double nx = -math.sin(midAng);
+          final double ny = math.cos(midAng);
+          final double align = (nx * lx + ny * ly).abs();
+          final Color bodyCol = Color.lerp(
+                Color.lerp(baseColor, Colors.black, 0.08) ?? baseColor,
+                Color.lerp(baseColor, Colors.white, 0.18) ?? baseColor,
+                align,
+              ) ??
+              baseColor;
+          final Color hiCol = (Color.lerp(baseColor, Colors.white, 0.36 + 0.46 * align) ?? Colors.white)
+              .withOpacity(0.45 + 0.38 * align);
+
+          canvas.drawPath(
+            angleBuckets[b],
+            Paint()
+              ..color = bodyCol
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = tw * 0.78
+              ..strokeCap = StrokeCap.round
+              ..strokeJoin = StrokeJoin.round
+              ..isAntiAlias = true,
+          );
+
+          canvas.save();
+          canvas.translate(-hiOff, -hiOff);
+          canvas.drawPath(
+            angleBuckets[b],
+            Paint()
+              ..color = hiCol
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = (tw * 0.24).clamp(0.24, 1.05)
+              ..strokeCap = StrokeCap.round
+              ..strokeJoin = StrokeJoin.round
+              ..isAntiAlias = true,
+          );
+          canvas.restore();
+        }
+
+        angleBuckets = List.generate(8, (_) => Path());
+        bucketUsed = List.filled(8, false);
+        fullColorPath = Path();
+        hasAnySeg = false;
       }
 
       for (int i = 0; i < nSt; i++) {
         final int cIdx = stColor[i];
         if (cIdx != activeColorIdx) {
-          flush2D();
+          flush3DColor();
           activeColorIdx = cIdx;
           hasPrev = false;
         }
@@ -2566,15 +2913,21 @@ class TarikUnifiedCanvasRenderer {
           final double dy = ry - prevRy;
           if (dx * dx + dy * dy > maxSegSq) isJump = true;
         }
-        if (!isJump) {
-          if (math.max(prevSx, sx) >= vLeft &&
-              math.min(prevSx, sx) <= vRight &&
-              math.max(prevSy, sy) >= vTop &&
-              math.min(prevSy, sy) <= vBottom) {
-            currentPath.moveTo(prevSx, prevSy);
-            currentPath.lineTo(sx, sy);
-            hasSeg = true;
-          }
+
+        if (!isJump &&
+            math.max(prevSx, sx) >= vLeft &&
+            math.min(prevSx, sx) <= vRight &&
+            math.max(prevSy, sy) >= vTop &&
+            math.min(prevSy, sy) <= vBottom) {
+          fullColorPath.moveTo(prevSx, prevSy);
+          fullColorPath.lineTo(sx, sy);
+          double ang = math.atan2(sy - prevSy, sx - prevSx);
+          if (ang < 0) ang += math.pi;
+          final int b = ((ang / math.pi) * 8.0).floor().clamp(0, 7);
+          angleBuckets[b].moveTo(prevSx, prevSy);
+          angleBuckets[b].lineTo(sx, sy);
+          bucketUsed[b] = true;
+          hasAnySeg = true;
         }
         prevRx = rx;
         prevRy = ry;
@@ -2582,313 +2935,10 @@ class TarikUnifiedCanvasRenderer {
         prevSy = sy;
         hasPrev = true;
       }
-      flush2D();
-    } else {
-      // ================== 3D موحّد: الخيط المبروم الحقيقي (0.41 مم، برمة 51°، تدرّج نقطتَي الإبرة) ==================
-      final double tw = (scale * TarikRenderSpecs.threadWidthUnits3D).clamp(1.1, 26.0);
-
-      // حساب عدد الغرز المرئية لاختيار مستوى التفاصيل المجهرية تلقائياً (Adaptive LOD)
-      int visCount = 0;
-      if (tw >= 2.0) {
-        double pSx = 0, pSy = 0;
-        for (int i = 0; i < nSt; i++) {
-          final double sx = stX[i] * scale + offX;
-          final double sy = stY[i] * scale + offY;
-          if (i > 0 && stMove[i] == 0) {
-            if (math.max(pSx, sx) >= vLeft &&
-                math.min(pSx, sx) <= vRight &&
-                math.max(pSy, sy) >= vTop &&
-                math.min(pSy, sy) <= vBottom) {
-              visCount++;
-              if (visCount > 14000) break;
-            }
-          }
-          pSx = sx;
-          pSy = sy;
-        }
-      }
-
-      final bool usePerStitchTwisted = tw >= 2.0 && visCount <= 14000;
-
-      if (usePerStitchTwisted) {
-        // المستوى المجهري الاحترافي: تدرّج طولي من ظل نقطتي الإبرة إلى ذروة السطوع في المنتصف + برمة الخيط 51°
-        final bool drawTwistPlies = tw >= 3.2;
-        final double pitchPx = math.max(3.5, TarikRenderSpecs.threadTwistPitchUnits * scale);
-        final double shOff = (tw * 0.20).clamp(0.35, 3.2);
-        const double lx = -0.7071, ly = -0.7071;
-
-        final Paint shadowPaint = Paint()
-          ..color = Colors.black.withOpacity(0.18)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = tw * 1.04
-          ..strokeCap = StrokeCap.round
-          ..isAntiAlias = true;
-
-        final Paint bodyPaint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = tw
-          ..strokeCap = StrokeCap.round
-          ..isAntiAlias = true;
-
-        final Paint hiPaint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = (tw * 0.24).clamp(0.45, 4.5)
-          ..strokeCap = StrokeCap.round
-          ..isAntiAlias = true;
-
-        final Paint twistShadowPaint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = (tw * 0.14).clamp(0.4, 2.6)
-          ..strokeCap = StrokeCap.round
-          ..isAntiAlias = true;
-
-        final Paint twistLightPaint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = (tw * 0.12).clamp(0.35, 2.2)
-          ..strokeCap = StrokeCap.round
-          ..isAntiAlias = true;
-
-        double prevRx = 0.0, prevRy = 0.0;
-        double prevSx = 0.0, prevSy = 0.0;
-        int prevCol = -1;
-        bool hasPrev = false;
-
-        for (int i = 0; i < nSt; i++) {
-          final int cIdx = stColor[i];
-          final double rx = stX[i];
-          final double ry = stY[i];
-          final double sx = rx * scale + offX;
-          final double sy = ry * scale + offY;
-
-          bool isJump = stMove[i] != 0 || !hasPrev || cIdx != prevCol;
-          if (!isJump) {
-            final double dxR = rx - prevRx;
-            final double dyR = ry - prevRy;
-            if (dxR * dxR + dyR * dyR > maxSegSq) isJump = true;
-          }
-
-          if (!isJump &&
-              math.max(prevSx, sx) >= vLeft &&
-              math.min(prevSx, sx) <= vRight &&
-              math.max(prevSy, sy) >= vTop &&
-              math.min(prevSy, sy) <= vBottom) {
-            final double dx = sx - prevSx;
-            final double dy = sy - prevSy;
-            final double segLen = math.sqrt(dx * dx + dy * dy);
-            if (segLen >= 0.4) {
-              final double ux = dx / segLen;
-              final double uy = dy / segLen;
-              final double nx = -uy;
-              final double ny = ux;
-              final double align = (nx * lx + ny * ly).abs();
-
-              final Color baseColor = Color(data.paletteArgb[cIdx % palLen]);
-              final Color darkEnd = Color.lerp(baseColor, Colors.black, 0.52) ?? baseColor;
-              final Color midBody = Color.lerp(
-                    Color.lerp(baseColor, Colors.black, 0.06) ?? baseColor,
-                    Color.lerp(baseColor, Colors.white, 0.14) ?? baseColor,
-                    align,
-                  ) ??
-                  baseColor;
-              final Color peakCenter = Color.lerp(baseColor, Colors.white, 0.28 + 0.36 * align) ?? Colors.white;
-
-              final Offset p0 = Offset(prevSx, prevSy);
-              final Offset p1 = Offset(sx, sy);
-
-              // 1) ظل ناعم تحت الغرزة
-              canvas.drawLine(p0.translate(shOff, shOff), p1.translate(shOff, shOff), shadowPaint);
-
-              // 2) جسم الخيط المتدرج من ظل نقطتَي نزول الإبرة إلى ذروة السطوع في المنتصف
-              bodyPaint.shader = ui.Gradient.linear(
-                p0,
-                p1,
-                [darkEnd, midBody, peakCenter, midBody, darkEnd],
-                const [0.0, 0.19, 0.50, 0.81, 1.0],
-              );
-              canvas.drawLine(p0, p1, bodyPaint);
-
-              // 3) خط لمعان الحرير الرفيع على الحافة المضيئة
-              final double hiShift = tw * 0.17;
-              final Offset h0 = Offset(prevSx + ux * (segLen * 0.15) - hiShift, prevSy + uy * (segLen * 0.15) - hiShift);
-              final Offset h1 = Offset(sx - ux * (segLen * 0.15) - hiShift, sy - uy * (segLen * 0.15) - hiShift);
-              hiPaint.shader = ui.Gradient.linear(
-                h0,
-                h1,
-                [
-                  peakCenter.withOpacity(0.05),
-                  Colors.white.withOpacity(0.45 + 0.35 * align),
-                  peakCenter.withOpacity(0.05),
-                ],
-                const [0.0, 0.5, 1.0],
-              );
-              canvas.drawLine(h0, h1, hiPaint);
-
-              // 4) برمة الخيط الحلزونية بزاوية 51° (عند التكبير القريب)
-              if (drawTwistPlies && segLen > pitchPx * 0.65) {
-                twistShadowPaint.color = darkEnd.withOpacity(0.55);
-                twistLightPaint.color = peakCenter.withOpacity(0.48);
-                final double halfW = tw * 0.44;
-                final double slant = halfW / math.tan(TarikRenderSpecs.threadTwistAngleRad); // tan(51°)
-                final int plies = (segLen / pitchPx).floor().clamp(1, 24);
-                for (int k = 1; k <= plies; k++) {
-                  final double t = k / (plies + 1);
-                  final double cx = prevSx + dx * t;
-                  final double cy = prevSy + dy * t;
-                  final Offset a = Offset(cx - nx * halfW - ux * slant, cy - ny * halfW - uy * slant);
-                  final Offset b = Offset(cx + nx * halfW + ux * slant, cy + ny * halfW + uy * slant);
-                  canvas.drawLine(a, b, twistShadowPaint);
-                  canvas.drawLine(
-                    a.translate(ux * (pitchPx * 0.22), uy * (pitchPx * 0.22)),
-                    b.translate(ux * (pitchPx * 0.22), uy * (pitchPx * 0.22)),
-                    twistLightPaint,
-                  );
-                }
-              }
-            }
-          }
-
-          prevRx = rx;
-          prevRy = ry;
-          prevSx = sx;
-          prevSy = sy;
-          prevCol = cIdx;
-          hasPrev = true;
-        }
-      } else {
-        // النظرة البعيدة الكاملة السريعة للتصاميم الضخمة (8 حاويات إضاءة حريرية + عرض 0.41 مم + نقاط إبرة ناعمة)
-        const double lx = -0.7071, ly = -0.7071;
-        List<Path> angleBuckets = List.generate(8, (_) => Path());
-        List<bool> bucketUsed = List.filled(8, false);
-        Path fullColorPath = Path();
-        bool hasAnySeg = false;
-        int activeColorIdx = -1;
-        double prevRx = 0.0, prevRy = 0.0;
-        double prevSx = 0.0, prevSy = 0.0;
-        bool hasPrev = false;
-
-        void flush3DColor() {
-          if (!hasAnySeg || activeColorIdx < 0) return;
-          final Color baseColor = Color(data.paletteArgb[activeColorIdx % palLen]);
-          final double shOff = (tw * 0.24).clamp(0.25, 1.2);
-          final double hiOff = (tw * 0.15).clamp(0.16, 0.7);
-
-          canvas.save();
-          canvas.translate(shOff, shOff);
-          canvas.drawPath(
-            fullColorPath,
-            Paint()
-              ..color = Colors.black.withOpacity(0.16)
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = tw * 1.05
-              ..strokeCap = StrokeCap.round
-              ..strokeJoin = StrokeJoin.round
-              ..isAntiAlias = true,
-          );
-          canvas.restore();
-
-          canvas.drawPath(
-            fullColorPath,
-            Paint()
-              ..color = Color.lerp(baseColor, Colors.black, 0.28) ?? baseColor
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = tw
-              ..strokeCap = StrokeCap.round
-              ..strokeJoin = StrokeJoin.round
-              ..isAntiAlias = true,
-          );
-
-          for (int b = 0; b < 8; b++) {
-            if (!bucketUsed[b]) continue;
-            final double midAng = (b + 0.5) * (math.pi / 8.0);
-            final double nx = -math.sin(midAng);
-            final double ny = math.cos(midAng);
-            final double align = (nx * lx + ny * ly).abs();
-            final Color bodyCol = Color.lerp(
-                  Color.lerp(baseColor, Colors.black, 0.08) ?? baseColor,
-                  Color.lerp(baseColor, Colors.white, 0.18) ?? baseColor,
-                  align,
-                ) ??
-                baseColor;
-            final Color hiCol = (Color.lerp(baseColor, Colors.white, 0.36 + 0.46 * align) ?? Colors.white)
-                .withOpacity(0.45 + 0.38 * align);
-
-            canvas.drawPath(
-              angleBuckets[b],
-              Paint()
-                ..color = bodyCol
-                ..style = PaintingStyle.stroke
-                ..strokeWidth = tw * 0.78
-                ..strokeCap = StrokeCap.round
-                ..strokeJoin = StrokeJoin.round
-                ..isAntiAlias = true,
-            );
-
-            canvas.save();
-            canvas.translate(-hiOff, -hiOff);
-            canvas.drawPath(
-              angleBuckets[b],
-              Paint()
-                ..color = hiCol
-                ..style = PaintingStyle.stroke
-                ..strokeWidth = (tw * 0.24).clamp(0.24, 1.05)
-                ..strokeCap = StrokeCap.round
-                ..strokeJoin = StrokeJoin.round
-                ..isAntiAlias = true,
-            );
-            canvas.restore();
-          }
-
-          angleBuckets = List.generate(8, (_) => Path());
-          bucketUsed = List.filled(8, false);
-          fullColorPath = Path();
-          hasAnySeg = false;
-        }
-
-        for (int i = 0; i < nSt; i++) {
-          final int cIdx = stColor[i];
-          if (cIdx != activeColorIdx) {
-            flush3DColor();
-            activeColorIdx = cIdx;
-            hasPrev = false;
-          }
-          final double rx = stX[i];
-          final double ry = stY[i];
-          final double sx = rx * scale + offX;
-          final double sy = ry * scale + offY;
-
-          bool isJump = stMove[i] != 0 || !hasPrev;
-          if (!isJump) {
-            final double dx = rx - prevRx;
-            final double dy = ry - prevRy;
-            if (dx * dx + dy * dy > maxSegSq) isJump = true;
-          }
-
-          if (!isJump &&
-              math.max(prevSx, sx) >= vLeft &&
-              math.min(prevSx, sx) <= vRight &&
-              math.max(prevSy, sy) >= vTop &&
-              math.min(prevSy, sy) <= vBottom) {
-            fullColorPath.moveTo(prevSx, prevSy);
-            fullColorPath.lineTo(sx, sy);
-            double ang = math.atan2(sy - prevSy, sx - prevSx);
-            if (ang < 0) ang += math.pi;
-            final int b = ((ang / math.pi) * 8.0).floor().clamp(0, 7);
-            angleBuckets[b].moveTo(prevSx, prevSy);
-            angleBuckets[b].lineTo(sx, sy);
-            bucketUsed[b] = true;
-            hasAnySeg = true;
-          }
-          prevRx = rx;
-          prevRy = ry;
-          prevSx = sx;
-          prevSy = sy;
-          hasPrev = true;
-        }
-        flush3DColor();
-      }
+      flush3DColor();
     }
 
-    // ================== رسم الترتر والخرز الفوتوغرافي (256×256 PBR) الموحّد ==================
+    // ================== رسم الترتر (A=3 مم، B=5 مم) والخرز (A=2.5×2.5، B=4×4، C=5×2.5 باتجاه الخيط) ==================
     final double progressRatio = data.stX.isNotEmpty ? (nSt / data.stX.length).clamp(0.0, 1.0) : 1.0;
 
     if (data.seqX.isNotEmpty) {
@@ -2917,17 +2967,6 @@ class TarikUnifiedCanvasRenderer {
             Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
             spritePaint,
           );
-        } else {
-          final double r = (dPx * 0.40).clamp(1.6, 60.0);
-          canvas.drawCircle(
-            Offset(sx, sy),
-            r,
-            Paint()
-              ..color = const Color(0xFFD4AF37)
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = (r * 0.28).clamp(0.8, 4.0)
-              ..isAntiAlias = true,
-          );
         }
       }
     }
@@ -2935,35 +2974,54 @@ class TarikUnifiedCanvasRenderer {
     if (data.beadX.isNotEmpty) {
       final int beadLim = (data.beadX.length * progressRatio).round().clamp(0, data.beadX.length);
       final spritePaint = Paint()..filterQuality = FilterQuality.high;
-      final double dPx = (TarikRenderSpecs.beadDiamUnits * scale * 1.22).clamp(3.5, 220.0);
       for (int i = 0; i < beadLim; i++) {
-        final double sx = data.beadX[i] * scale + offX;
-        final double sy = data.beadY[i] * scale + offY;
+        final double bx = data.beadX[i];
+        final double by = data.beadY[i];
+        final double sx = bx * scale + offX;
+        final double sy = by * scale + offY;
         if (sx < vLeft || sx > vRight || sy < vTop || sy > vBottom) continue;
 
-        final ui.Image? sp = TarikProPbrSprites.beadFor(data.beadCode[i], decorTheme);
-        if (sp != null) {
+        final int code = data.beadCode[i];
+        final ui.Image? sp = TarikProPbrSprites.beadFor(code, decorTheme);
+        if (sp == null) continue;
+
+        if (code == 3) {
+          // خرز C: مستطيل مكسور الحواف (5.0 × 2.5 مم) يدور تلقائياً باتجاه الخيط
+          final double wPx = (TarikRenderSpecs.beadCLenUnits * scale * 1.24).clamp(5.0, 260.0);
+          final double hPx = (TarikRenderSpecs.beadCHeightUnits * scale * 1.24).clamp(3.0, 140.0);
+          final double ang = _findThreadAngleAt(data, bx, by);
+          canvas.save();
+          canvas.translate(sx, sy);
+          canvas.rotate(ang);
+          canvas.drawImageRect(
+            sp,
+            Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
+            Rect.fromCenter(center: Offset.zero, width: wPx, height: hPx),
+            spritePaint,
+          );
+          canvas.restore();
+        } else {
+          // خرز A (2.5×2.5 مم) و B (4.0×4.0 مم): مربع مكسور الحواف
+          final double units = code == 2 ? TarikRenderSpecs.beadBDiamUnits : TarikRenderSpecs.beadADiamUnits;
+          final double dPx = (units * scale * 1.24).clamp(3.5, 220.0);
           canvas.drawImageRect(
             sp,
             Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
             Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
             spritePaint,
           );
-        } else {
-          final double r = (dPx * 0.40).clamp(1.5, 50.0);
-          canvas.drawCircle(Offset(sx, sy), r, Paint()..color = const Color(0xFFF5EFE6));
         }
       }
     }
   }
 }
 
-/// مولّد صور المعاينة (يستخدم TarikUnifiedCanvasRenderer نفسه لتوحيد 100% بين المعرض والتفاصيل والتكبير)
+/// مولّد صور المعاينة (يستخدم TarikUnifiedCanvasRenderer بالعرض ثلاثي الأبعاد الموحّد 3D Only)
 class TarikPro3DRenderer {
   static Future<Uint8List?> renderHighResPreview(
     String filePath, {
     double maxCanvas = 2200.0,
-    bool is3D = false,
+    bool is3D = true,
     bool transparentBg = true,
     int decorTheme = 0,
   }) async {
@@ -2976,7 +3034,7 @@ class TarikPro3DRenderer {
       return await renderVectorToPng(
         vec,
         maxCanvas: maxCanvas,
-        is3D: is3D,
+        is3D: true,
         transparentBg: transparentBg,
         decorTheme: decorTheme,
       );
@@ -2988,7 +3046,7 @@ class TarikPro3DRenderer {
   static Future<Uint8List?> renderVectorToPng(
     VectorDesignData data, {
     double maxCanvas = 2200.0,
-    bool is3D = false,
+    bool is3D = true,
     bool transparentBg = true,
     int decorTheme = 0,
   }) async {
@@ -3021,9 +3079,8 @@ class TarikPro3DRenderer {
       scale: scale,
       offX: -data.minX * scale + pad,
       offY: -data.minY * scale + pad,
-      is3D: is3D,
+      is3D: true,
       decorTheme: decorTheme,
-      stroke2DPx: maxCanvas >= 1400.0 ? 1.15 : 0.95,
     );
 
     final picture = recorder.endRecording();
@@ -4316,7 +4373,7 @@ class TarikProTbfParser {
     final previewPng = await TarikPro3DRenderer.renderVectorToPng(
       vec,
       maxCanvas: maxCanvas,
-      is3D: false,
+      is3D: true,
       transparentBg: false,
     );
     return EmbDesignInfo(
