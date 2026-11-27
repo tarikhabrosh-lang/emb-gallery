@@ -14,6 +14,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'parsers/emb_parser.dart';
+import 'parsers/tarik_pro_engine.dart';
 
 final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
 
@@ -3904,6 +3905,66 @@ class _VectorStitchPainter extends CustomPainter {
     }
     flush();
 
+    // رسم الترتر والخرز على لوحة المتجهات الحية (للمحاكاة وتعديل الفلم)
+    final double progressRatio = data.stX.isNotEmpty ? (count / data.stX.length).clamp(0.0, 1.0) : 1.0;
+    if (data.seqX.isNotEmpty) {
+      final int seqLim = (data.seqX.length * progressRatio).round().clamp(0, data.seqX.length);
+      const seqColors = [
+        Color(0xFFE53935),
+        Color(0xFFFB8C00),
+        Color(0xFF1E88E5),
+        Color(0xFF8E24AA),
+      ];
+      const seqRadiiUnits = [15.0, 22.0, 28.0, 35.0];
+      for (int i = 0; i < seqLim; i++) {
+        final int code = data.seqCode[i];
+        int b = 0;
+        if (code == 2 || code == 6) {
+          b = 1;
+        } else if (code == 3 || code == 16) {
+          b = 2;
+        } else if (code == 4 || code == 8 || code == 32) {
+          b = 3;
+        }
+        final double sx = data.seqX[i] * scale + offX;
+        final double sy = data.seqY[i] * scale + offY;
+        final double r = (seqRadiiUnits[b] * scale).clamp(1.6, 12.0);
+        canvas.drawCircle(
+          Offset(sx, sy),
+          r,
+          Paint()
+            ..color = seqColors[b]
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = (r * 0.28).clamp(0.7, 2.0)
+            ..isAntiAlias = true,
+        );
+      }
+    }
+
+    if (data.beadX.isNotEmpty) {
+      final int beadLim = (data.beadX.length * progressRatio).round().clamp(0, data.beadX.length);
+      const beadColors = [
+        Color(0xFFD4A017),
+        Color(0xFF00ACC1),
+        Color(0xFF8E24AA),
+      ];
+      final double r = (12.0 * scale).clamp(1.4, 6.5);
+      for (int i = 0; i < beadLim; i++) {
+        final int c = data.beadCode[i];
+        final int b = (c == 2) ? 1 : (c == 3 ? 2 : 0);
+        final double sx = data.beadX[i] * scale + offX;
+        final double sy = data.beadY[i] * scale + offY;
+        canvas.drawCircle(Offset(sx, sy), r, Paint()..color = beadColors[b]);
+        if (r >= 2.0) {
+          canvas.drawCircle(
+            Offset(sx - r * 0.25, sy - r * 0.25),
+            r * 0.32,
+            Paint()..color = const Color(0xBFFFFFFF),
+          );
+        }
+      }
+    }
+
     // علامة نقطة البداية والنهاية (⊕ خضراء/حمراء واضحة مثل برنامج ويلكم عند الإحداثي (0,0))
     if (showOriginCrosshair) {
       final double ox = offX;
@@ -4205,7 +4266,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   }
 
   Future<void> _initFontsAndGenerate() async {
-    final fonts = await InkStitchFontCatalog.loadIndex();
+    final fonts = await TarikProFontCatalog.loadIndex();
     if (!mounted) return;
     _arProFonts.clear();
     _enProFonts.clear();
@@ -4297,7 +4358,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
       final bool useProEnglish = !_arabicGroup && _enProFonts.containsKey(_fontNumber) && _isSatin;
 
       if (useProArabic) {
-        v = await InkStitchFontEngine.generate(
+        v = await TarikProFontEngine.generate(
           meta: _arProFonts[_fontNumber]!,
           text: txt,
           letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.8, 12.0),
@@ -4325,7 +4386,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           fontFamily: _arTtfFallbacks[(_fontNumber - 1).clamp(0, 4)],
         );
       } else if (useProEnglish) {
-        v = await InkStitchFontEngine.generate(
+        v = await TarikProFontEngine.generate(
           meta: _enProFonts[_fontNumber]!,
           text: txt,
           letterHeightCm: (_customHeightCm ?? 2.8).clamp(0.8, 12.0),
@@ -4887,6 +4948,41 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                           ),
                       ],
                     ),
+                    if (_pathMode != 'linear')
+                      Row(
+                        children: [
+                          Text(
+                            '${tr('انحناء', 'Curve')}: ${(_pathParam * 100).round()}%',
+                            style: const TextStyle(color: Color(0xFF56CCF2), fontSize: 11, fontWeight: FontWeight.bold),
+                          ),
+                          Expanded(
+                            child: Slider(
+                              value: _pathParam.clamp(-1.0, 1.0),
+                              min: -1.0,
+                              max: 1.0,
+                              divisions: 40,
+                              activeColor: const Color(0xFF56CCF2),
+                              onChanged: (v) {
+                                setState(() => _pathParam = v);
+                                _scheduleLiveGenerate();
+                              },
+                            ),
+                          ),
+                          if (_rotationDeg.abs() > 0.5)
+                            TextButton(
+                              onPressed: () {
+                                setState(() => _rotationDeg = 0.0);
+                                _generate();
+                              },
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(horizontal: 6),
+                                minimumSize: Size.zero,
+                              ),
+                              child: const Text('0°', style: TextStyle(color: Color(0xFFD4AF37), fontSize: 11, fontWeight: FontWeight.bold)),
+                            ),
+                        ],
+                      ),
                     const SizedBox(height: 6),
                     Row(
                       children: [
@@ -5058,9 +5154,16 @@ class ObjectEditorScreen extends StatefulWidget {
 class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
   VectorDesignData? _original;
   VectorDesignData? _composed;
-  List<DesignObject> _objects = const [];
-  List<DesignObjectTransform> _transforms = [];
-  final List<List<DesignObjectTransform>> _undoStack = [];
+  List<ProDesignObject> _objects = const [];
+  List<ProObjectTransform> _transforms = [];
+  List<int> _palette = [];
+  final List<List<ProObjectTransform>> _undoStack = [];
+
+  static const List<int> _extraThreadColors = [
+    0xFFFF1744, 0xFF007BFF, 0xFF00C853, 0xFFFFB300,
+    0xFFD500F9, 0xFFFF5722, 0xFF00E5FF, 0xFFFF007F,
+    0xFFD4AF37, 0xFF1B5E20, 0xFF3E2723, 0xFF000000,
+  ];
 
   int? _selectedTfIndex;
   bool _selectAllMode = false;
@@ -5080,7 +5183,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
 
   // حالة السحب التفاعلي المباشر للمقابض
   _WilcomHandle _activeHandle = _WilcomHandle.none;
-  List<DesignObjectTransform>? _dragStartTransforms;
+  List<ProObjectTransform>? _dragStartTransforms;
   Offset _dragStartDesign = Offset.zero;
   Offset _dragGroupCenter = Offset.zero;
   String? _liveHudText;
@@ -5110,12 +5213,13 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
     final v = widget.initialVector ?? (widget.design != null ? await VectorDesignLoader.load(widget.design!.filePath) : null);
     if (!mounted) return;
     if (v != null && v.stX.length >= 2) {
-      final objs = DesignObjectEditor.segment(v);
-      final tfs = List.generate(objs.length, (i) => DesignObjectTransform(sourceObjectId: i));
+      final objs = TarikProObjectEditor.segment(v);
+      final tfs = List.generate(objs.length, (i) => ProObjectTransform(sourceObjectId: i));
       setState(() {
         _original = v;
         _objects = objs;
         _transforms = tfs;
+        _palette = v.paletteArgb.toList();
         _composed = v;
         _selectedTfIndex = tfs.isNotEmpty ? 0 : null;
         _selectAllMode = false;
@@ -5141,7 +5245,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
     return const [];
   }
 
-  (double, double, double, double)? _selectionBoundsDesign([List<DesignObjectTransform>? tfsOverride]) {
+  (double, double, double, double)? _selectionBoundsDesign([List<ProObjectTransform>? tfsOverride]) {
     final tfs = tfsOverride ?? _transforms;
     final indices = _targetIndices;
     if (indices.isEmpty) return null;
@@ -5201,9 +5305,87 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
 
   void _rebuild({bool syncNums = true}) {
     if (_original == null) return;
-    final next = DesignObjectEditor.apply(_original!, _objects, _transforms);
+    final next = TarikProObjectEditor.apply(
+      _original!,
+      _objects,
+      _transforms,
+      customPaletteArgb: _palette,
+    );
     setState(() => _composed = next);
     if (syncNums) _syncNumericFields();
+  }
+
+  void _setSelectedColorIndex(int colorIdx) {
+    final indices = _targetIndices;
+    if (indices.isEmpty) return;
+    _pushUndo();
+    for (final idx in indices) {
+      _transforms[idx].colorIndexOverride = colorIdx;
+    }
+    _rebuild(syncNums: false);
+  }
+
+  Future<void> _pickAndAddNewColor() async {
+    final int? pickedArgb = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: const Color(0xFF18202E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                tr('إضافة لون جديد للعنصر المحدد', 'Add New Color for Selected Element'),
+                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                alignment: WrapAlignment.center,
+                children: _extraThreadColors.map((argb) {
+                  return GestureDetector(
+                    onTap: () => Navigator.pop(ctx, argb),
+                    child: Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: Color(argb),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white70, width: 2),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (pickedArgb == null || !mounted) return;
+    int existingIdx = _palette.indexOf(pickedArgb);
+    if (existingIdx == -1) {
+      setState(() => _palette.add(pickedArgb));
+      existingIdx = _palette.length - 1;
+    }
+    _setSelectedColorIndex(existingIdx);
+  }
+
+  void _toggleSelectedTrim() {
+    final indices = _targetIndices;
+    if (indices.isEmpty) return;
+    _pushUndo();
+    final bool nextVal = !_transforms[indices.first].insertTrimAfter;
+    for (final idx in indices) {
+      _transforms[idx].insertTrimAfter = nextVal;
+    }
+    _rebuild(syncNums: false);
   }
 
   /// تحويل إحداثيات التصميم <-> إحداثيات الشاشة مع دعم الزوم والتحريك بإصبعين
@@ -5286,7 +5468,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
     if (_original == null || _canvasSize == Size.zero) return;
     final designPt = _screenToDesign(localPos);
     final p = _canvasTransformParams(_canvasSize);
-    final hit = DesignObjectEditor.hitTest(_objects, _transforms, designPt.dx, designPt.dy, padUnits: 24.0 / p.$1);
+    final hit = TarikProObjectEditor.hitTest(_objects, _transforms, designPt.dx, designPt.dy, padUnits: 24.0 / p.$1);
 
     setState(() {
       if (hit != null) {
@@ -5326,7 +5508,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
     if (h == _WilcomHandle.none) {
       final designPt = _screenToDesign(pos);
       final p = _canvasTransformParams(_canvasSize);
-      final hit = DesignObjectEditor.hitTest(_objects, _transforms, designPt.dx, designPt.dy, padUnits: 22.0 / p.$1);
+      final hit = TarikProObjectEditor.hitTest(_objects, _transforms, designPt.dx, designPt.dy, padUnits: 22.0 / p.$1);
       if (hit != null) {
         setState(() {
           _selectAllMode = false;
@@ -5722,7 +5904,15 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
                               _selectAllMode
                                   ? '${tr('الكل محدد', 'All Selected')} ($activeCount)'
                                   : (hasSelection
-                                      ? '${tr('عنصر', 'Obj')} #${_selectedTfIndex! + 1}/$activeCount'
+                                      ? (() {
+                                          final tf = _transforms[_selectedTfIndex!];
+                                          final obj = _objects[tf.sourceObjectId];
+                                          final extra = StringBuffer();
+                                          if (obj.sequinsCount > 0) extra.write(' ✨${obj.sequinsCount}');
+                                          if (obj.beadsCount > 0) extra.write(' ●${obj.beadsCount}');
+                                          if (tf.insertTrimAfter) extra.write(' ✂️');
+                                          return '${tr('عنصر', 'Obj')} #${_selectedTfIndex! + 1}/$activeCount$extra';
+                                        })()
                                       : tr('اضغط على عنصر', 'Tap element')),
                               textAlign: TextAlign.center,
                               style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
@@ -5794,6 +5984,7 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
                                       original: _original!,
                                       objects: _objects,
                                       transforms: _transforms,
+                                      paletteArgb: _palette,
                                       selectedIndices: indices.toSet(),
                                       selectionBounds: _selectionBoundsDesign(),
                                       rotateHandlesMode: _rotateHandlesMode,
@@ -6043,6 +6234,84 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
                                         style: OutlinedButton.styleFrom(side: BorderSide(color: Colors.redAccent.withOpacity(0.5)), visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
                                       ),
                                     ],
+                                    OutlinedButton.icon(
+                                      onPressed: _toggleSelectedTrim,
+                                      icon: Icon(
+                                        Icons.content_cut,
+                                        size: 15,
+                                        color: _transforms[indices.first].insertTrimAfter ? Colors.black : Colors.orangeAccent,
+                                      ),
+                                      label: Text(
+                                        tr('مقص', 'Trim'),
+                                        style: TextStyle(
+                                          color: _transforms[indices.first].insertTrimAfter ? Colors.black : Colors.orangeAccent,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                      style: OutlinedButton.styleFrom(
+                                        backgroundColor: _transforms[indices.first].insertTrimAfter ? Colors.orangeAccent : null,
+                                        side: BorderSide(color: Colors.orangeAccent.withOpacity(0.65)),
+                                        visualDensity: VisualDensity.compact,
+                                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                // الصف 3: تغيير لون العنصر أو إضافة لون جديد
+                                Row(
+                                  children: [
+                                    Text(
+                                      tr('اللون:', 'Color:'),
+                                      style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: SizedBox(
+                                        height: 28,
+                                        child: ListView.separated(
+                                          scrollDirection: Axis.horizontal,
+                                          itemCount: _palette.length + 1,
+                                          separatorBuilder: (_, __) => const SizedBox(width: 6),
+                                          itemBuilder: (_, idx) {
+                                            if (idx == _palette.length) {
+                                              return GestureDetector(
+                                                onTap: _pickAndAddNewColor,
+                                                child: Container(
+                                                  width: 28,
+                                                  height: 28,
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(0xFFD4AF37).withOpacity(0.2),
+                                                    shape: BoxShape.circle,
+                                                    border: Border.all(color: const Color(0xFFD4AF37), width: 1.5),
+                                                  ),
+                                                  child: const Icon(Icons.add, size: 16, color: Color(0xFFD4AF37)),
+                                                ),
+                                              );
+                                            }
+                                            final tf0 = _transforms[indices.first];
+                                            final int activeColorIdx = tf0.colorIndexOverride ?? _objects[tf0.sourceObjectId].colorIndex;
+                                            final bool isColSel = (activeColorIdx % _palette.length) == idx;
+                                            return GestureDetector(
+                                              onTap: () => _setSelectedColorIndex(idx),
+                                              child: Container(
+                                                width: 26,
+                                                height: 26,
+                                                decoration: BoxDecoration(
+                                                  color: Color(_palette[idx]),
+                                                  shape: BoxShape.circle,
+                                                  border: Border.all(
+                                                    color: isColSel ? const Color(0xFFD4AF37) : Colors.white38,
+                                                    width: isColSel ? 2.6 : 1.2,
+                                                  ),
+                                                ),
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ),
                                   ],
                                 ),
                               ],
@@ -6058,8 +6327,9 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
 
 class _ObjectEditorCanvasPainter extends CustomPainter {
   final VectorDesignData original;
-  final List<DesignObject> objects;
-  final List<DesignObjectTransform> transforms;
+  final List<ProDesignObject> objects;
+  final List<ProObjectTransform> transforms;
+  final List<int> paletteArgb;
   final Set<int> selectedIndices;
   final (double, double, double, double)? selectionBounds;
   final bool rotateHandlesMode;
@@ -6071,6 +6341,7 @@ class _ObjectEditorCanvasPainter extends CustomPainter {
     required this.original,
     required this.objects,
     required this.transforms,
+    required this.paletteArgb,
     required this.selectedIndices,
     required this.selectionBounds,
     required this.rotateHandlesMode,
@@ -6094,8 +6365,21 @@ class _ObjectEditorCanvasPainter extends CustomPainter {
     final double offX = (baseOffX - scx) * viewZoom + scx + viewPan.dx;
     final double offY = (baseOffY - scy) * viewZoom + scy + viewPan.dy;
 
-    final int palLen = original.paletteArgb.length;
+    final List<int> activePal = paletteArgb.isNotEmpty ? paletteArgb : original.paletteArgb.toList();
+    final int palLen = max(1, activePal.length);
     final bool hasAnySel = selectedIndices.isNotEmpty;
+    final Uint8List? devArr = original.stDev;
+    const seqColors = [
+      Color(0xFFE53935),
+      Color(0xFFFB8C00),
+      Color(0xFF1E88E5),
+      Color(0xFF8E24AA),
+    ];
+    const beadColors = [
+      Color(0xFFD4A017),
+      Color(0xFF00ACC1),
+      Color(0xFF8E24AA),
+    ];
 
     for (int tIdx = 0; tIdx < transforms.length; tIdx++) {
       final tf = transforms[tIdx];
@@ -6111,6 +6395,9 @@ class _ObjectEditorCanvasPainter extends CustomPainter {
 
       final path = Path();
       bool hasMove = false;
+      final List<(double, double, int)> objSeqs = [];
+      final List<(double, double, int)> objBeads = [];
+
       for (final rng in obj.ranges) {
         final int s = rng.$1.clamp(0, original.stX.length);
         final int e = rng.$2.clamp(s, original.stX.length);
@@ -6127,20 +6414,55 @@ class _ObjectEditorCanvasPainter extends CustomPainter {
           } else {
             path.lineTo(sx, sy);
           }
+          if (devArr != null && i < devArr.length) {
+            final int dt = devArr[i] & 0x0F;
+            if (dt >= 1 && dt <= 4) {
+              objSeqs.add((sx, sy, dt - 1));
+            } else if (dt >= 5 && dt <= 7) {
+              objBeads.add((sx, sy, dt - 5));
+            }
+          }
         }
       }
 
-      final Color col = Color(original.paletteArgb[obj.colorIndex % palLen]);
+      final int effectiveColorIdx = tf.colorIndexOverride ?? obj.colorIndex;
+      final Color col = Color(activePal[effectiveColorIdx % palLen]);
+      final double opacity = isSel ? 1.0 : (hasAnySel ? 0.38 : 1.0);
       canvas.drawPath(
         path,
         Paint()
-          ..color = isSel ? col : col.withOpacity(hasAnySel ? 0.38 : 1.0)
+          ..color = col.withOpacity(opacity)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = isSel ? 0.80 : 0.55
+          ..strokeWidth = isSel ? 0.85 : 0.55
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true,
       );
+
+      if (objSeqs.isNotEmpty) {
+        final double sr = (18.0 * scale * max(tf.scaleX, tf.scaleY)).clamp(1.6, 11.0);
+        for (final sq in objSeqs) {
+          canvas.drawCircle(
+            Offset(sq.$1, sq.$2),
+            sr,
+            Paint()
+              ..color = seqColors[sq.$3 % 4].withOpacity(opacity)
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = (sr * 0.28).clamp(0.7, 2.0),
+          );
+        }
+      }
+
+      if (objBeads.isNotEmpty) {
+        final double br = (12.0 * scale * max(tf.scaleX, tf.scaleY)).clamp(1.5, 6.5);
+        for (final bd in objBeads) {
+          canvas.drawCircle(
+            Offset(bd.$1, bd.$2),
+            br,
+            Paint()..color = beadColors[bd.$3 % 3].withOpacity(opacity),
+          );
+        }
+      }
     }
 
     // إطار تحديد تفاعلي مثل برنامج ويلكم بمقابض زوايا وأضلاع ومقبض دوران علوي ومركز الدوران ⊕
@@ -6756,4 +7078,4 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - Pro v3
+// Tarik emb - Pro v4
