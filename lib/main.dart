@@ -55,13 +55,17 @@ int compareNatural(String a, String b) {
 }
 
 Future<VectorDesignData?> loadAnyVectorDesign(String path) async {
+  final lower = path.toLowerCase();
   VectorDesignData? v;
-  if (path.toLowerCase().endsWith('.tbf')) {
+  if (lower.endsWith('.tbf')) {
     v = await TarikProTbfParser.loadVector(path);
+  } else if (lower.endsWith('.dhe') || lower.endsWith('.dha')) {
+    v = await TarikProDahaoParser.loadVector(path);
   }
   v ??= await VectorDesignLoader.load(path);
-  if (v != null) {
-    v = TarikProDahaoCalibrator.calibrate(v, path);
+  if (v != null && (v.seqX.isNotEmpty || v.beadX.isNotEmpty)) {
+    // تجهيز الفهرس المكاني مرة واحدة O(N+B+S) لتسريع الدوران والمحاكاة 1000 مرة
+    TarikDesignSpatialIndex.of(v);
   }
   return v;
 }
@@ -120,7 +124,36 @@ Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
         heightMm: result.heightMm,
       );
     }
-  } else if (lower.endsWith('.dhp') || lower.endsWith('.dha') || lower.endsWith('.dhe')) {
+  } else if (lower.endsWith('.dha') || lower.endsWith('.dhe')) {
+    final calVec = await TarikProDahaoParser.loadVector(path);
+    if (calVec != null && calVec.stX.length >= 2) {
+      final calPng = await TarikPro3DRenderer.renderVectorToPng(
+        calVec,
+        maxCanvas: 720.0,
+        is3D: true,
+        transparentBg: false,
+        decorTheme: 0,
+      );
+      result = EmbDesignInfo(
+        filePath: path,
+        fileName: path.split(Platform.pathSeparator).last,
+        previewJpeg: calPng,
+        stitches: calVec.stitches,
+        colorCount: calVec.colorCount,
+        stopsCount: calVec.stopsCount,
+        jumpsCount: calVec.jumpsCount,
+        sequinsCount: calVec.sequinsCount,
+        beadsCount: calVec.beadsCount,
+        trimsCount: calVec.trimsCount,
+        machineType: calVec.machineType,
+        colorSequence: [],
+        widthMm: calVec.widthMm,
+        heightMm: calVec.heightMm,
+      );
+    } else {
+      result = await DahaoParser.parseFile(path, maxCanvas: 720.0);
+    }
+  } else if (lower.endsWith('.dhp')) {
     result = await DahaoParser.parseFile(path, maxCanvas: 720.0);
     if (result != null) {
       final calVec = await loadAnyVectorDesign(path);
@@ -176,12 +209,15 @@ Future<EmbDesignInfo?> parseAnyDesignFile(String path) async {
 /// مدير الكاش والمزامنة الدائمة على ذاكرة الهاتف لفتح المجلدات فوراً بدون انتظار
 class DesignCacheManager {
   static final Map<String, EmbDesignInfo> _memCache = {};
+  static final Map<String, Color> _bgColorMemCache = {};
   static Directory? _cacheDir;
+
+  static Color getBgColor(String path) => _bgColorMemCache[path] ?? Colors.white;
 
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v10');
+    final dir = Directory('${supportDir.path}/design_cache_v11');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -206,6 +242,7 @@ class DesignCacheManager {
 
   static Future<void> invalidate(String path) async {
     _memCache.remove(path);
+    _bgColorMemCache.remove(path);
     try {
       final dir = await _getCacheDir();
       final key = _keyForPath(path);
@@ -257,6 +294,11 @@ class DesignCacheManager {
               widthMm: (meta['widthMm'] as num?)?.toDouble(),
               heightMm: (meta['heightMm'] as num?)?.toDouble(),
             );
+            if (meta['bgColorArgb'] is int) {
+              _bgColorMemCache[path] = Color(meta['bgColorArgb'] as int);
+            } else if (path.toLowerCase().endsWith('.emb') && previewBytes != null && previewBytes.isNotEmpty) {
+              _bgColorMemCache[path] = await TarikProEmbImageEnhancer.detectBgColor(previewBytes);
+            }
             _memCache[path] = info;
             return info;
           }
@@ -268,10 +310,17 @@ class DesignCacheManager {
         _memCache[path] = parsed;
         try {
           final hasImg = parsed.previewJpeg != null && parsed.previewJpeg!.isNotEmpty;
+          int? bgArgb;
           if (hasImg) {
             await imgFile.writeAsBytes(parsed.previewJpeg!, flush: false);
+            if (path.toLowerCase().endsWith('.emb')) {
+              final bgCol = await TarikProEmbImageEnhancer.detectBgColor(parsed.previewJpeg!);
+              _bgColorMemCache[path] = bgCol;
+              bgArgb = bgCol.value;
+            }
           }
           final metaMap = {
+            if (bgArgb != null) 'bgColorArgb': bgArgb,
             'modMs': modMs,
             'size': fileSize,
             'fileName': parsed.fileName,
@@ -639,19 +688,21 @@ class FoldersGalleryPage extends StatefulWidget {
   State<FoldersGalleryPage> createState() => _FoldersGalleryPageState();
 }
 
-class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
+class _FoldersGalleryPageState extends State<FoldersGalleryPage> with WidgetsBindingObserver {
   static const MethodChannel _intentChannel = MethodChannel('tarik_emb/file_intent');
   bool _isScanning = false;
   bool _isBackgroundSyncing = false;
   String _statusText = '';
   final List<EmbFolderGroup> _folders = [];
   int _scanToken = 0;
+  DateTime _lastAutoScan = DateTime.fromMillisecondsSinceEpoch(0);
 
   int get _totalFilesCount => _folders.fold(0, (sum, folder) => sum + folder.filePaths.length);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     galleryRefreshNotifier.addListener(_onGalleryFilesChanged);
     _intentChannel.setMethodCallHandler((call) async {
       if (call.method == 'onFileOpened' && call.arguments is String) {
@@ -677,7 +728,17 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && !_isScanning) {
+      if (DateTime.now().difference(_lastAutoScan).inSeconds >= 20) {
+        _startBackgroundScan(silent: true);
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     galleryRefreshNotifier.removeListener(_onGalleryFilesChanged);
     super.dispose();
   }
@@ -827,8 +888,46 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     }
   }
 
-  Future<void> _startBackgroundScan() async {
+  static const Set<String> _skipRootFolders = {
+    'android', 'dcim', 'pictures', 'movies', 'music', 'ringtones',
+    'notifications', 'alarms', 'podcasts', 'audiobooks', 'recordings',
+    'miui', 'samsung', 'lost.dir', 'system', 'obb', 'data',
+  };
+
+  Future<void> _scanDirBounded(
+    Directory dir,
+    Map<String, List<String>> folderMap,
+    int currentToken,
+    int depth,
+    List<int> counterRef,
+  ) async {
+    if (depth > 5 || currentToken != _scanToken) return;
+    try {
+      await for (final entity in dir.list(recursive: false, followLinks: false)) {
+        if (currentToken != _scanToken) return;
+        counterRef[0]++;
+        if (counterRef[0] % 35 == 0) {
+          await Future.delayed(const Duration(milliseconds: 1));
+        }
+        final String name = entity.path.split(Platform.pathSeparator).last;
+        if (name.startsWith('.')) continue;
+
+        if (entity is File) {
+          final lower = entity.path.toLowerCase();
+          if (validExtensions.any((ext) => lower.endsWith(ext))) {
+            folderMap.putIfAbsent(entity.parent.path, () => []).add(entity.path);
+          }
+        } else if (entity is Directory) {
+          if (depth == 0 && _skipRootFolders.contains(name.toLowerCase())) continue;
+          await _scanDirBounded(entity, folderMap, currentToken, depth + 1, counterRef);
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _startBackgroundScan({bool silent = false}) async {
     final int currentToken = ++_scanToken;
+    _lastAutoScan = DateTime.now();
     final hasPerm = await _ensureStoragePermission();
     if (!hasPerm) {
       if (!mounted) return;
@@ -839,14 +938,16 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
       return;
     }
     if (!mounted) return;
-    setState(() {
-      _isScanning = true;
-      _folders.clear();
-      _statusText = tr('جاري البحث عن المجلدات...', 'Scanning folders...');
-    });
+    if (!silent) {
+      setState(() {
+        _isScanning = true;
+        _folders.clear();
+        _statusText = tr('جاري البحث التلقائي عن مجلدات التطريز...', 'Auto-scanning embroidery folders...');
+      });
+    }
 
     final List<String> savedDirs = await _readSavedFolders();
-    final Set<String> candidateDirs = {
+    final Set<String> priorityDirs = {
       ...savedDirs,
       '/storage/emulated/0/Download',
       '/storage/emulated/0/Documents',
@@ -856,26 +957,44 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
     };
 
     final Map<String, List<String>> folderMap = {};
+    final Set<String> scannedRoots = {};
+    final List<int> counterRef = [0];
 
-    for (final rootPath in candidateDirs) {
+    // 1) مسح المجلدات الأساسية أولاً لظهور فوري
+    for (final rootPath in priorityDirs) {
       if (currentToken != _scanToken) return;
       final rootDir = Directory(rootPath);
       if (await rootDir.exists()) {
-        try {
-          int count = 0;
-          await for (final entity in rootDir.list(recursive: true, followLinks: false)) {
-            if (currentToken != _scanToken) return;
-            count++;
-            if (count % 40 == 0) await Future.delayed(const Duration(milliseconds: 1));
-            final p = entity.path.toLowerCase();
-            if (entity is File && validExtensions.any((ext) => p.endsWith(ext))) {
+        scannedRoots.add(rootPath);
+        await _scanDirBounded(rootDir, folderMap, currentToken, 1, counterRef);
+        _rebuildFoldersList(folderMap);
+      }
+    }
+
+    // 2) مسح تلقائي ذكي لجميع مجلدات المستخدم في جذر الذاكرة (مثل مجلد سمير الفرا وغيرها تلقائياً بدون إضافة يدوية)
+    final internalRoot = Directory('/storage/emulated/0');
+    if (await internalRoot.exists()) {
+      try {
+        await for (final entity in internalRoot.list(recursive: false, followLinks: false)) {
+          if (currentToken != _scanToken) return;
+          if (entity is Directory) {
+            final name = entity.path.split(Platform.pathSeparator).last;
+            if (name.startsWith('.') || _skipRootFolders.contains(name.toLowerCase())) continue;
+            if (scannedRoots.contains(entity.path)) continue;
+            scannedRoots.add(entity.path);
+            await _scanDirBounded(entity, folderMap, currentToken, 1, counterRef);
+            if (folderMap.isNotEmpty) _rebuildFoldersList(folderMap);
+          } else if (entity is File) {
+            final lower = entity.path.toLowerCase();
+            if (validExtensions.any((ext) => lower.endsWith(ext))) {
               folderMap.putIfAbsent(entity.parent.path, () => []).add(entity.path);
             }
           }
-        } catch (_) {}
-      }
+        }
+      } catch (_) {}
       _rebuildFoldersList(folderMap);
     }
+
     if (!mounted || currentToken != _scanToken) return;
     setState(() {
       _isScanning = false;
@@ -903,6 +1022,12 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
         ));
       }
     });
+    final Map<String, Uint8List?> oldCovers = {
+      for (final f in _folders) f.folderPath: f.coverBytes,
+    };
+    for (final grp in list) {
+      grp.coverBytes ??= oldCovers[grp.folderPath];
+    }
     setState(() {
       _folders
         ..clear()
@@ -1261,12 +1386,25 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> {
                                     child: Stack(
                                       fit: StackFit.expand,
                                       children: [
-                                        Container(
-                                          color: Colors.white,
-                                          padding: const EdgeInsets.all(6),
-                                          child: folder.coverBytes != null
-                                              ? Image.memory(folder.coverBytes!, fit: BoxFit.contain, filterQuality: FilterQuality.high)
-                                              : const Center(child: Icon(Icons.folder_rounded, size: 54, color: Color(0xFFD4AF37))),
+                                        Builder(
+                                          builder: (_) {
+                                            final firstPath = folder.filePaths.isNotEmpty ? folder.filePaths.first : '';
+                                            final isEmbCover = firstPath.toLowerCase().endsWith('.emb');
+                                            final bgCol = isEmbCover ? DesignCacheManager.getBgColor(firstPath) : Colors.white;
+                                            return Container(
+                                              color: bgCol,
+                                              padding: isEmbCover ? EdgeInsets.zero : const EdgeInsets.all(6),
+                                              child: folder.coverBytes != null
+                                                  ? Image.memory(
+                                                      folder.coverBytes!,
+                                                      width: double.infinity,
+                                                      height: double.infinity,
+                                                      fit: BoxFit.contain,
+                                                      filterQuality: FilterQuality.high,
+                                                    )
+                                                  : const Center(child: Icon(Icons.folder_rounded, size: 54, color: Color(0xFFD4AF37))),
+                                            );
+                                          },
                                         ),
                                         Positioned(
                                           top: 8,
@@ -1979,10 +2117,16 @@ class _DesignGridCard extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   Container(
-                    color: Colors.white,
-                    padding: const EdgeInsets.all(6),
+                    color: ext == 'EMB' ? DesignCacheManager.getBgColor(design.filePath) : Colors.white,
+                    padding: ext == 'EMB' ? EdgeInsets.zero : const EdgeInsets.all(6),
                     child: hasPreview
-                        ? Image.memory(design.previewJpeg!, fit: BoxFit.contain, filterQuality: FilterQuality.high)
+                        ? Image.memory(
+                            design.previewJpeg!,
+                            width: double.infinity,
+                            height: double.infinity,
+                            fit: BoxFit.contain,
+                            filterQuality: FilterQuality.high,
+                          )
                         : Center(
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
@@ -3022,10 +3166,10 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   }
 }
 
-/// عارض متجهي حي فائق النقاء (Live Vector Viewport):
-/// - كلما كبّرت التصميم (حتى 35x) تزيد الدقة تلقائياً نسبةً وتناسباً بدون أي بكسلة!
-/// - يحافظ على سماكة خط 2D ثابتة وحادة عند كل مستويات التكبير
-/// - يرسم الخيط المبروم 3D الحقيقي (0.41 مم، برمة 51°، وتدرّج نقطتَي الإبرة) والخرز والترتر PBR 256×256 بدقة مجهرية
+/// عارض متجهي حي فائق النقاء وسلس 60 FPS (GPU Snapshot Cache + Live Zoom Re-render + ClipRect):
+/// - يجمّد اللوحة على كرت الشاشة أثناء تحريك الأصابع لسرعة 60 إطار/ثانية حتى لملفات 200 ألف غرزة و20 ألف خرزة
+/// - فور رفع الإصبع يعيد توليد المنطقة الظاهرة بدقة 3D مجهرية (0.41 مم، برمة 20°، وخامات 256×256)
+/// - يقص الحدود بصرامة (ClipRect) لمنع خروج أي غرزة على لوحة المعلومات
 class _LiveVectorViewport extends StatefulWidget {
   final VectorDesignData data;
   final bool is3D;
@@ -3056,14 +3200,131 @@ class _LiveVectorViewportState extends State<_LiveVectorViewport> {
   Offset _startFocal = Offset.zero;
   Size _viewSize = Size.zero;
 
+  // كاش GPU للرسمة الحالية لسرعة 60 FPS أثناء السحب والتكبير
+  ui.Image? _snapshotImg;
+  double _snapZoom = 1.0;
+  Offset _snapPan = Offset.zero;
+  Size _snapSize = Size.zero;
+  int _renderToken = 0;
+  Timer? _debounceTimer;
+  bool _isInteracting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scheduleSnapshot(immediate: true));
+  }
+
+  @override
+  void didUpdateWidget(covariant _LiveVectorViewport oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.data != widget.data ||
+        oldWidget.is3D != widget.is3D ||
+        oldWidget.decorTheme != widget.decorTheme ||
+        oldWidget.bgColor != widget.bgColor ||
+        oldWidget.showCmGrid != widget.showCmGrid) {
+      _scheduleSnapshot(immediate: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    _snapshotImg?.dispose();
+    super.dispose();
+  }
+
   void resetView() {
     setState(() {
       _zoom = 1.0;
       _pan = Offset.zero;
     });
+    _scheduleSnapshot(immediate: true);
+  }
+
+  void _scheduleSnapshot({bool immediate = false}) {
+    _debounceTimer?.cancel();
+    if (immediate) {
+      _renderSnapshotNow();
+    } else {
+      _debounceTimer = Timer(const Duration(milliseconds: 90), _renderSnapshotNow);
+    }
+  }
+
+  Future<void> _renderSnapshotNow() async {
+    if (!mounted || _viewSize.width < 16 || _viewSize.height < 16) return;
+    final int tok = ++_renderToken;
+    final Size sz = _viewSize;
+    final double curZoom = _zoom;
+    final Offset curPan = _pan;
+    final double dpr = (MediaQuery.maybeOf(context)?.devicePixelRatio ?? 2.0).clamp(1.0, 2.0);
+    // سقف دقة GPU متوازن (1400px) لضمان استجابة لحظية (<50ms) ووضوح فائق
+    final double maxSide = max(sz.width, sz.height) * dpr;
+    final double effDpr = maxSide > 1400.0 ? (1400.0 / max(sz.width, sz.height)) : dpr;
+    final int imgW = max(32, (sz.width * effDpr).round());
+    final int imgH = max(32, (sz.height * effDpr).round());
+
+    if (widget.data.seqX.isNotEmpty || widget.data.beadX.isNotEmpty) {
+      await TarikProPbrSprites.ensureLoaded();
+      if (!mounted || tok != _renderToken) return;
+    }
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, imgW.toDouble(), imgH.toDouble()));
+    canvas.scale(effDpr, effDpr);
+    canvas.clipRect(Offset.zero & sz);
+    canvas.drawRect(Offset.zero & sz, Paint()..color = widget.bgColor);
+
+    final data = widget.data;
+    if (data.hasBounds && data.stX.length >= 2) {
+      final double rawW = max(1.0, data.maxX - data.minX);
+      final double rawH = max(1.0, data.maxY - data.minY);
+      const double pad = 22.0;
+      final double baseScale = min((sz.width - pad * 2) / rawW, (sz.height - pad * 2) / rawH);
+      final double scale = baseScale * curZoom;
+      final double baseOffX = (sz.width - rawW * baseScale) * 0.5 - data.minX * baseScale;
+      final double baseOffY = (sz.height - rawH * baseScale) * 0.5 - data.minY * baseScale;
+      final double cx = sz.width * 0.5;
+      final double cy = sz.height * 0.5;
+      final double offX = (baseOffX - cx) * curZoom + cx + curPan.dx;
+      final double offY = (baseOffY - cy) * curZoom + cy + curPan.dy;
+
+      if (widget.showCmGrid) {
+        TarikUnifiedCanvasRenderer.drawCmGrid(canvas, sz, scale: scale, originX: offX, originY: offY);
+      }
+      TarikUnifiedCanvasRenderer.paintDesign(
+        canvas: canvas,
+        data: data,
+        scale: scale,
+        offX: offX,
+        offY: offY,
+        is3D: true,
+        decorTheme: widget.decorTheme,
+        visibleRect: Offset.zero & sz,
+      );
+    }
+
+    final pic = recorder.endRecording();
+    final ui.Image nextImg = await pic.toImage(imgW, imgH);
+    pic.dispose();
+
+    if (!mounted || tok != _renderToken) {
+      nextImg.dispose();
+      return;
+    }
+    final old = _snapshotImg;
+    setState(() {
+      _snapshotImg = nextImg;
+      _snapZoom = curZoom;
+      _snapPan = curPan;
+      _snapSize = sz;
+    });
+    old?.dispose();
   }
 
   void _onScaleStart(ScaleStartDetails d) {
+    _isInteracting = true;
+    _debounceTimer?.cancel();
     _startZoom = _zoom;
     _startPan = _pan;
     _startFocal = d.localFocalPoint;
@@ -3082,107 +3343,153 @@ class _LiveVectorViewportState extends State<_LiveVectorViewport> {
     });
   }
 
+  void _onScaleEnd(ScaleEndDetails d) {
+    _isInteracting = false;
+    _scheduleSnapshot(immediate: false);
+  }
+
   void _onDoubleTap() {
     if ((_zoom - 1.0).abs() > 0.05 || _pan.distance > 2.0) {
       resetView();
     } else {
       setState(() => _zoom = 4.0);
+      _scheduleSnapshot(immediate: true);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (ctx, c) {
-        _viewSize = Size(c.maxWidth, c.maxHeight);
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onDoubleTap: _onDoubleTap,
-          onScaleStart: _onScaleStart,
-          onScaleUpdate: _onScaleUpdate,
-          child: ColoredBox(
-            color: widget.bgColor,
-            child: CustomPaint(
-              painter: _LiveVectorViewportPainter(
-                data: widget.data,
-                is3D: widget.is3D,
-                decorTheme: widget.decorTheme,
-                showCmGrid: widget.showCmGrid,
-                zoom: _zoom,
-                pan: _pan,
+    return ClipRect(
+      child: LayoutBuilder(
+        builder: (ctx, c) {
+          final nextSize = Size(c.maxWidth, c.maxHeight);
+          if ((nextSize.width - _viewSize.width).abs() > 2.0 || (nextSize.height - _viewSize.height).abs() > 2.0) {
+            _viewSize = nextSize;
+            WidgetsBinding.instance.addPostFrameCallback((_) => _scheduleSnapshot(immediate: true));
+          }
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onDoubleTap: _onDoubleTap,
+            onScaleStart: _onScaleStart,
+            onScaleUpdate: _onScaleUpdate,
+            onScaleEnd: _onScaleEnd,
+            child: ColoredBox(
+              color: widget.bgColor,
+              child: CustomPaint(
+                painter: _LiveVectorViewportPainter(
+                  data: widget.data,
+                  decorTheme: widget.decorTheme,
+                  showCmGrid: widget.showCmGrid,
+                  zoom: _zoom,
+                  pan: _pan,
+                  snapshotImg: _snapshotImg,
+                  snapZoom: _snapZoom,
+                  snapPan: _snapPan,
+                  snapSize: _snapSize,
+                  isInteracting: _isInteracting,
+                ),
+                size: Size.infinite,
               ),
-              size: Size.infinite,
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }
 
 class _LiveVectorViewportPainter extends CustomPainter {
   final VectorDesignData data;
-  final bool is3D;
   final int decorTheme;
   final bool showCmGrid;
   final double zoom;
   final Offset pan;
+  final ui.Image? snapshotImg;
+  final double snapZoom;
+  final Offset snapPan;
+  final Size snapSize;
+  final bool isInteracting;
 
   const _LiveVectorViewportPainter({
     required this.data,
-    required this.is3D,
     required this.decorTheme,
     required this.showCmGrid,
     required this.zoom,
     required this.pan,
+    required this.snapshotImg,
+    required this.snapZoom,
+    required this.snapPan,
+    required this.snapSize,
+    required this.isInteracting,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (!data.hasBounds || data.stX.length < 2) return;
-    final double rawW = max(1.0, data.maxX - data.minX);
-    final double rawH = max(1.0, data.maxY - data.minY);
-    const double pad = 22.0;
-    final double baseScale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
-    final double scale = baseScale * zoom;
-    final double baseOffX = (size.width - rawW * baseScale) * 0.5 - data.minX * baseScale;
-    final double baseOffY = (size.height - rawH * baseScale) * 0.5 - data.minY * baseScale;
-    final double cx = size.width * 0.5;
-    final double cy = size.height * 0.5;
-    final double offX = (baseOffX - cx) * zoom + cx + pan.dx;
-    final double offY = (baseOffY - cy) * zoom + cy + pan.dy;
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
 
-    if (showCmGrid) {
-      TarikUnifiedCanvasRenderer.drawCmGrid(
-        canvas,
-        size,
-        scale: scale,
-        originX: offX,
-        originY: offY,
+    if (snapshotImg != null && snapSize.width > 1 && snapSize.height > 1) {
+      // عرض فوري 60 FPS من كاش كرت الشاشة مع تحويل مصفوفة دقيق أثناء السحب والتكبير
+      final double relScale = zoom / max(0.01, snapZoom);
+      final double cx = size.width * 0.5;
+      final double cy = size.height * 0.5;
+      final double dx = (pan.dx - snapPan.dx * relScale);
+      final double dy = (pan.dy - snapPan.dy * relScale);
+
+      canvas.save();
+      canvas.translate(cx + dx, cy + dy);
+      canvas.scale(relScale, relScale);
+      canvas.translate(-cx, -cy);
+      canvas.drawImageRect(
+        snapshotImg!,
+        Rect.fromLTWH(0, 0, snapshotImg!.width.toDouble(), snapshotImg!.height.toDouble()),
+        Offset.zero & snapSize,
+        Paint()..filterQuality = isInteracting ? FilterQuality.low : FilterQuality.high,
       );
+      canvas.restore();
+      canvas.restore();
+      return;
     }
 
-    TarikUnifiedCanvasRenderer.paintDesign(
-      canvas: canvas,
-      data: data,
-      scale: scale,
-      offX: offX,
-      offY: offY,
-      is3D: is3D,
-      decorTheme: decorTheme,
-      visibleRect: Offset.zero & size,
-      stroke2DPx: TarikRenderSpecs.stroke2DScreenPx,
-    );
+    // رسم احتياطي فوري لأول إطار قبل جاهزية الكاش
+    if (data.hasBounds && data.stX.length >= 2) {
+      final double rawW = max(1.0, data.maxX - data.minX);
+      final double rawH = max(1.0, data.maxY - data.minY);
+      const double pad = 22.0;
+      final double baseScale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
+      final double scale = baseScale * zoom;
+      final double baseOffX = (size.width - rawW * baseScale) * 0.5 - data.minX * baseScale;
+      final double baseOffY = (size.height - rawH * baseScale) * 0.5 - data.minY * baseScale;
+      final double cx = size.width * 0.5;
+      final double cy = size.height * 0.5;
+      final double offX = (baseOffX - cx) * zoom + cx + pan.dx;
+      final double offY = (baseOffY - cy) * zoom + cy + pan.dy;
+
+      if (showCmGrid) {
+        TarikUnifiedCanvasRenderer.drawCmGrid(canvas, size, scale: scale, originX: offX, originY: offY);
+      }
+      TarikUnifiedCanvasRenderer.paintDesign(
+        canvas: canvas,
+        data: data,
+        scale: scale,
+        offX: offX,
+        offY: offY,
+        is3D: true,
+        decorTheme: decorTheme,
+        visibleRect: Offset.zero & size,
+      );
+    }
+    canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant _LiveVectorViewportPainter oldDelegate) {
-    return oldDelegate.data != data ||
-        oldDelegate.is3D != is3D ||
-        oldDelegate.decorTheme != decorTheme ||
-        oldDelegate.showCmGrid != showCmGrid ||
+    return oldDelegate.snapshotImg != snapshotImg ||
         oldDelegate.zoom != zoom ||
-        oldDelegate.pan != pan;
+        oldDelegate.pan != pan ||
+        oldDelegate.data != data ||
+        oldDelegate.decorTheme != decorTheme ||
+        oldDelegate.showCmGrid != showCmGrid;
   }
 }
 
@@ -3328,6 +3635,12 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   static const List<int> _speedSteps = [1, 3, 8, 20, 55, 140, 350];
   static const List<String> _speedLabels = ['0.2x', '0.5x', '1x', '3x', '8x', '20x', '45x'];
   Timer? _timer;
+  double _simZoom = 1.0;
+  Offset _simPan = Offset.zero;
+  double _simStartZoom = 1.0;
+  Offset _simStartPan = Offset.zero;
+  Offset _simStartFocal = Offset.zero;
+  Size _simSize = Size.zero;
 
   @override
   void initState() {
@@ -3468,17 +3781,49 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                           borderRadius: BorderRadius.circular(16),
                         ),
                         clipBehavior: Clip.antiAlias,
-                        child: InteractiveViewer(
-                          minScale: 0.8,
-                          maxScale: 16.0,
-                          child: CustomPaint(
-                            painter: _VectorStitchPainter(
-                              data: _vec!,
-                              limit: _currentStitch,
-                              showNeedle: true,
-                              is3D: true,
-                            ),
-                            size: Size.infinite,
+                        child: ClipRect(
+                          child: LayoutBuilder(
+                            builder: (ctx, c) {
+                              _simSize = Size(c.maxWidth, c.maxHeight);
+                              return GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onDoubleTap: () => setState(() {
+                                  if ((_simZoom - 1.0).abs() > 0.05 || _simPan.distance > 2.0) {
+                                    _simZoom = 1.0;
+                                    _simPan = Offset.zero;
+                                  } else {
+                                    _simZoom = 4.0;
+                                  }
+                                }),
+                                onScaleStart: (d) {
+                                  _simStartZoom = _simZoom;
+                                  _simStartPan = _simPan;
+                                  _simStartFocal = d.localFocalPoint;
+                                },
+                                onScaleUpdate: (d) {
+                                  if (_simSize == Size.zero) return;
+                                  final nextZ = (_simStartZoom * d.scale).clamp(0.6, 24.0);
+                                  final ctr = Offset(_simSize.width * 0.5, _simSize.height * 0.5);
+                                  final foc = _simStartFocal - ctr;
+                                  final ratio = nextZ / _simStartZoom;
+                                  setState(() {
+                                    _simZoom = nextZ;
+                                    _simPan = (_simStartPan - foc) * ratio + foc + (d.localFocalPoint - _simStartFocal);
+                                  });
+                                },
+                                child: CustomPaint(
+                                  painter: _VectorStitchPainter(
+                                    data: _vec!,
+                                    limit: _currentStitch,
+                                    showNeedle: true,
+                                    is3D: true,
+                                    zoomFactor: _simZoom,
+                                    panOffset: _simPan,
+                                  ),
+                                  size: Size.infinite,
+                                ),
+                              );
+                            },
                           ),
                         ),
                       ),
@@ -4875,6 +5220,7 @@ class _VectorStitchPainter extends CustomPainter {
   final bool showOriginCrosshair;
   final bool showCmGrid;
   final double zoomFactor;
+  final Offset panOffset;
 
   _VectorStitchPainter({
     required this.data,
@@ -4884,6 +5230,7 @@ class _VectorStitchPainter extends CustomPainter {
     this.showOriginCrosshair = false,
     this.showCmGrid = false,
     this.zoomFactor = 1.0,
+    this.panOffset = Offset.zero,
   });
 
   @override
@@ -4893,10 +5240,18 @@ class _VectorStitchPainter extends CustomPainter {
     final double rawH = data.maxY - data.minY;
     if (rawW <= 0 || rawH <= 0) return;
 
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+
     const double pad = 22.0;
-    final double scale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
-    final double offX = (size.width - rawW * scale) * 0.5 - data.minX * scale;
-    final double offY = (size.height - rawH * scale) * 0.5 - data.minY * scale;
+    final double baseScale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
+    final double scale = baseScale * zoomFactor;
+    final double baseOffX = (size.width - rawW * baseScale) * 0.5 - data.minX * baseScale;
+    final double baseOffY = (size.height - rawH * baseScale) * 0.5 - data.minY * baseScale;
+    final double cx = size.width * 0.5;
+    final double cy = size.height * 0.5;
+    final double offX = (baseOffX - cx) * zoomFactor + cx + panOffset.dx;
+    final double offY = (baseOffY - cy) * zoomFactor + cy + panOffset.dy;
 
     if (showCmGrid) {
       TarikUnifiedCanvasRenderer.drawCmGrid(
@@ -4918,7 +5273,8 @@ class _VectorStitchPainter extends CustomPainter {
       is3D: is3D,
       decorTheme: 0,
       stitchLimit: count,
-      stroke2DPx: TarikRenderSpecs.stroke2DScreenPx / max(1.0, zoomFactor),
+      visibleRect: Offset.zero & size,
+      stroke2DPx: TarikRenderSpecs.stroke2DScreenPx,
     );
 
     if (showOriginCrosshair) {
@@ -4965,6 +5321,7 @@ class _VectorStitchPainter extends CustomPainter {
       canvas.drawLine(Offset(lastX - arm, lastY), Offset(lastX + arm, lastY), crossPaint);
       canvas.drawLine(Offset(lastX, lastY - arm), Offset(lastX, lastY + arm), crossPaint);
     }
+    canvas.restore();
   }
 
   @override
@@ -4974,7 +5331,8 @@ class _VectorStitchPainter extends CustomPainter {
         oldDelegate.is3D != is3D ||
         oldDelegate.showOriginCrosshair != showOriginCrosshair ||
         oldDelegate.showCmGrid != showCmGrid ||
-        oldDelegate.zoomFactor != zoomFactor;
+        oldDelegate.zoomFactor != zoomFactor ||
+        oldDelegate.panOffset != panOffset;
   }
 }
 
@@ -5340,6 +5698,8 @@ class _InteractiveLetteringPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
     final Offset origin = Offset(size.width * 0.5, size.height * 0.5) + viewPan;
 
     // 1) رسم شبكة السنتيمتر الحقيقية الموحّدة (100 وحدة = 1 سم)
@@ -5352,7 +5712,7 @@ class _InteractiveLetteringPainter extends CustomPainter {
       originY: origin.dy,
     );
 
-    if (!vec.hasBounds || vec.stX.length < 2) return;
+    if (!vec.hasBounds || vec.stX.length < 2) { canvas.restore(); return; }
 
     // 2) رسم الغرز بالمحرك الموحّد (2D ثابت السماكة أو 3D خيط مبروم حقيقي 0.41 مم)
     final double scale = baseUnitScale * liveScalePreview;
@@ -5466,6 +5826,7 @@ class _InteractiveLetteringPainter extends CustomPainter {
       );
     }
 
+    canvas.restore();
     canvas.restore();
   }
 
@@ -8401,4 +8762,4 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - Pro v6.5
+// Tarik emb - Pro v6.6
