@@ -1161,7 +1161,7 @@ class TarikProFontEngine {
       final double ux = pt.$1;
       final double uy = pt.$2;
       bool actualMove = isMove;
-      if (isMove && hasNeedle) {
+      if (isMove && hasNeedle && !isTatami) {
         final double d = math.sqrt(
           (ux - curNeedleX) * (ux - curNeedleX) + (uy - curNeedleY) * (uy - curNeedleY),
         );
@@ -1763,9 +1763,10 @@ class TarikProFontEngine {
     }
   }
 
-  /// محرك تعبئة التاتامي الموحّد للكلمة كاملةً (Whole-Word Scanline Union + تنعيم الحواف والزوايا):
-  /// - يجمع كل مضلعات ومثلثات الكلمة ككتلة واحدة، فيذيب الوصلات بين الحروف المتصلة تماماً
-  /// - يطبّق تنعيم حواف متدرّج (3-Row Contour Smoothing) لإزالة التكسّرات مع الحفاظ 100% على فتحات الحروف (م، ه، و، ق)
+  /// محرك تعبئة التاتامي الاحترافي (Closest Point Join + الدخول بدرزة مخفية والعودة بتاتامي + حماية الزوايا):
+  /// - يجمع مضلعات الكلمة كاملةً ككتلة واحدة، ثم يرتّب المناطق وفق أقرب نقطة انتقال من آخر موضع للإبرة
+  /// - يدخل بدرزة تمشي مخفية داخل الجسم (Underpath) ويعود بتعبئة التاتامي لتغطية الدرزة تماماً والخروج من أقرب نقطة للجزء التالي
+  /// - يحافظ على نظافة فتحات الحروف والنقاط بدون أي خطوط وصل عابرة
   static void _emitUnifiedTatamiPolygons({
     required List<List<double>> polysX,
     required List<List<double>> polysY,
@@ -1817,7 +1818,7 @@ class TarikProFontEngine {
     final double stepY = densityUnits.clamp(2.5, 12.0);
     final double stLen = stitchLenUnits.clamp(18.0, 75.0);
 
-    // 1) بناء شرائح المسح الموحّدة للكلمة بالكامل مع دمج التقاء الأعمدة والحروف المتصلة (0.28 مم)
+    // 1) بناء شرائح المسح الموحّدة للكلمة مع دمج دقيق (0.18 مم) يغلق التقاء الأعمدة دون سد الفتحات
     final List<(double, List<(double, double)>)> rawRows = [];
     for (double y = minY + stepY * 0.5; y <= maxY; y += stepY) {
       final List<(double, double)> rawSpans = [];
@@ -1849,8 +1850,7 @@ class TarikProFontEngine {
       for (int k = 1; k < rawSpans.length; k++) {
         final cur = rawSpans[k];
         final last = merged.last;
-        // 0.28 مم لسد فواصل التقاء الحروف والزوايا الدقيقة دون إغلاق فتحات الحروف الحقيقية
-        if (cur.$1 <= last.$2 + 2.8) {
+        if (cur.$1 <= last.$2 + 1.8) {
           merged[merged.length - 1] = (last.$1, math.max(last.$2, cur.$2));
         } else {
           merged.add(cur);
@@ -1861,21 +1861,21 @@ class TarikProFontEngine {
 
     if (rawRows.isEmpty) return;
 
-    // 2) تنعيم حواف الشرائح عبر 3 سطور متتالية (Smooth Contour Filter) لإزالة التكسّرات والزوايا المسنّنة
+    // 2) تنعيم حواف لطيف يحافظ على الزوايا الحادة (لا ينعّم إذا كان هناك تغيّر زاوية مفاجئ > 6 وحدات)
     final List<(double, List<(double, double)>)> rows = List.generate(rawRows.length, (r) {
       final double y = rawRows[r].$1;
       final spans = rawRows[r].$2;
       final List<(double, double)> smoothSpans = [];
       for (final sp in spans) {
-        double lAcc = sp.$1 * 2.0;
-        double rAcc = sp.$2 * 2.0;
-        double wSum = 2.0;
+        double lAcc = sp.$1 * 3.0;
+        double rAcc = sp.$2 * 3.0;
+        double wSum = 3.0;
         for (final nr in [r - 1, r + 1]) {
           if (nr < 0 || nr >= rawRows.length) continue;
-          if ((rawRows[nr].$1 - y).abs() > stepY * 1.4) continue;
+          if ((rawRows[nr].$1 - y).abs() > stepY * 1.35) continue;
           for (final nsp in rawRows[nr].$2) {
             final double ov = math.min(sp.$2, nsp.$2) - math.max(sp.$1, nsp.$1);
-            if (ov > 0 && (nsp.$1 - sp.$1).abs() < 12.0 && (nsp.$2 - sp.$2).abs() < 12.0) {
+            if (ov > 0 && (nsp.$1 - sp.$1).abs() < 6.0 && (nsp.$2 - sp.$2).abs() < 6.0) {
               lAcc += nsp.$1;
               rAcc += nsp.$2;
               wSum += 1.0;
@@ -1892,74 +1892,33 @@ class TarikProFontEngine {
       return (y, smoothSpans.isNotEmpty ? smoothSpans : spans);
     });
 
-    // 3) توجيه الغرز عبر المناطق المتصلة عمودياً بدون خطوط انتقال مكشوفة فوق الفراغات
+    // 3) استخلاص كل المناطق المتصلة عمودياً (Connected Regions)
     final List<List<bool>> visited = List.generate(
       rows.length,
       (r) => List.filled(rows[r].$2.length, false),
     );
-
-    void emitRot(double vx, double vy, bool isMove) {
-      final double gx = vx * ca - vy * sa;
-      final double gy = vx * sa + vy * ca;
-      addPt(gx, gy, isMove);
-    }
+    final List<List<(int, double, double, double)>> regions = [];
 
     for (int startR = 0; startR < rows.length; startR++) {
       for (int startS = 0; startS < rows[startR].$2.length; startS++) {
         if (visited[startR][startS]) continue;
-
+        final List<(int, double, double, double)> reg = [];
         int r = startR;
         int s = startS;
-        bool forward = true;
-        bool firstInRegion = true;
-        double prevEndX = 0.0, prevY = 0.0;
-
         while (true) {
           visited[r][s] = true;
           final double y = rows[r].$1;
-          final span = rows[r].$2[s];
-          final double leftX = span.$1;
-          final double rightX = span.$2;
-          final double phase = _tatamiPhase(r, pattern) * stLen;
-
-          final double xStart = forward ? leftX : rightX;
-          final double xEnd = forward ? rightX : leftX;
-          final double jumpDist = firstInRegion
-              ? 999.0
-              : math.sqrt((xStart - prevEndX) * (xStart - prevEndX) + (y - prevY) * (y - prevY));
-          final bool isMove = firstInRegion || jumpDist > 22.0;
-
-          emitRot(xStart, y, isMove);
-          firstInRegion = false;
-
-          if (forward) {
-            double gx = ((leftX - phase) / stLen).ceil() * stLen + phase;
-            while (gx < rightX - 4.0) {
-              if (gx > leftX + 4.0) emitRot(gx, y, false);
-              gx += stLen;
-            }
-          } else {
-            double gx = ((rightX - phase) / stLen).floor() * stLen + phase;
-            while (gx > leftX + 4.0) {
-              if (gx < rightX - 4.0) emitRot(gx, y, false);
-              gx -= stLen;
-            }
-          }
-
-          emitRot(xEnd, y, false);
-          prevEndX = xEnd;
-          prevY = y;
-          forward = !forward;
-
+          final sp = rows[r].$2[s];
+          reg.add((r, y, sp.$1, sp.$2));
           if (r + 1 >= rows.length) break;
           int nextS = -1;
-          double bestOverlap = 0.0;
+          double bestOv = 0.0;
           final nextSpans = rows[r + 1].$2;
           for (int ns = 0; ns < nextSpans.length; ns++) {
             if (visited[r + 1][ns]) continue;
-            final ov = math.min(rightX, nextSpans[ns].$2) - math.max(leftX, nextSpans[ns].$1);
-            if (ov > bestOverlap) {
-              bestOverlap = ov;
+            final double ov = math.min(sp.$2, nextSpans[ns].$2) - math.max(sp.$1, nextSpans[ns].$1);
+            if (ov > bestOv) {
+              bestOv = ov;
               nextS = ns;
             }
           }
@@ -1967,21 +1926,223 @@ class TarikProFontEngine {
           r++;
           s = nextS;
         }
+        if (reg.isNotEmpty) regions.add(reg);
+      }
+    }
+
+    if (regions.isEmpty) return;
+
+    // 4) ترتيب المناطق بنظام أقرب نقطة (Closest Point Join)
+    final List<bool> regDone = List.filled(regions.length, false);
+    final List<(int, bool)> orderedPlan = []; // (regionIndex, enterFromTop)
+
+    // البداية من أقصى يمين الكلمة (طبيعي للعربي)
+    int firstIdx = 0;
+    double bestStartX = -double.infinity;
+    for (int i = 0; i < regions.length; i++) {
+      final mx = (regions[i].first.$3 + regions[i].first.$4) * 0.5;
+      if (mx > bestStartX) {
+        bestStartX = mx;
+        firstIdx = i;
+      }
+    }
+
+    double curRotX = regions[firstIdx].first.$4;
+    double curRotY = regions[firstIdx].first.$2;
+    regDone[firstIdx] = true;
+    orderedPlan.add((firstIdx, true));
+    // تحديث الموضع المتوقع بعد المنطقة الأولى
+    curRotX = (regions[firstIdx].last.$3 + regions[firstIdx].last.$4) * 0.5;
+    curRotY = regions[firstIdx].last.$2;
+
+    for (int step = 1; step < regions.length; step++) {
+      int bestI = -1;
+      bool bestFromTop = true;
+      double bestD2 = double.infinity;
+
+      for (int i = 0; i < regions.length; i++) {
+        if (regDone[i]) continue;
+        final reg = regions[i];
+        final topMidX = (reg.first.$3 + reg.first.$4) * 0.5;
+        final topY = reg.first.$2;
+        final botMidX = (reg.last.$3 + reg.last.$4) * 0.5;
+        final botY = reg.last.$2;
+
+        final dTop = (topMidX - curRotX) * (topMidX - curRotX) + (topY - curRotY) * (topY - curRotY);
+        final dBot = (botMidX - curRotX) * (botMidX - curRotX) + (botY - curRotY) * (botY - curRotY);
+        if (dTop < bestD2) {
+          bestD2 = dTop;
+          bestI = i;
+          bestFromTop = true;
+        }
+        if (dBot < bestD2) {
+          bestD2 = dBot;
+          bestI = i;
+          bestFromTop = false;
+        }
+      }
+      if (bestI < 0) break;
+      regDone[bestI] = true;
+      orderedPlan.add((bestI, bestFromTop));
+      final exitRow = bestFromTop ? regions[bestI].last : regions[bestI].first;
+      curRotX = (exitRow.$3 + exitRow.$4) * 0.5;
+      curRotY = exitRow.$2;
+    }
+
+    void emitRot(double vx, double vy, bool isMove) {
+      final double gx = vx * ca - vy * sa;
+      final double gy = vx * sa + vy * ca;
+      addPt(gx, gy, isMove);
+    }
+
+    double needleX = 0.0, needleY = 0.0;
+    bool hasNeedlePos = false;
+
+    // 5) رسم كل منطقة: إذا كان الخروج الأقرب للمنطقة التالية من نفس طرف الدخول -> دخول بدرزة مخفية (Underpath) وعودة بتاتامي!
+    for (int pIdx = 0; pIdx < orderedPlan.length; pIdx++) {
+      final reg = regions[orderedPlan[pIdx].$1];
+      bool enterFromTop = orderedPlan[pIdx].$2;
+
+      // فحص أيهما أقرب لنهاية الإبرة الفعلية الآن (أعلى أم أسفل المنطقة)
+      if (hasNeedlePos) {
+        final tX = (reg.first.$3 + reg.first.$4) * 0.5;
+        final tY = reg.first.$2;
+        final bX = (reg.last.$3 + reg.last.$4) * 0.5;
+        final bY = reg.last.$2;
+        final dT = (tX - needleX) * (tX - needleX) + (tY - needleY) * (tY - needleY);
+        final dB = (bX - needleX) * (bX - needleX) + (bY - needleY) * (bY - needleY);
+        enterFromTop = dT <= dB;
+      }
+
+      // فحص هل الطرف الأقرب للمنطقة التالية هو نفس طرف الدخول (لاستخدام الدخول بدرزة والعودة بتاتامي)
+      bool useUnderpathAndReturn = false;
+      if (reg.length >= 4 && pIdx + 1 < orderedPlan.length) {
+        final nextReg = regions[orderedPlan[pIdx + 1].$1];
+        final nextRow = orderedPlan[pIdx + 1].$2 ? nextReg.first : nextReg.last;
+        final nx = (nextRow.$3 + nextRow.$4) * 0.5;
+        final ny = nextRow.$2;
+
+        final entryRow = enterFromTop ? reg.first : reg.last;
+        final oppRow = enterFromTop ? reg.last : reg.first;
+        final dEntryToNext = (((entryRow.$3 + entryRow.$4) * 0.5 - nx) * ((entryRow.$3 + entryRow.$4) * 0.5 - nx)) +
+            ((entryRow.$2 - ny) * (entryRow.$2 - ny));
+        final dOppToNext = (((oppRow.$3 + oppRow.$4) * 0.5 - nx) * ((oppRow.$3 + oppRow.$4) * 0.5 - nx)) +
+            ((oppRow.$2 - ny) * (oppRow.$2 - ny));
+        if (dEntryToNext < dOppToNext * 0.85) {
+          useUnderpathAndReturn = true;
+        }
+      }
+
+      final List<(int, double, double, double)> orderedRows =
+          enterFromTop ? reg : reg.reversed.toList();
+
+      final firstSpan = orderedRows.first;
+      final double entryMidX = (firstSpan.$3 + firstSpan.$4) * 0.5;
+      final double entryX = hasNeedlePos
+          ? ((needleX - firstSpan.$3).abs() <= (needleX - firstSpan.$4).abs() ? firstSpan.$3 : firstSpan.$4)
+          : firstSpan.$4;
+      final double distToEntry = hasNeedlePos
+          ? math.sqrt((entryX - needleX) * (entryX - needleX) + (firstSpan.$2 - needleY) * (firstSpan.$2 - needleY))
+          : 999.0;
+      // إذا كانت المنطقة متصلة/ملاصقة للسابقة (<= 1.4 مم) ندخل مباشرةً بدون قفزة، وإلا قفزة نظيفة بدون خيط ظاهر
+      final bool needJumpToRegion = !hasNeedlePos || distToEntry > 14.0;
+
+      List<(int, double, double, double)> tatamiRows;
+      bool firstRowAlreadyAnchored = false;
+
+      if (useUnderpathAndReturn) {
+        // الدخول بدرزة تمشي مخفية داخل منتصف الشكل (Underpath) حتى الطرف المقابل، ثم العودة بتاتامي يغطيها بالكامل!
+        emitRot(entryMidX, firstSpan.$2, needJumpToRegion);
+        double uxPrev = entryMidX;
+        double uyPrev = firstSpan.$2;
+        for (int k = 1; k < orderedRows.length; k++) {
+          final row = orderedRows[k];
+          final double safeL = math.min(row.$4, row.$3 + 2.5);
+          final double safeR = math.max(row.$3, row.$4 - 2.5);
+          final double mx = ((safeL + safeR) * 0.5);
+          final double dy = row.$2 - uyPrev;
+          final double dx = mx - uxPrev;
+          if (dx * dx + dy * dy >= 324.0 || k == orderedRows.length - 1) {
+            // خطوة درزة ~1.8..2.4 مم داخل الجسم
+            emitRot(mx, row.$2, false);
+            uxPrev = mx;
+            uyPrev = row.$2;
+          }
+        }
+        needleX = uxPrev;
+        needleY = uyPrev;
+        hasNeedlePos = true;
+        tatamiRows = orderedRows.reversed.toList();
+        firstRowAlreadyAnchored = true;
+      } else {
+        tatamiRows = orderedRows;
+      }
+
+      // تعبئة سطور التاتامي المتصلة للمنطقة
+      bool forward = hasNeedlePos
+          ? ((needleX - tatamiRows.first.$3).abs() <= (needleX - tatamiRows.first.$4).abs())
+          : true;
+
+      for (int k = 0; k < tatamiRows.length; k++) {
+        final row = tatamiRows[k];
+        final int rIdx = row.$1;
+        final double y = row.$2;
+        final double leftX = row.$3;
+        final double rightX = row.$4;
+        final double phase = _tatamiPhase(rIdx, pattern) * stLen;
+
+        final double xStart = forward ? leftX : rightX;
+        final double xEnd = forward ? rightX : leftX;
+        final bool isMove = (k == 0 && !firstRowAlreadyAnchored) ? needJumpToRegion : false;
+
+        emitRot(xStart, y, isMove);
+
+        if (forward) {
+          double gx = ((leftX - phase) / stLen).ceil() * stLen + phase;
+          while (gx < rightX - 4.0) {
+            if (gx > leftX + 4.0) emitRot(gx, y, false);
+            gx += stLen;
+          }
+        } else {
+          double gx = ((rightX - phase) / stLen).floor() * stLen + phase;
+          while (gx > leftX + 4.0) {
+            if (gx < rightX - 4.0) emitRot(gx, y, false);
+            gx -= stLen;
+          }
+        }
+
+        emitRot(xEnd, y, false);
+        needleX = xEnd;
+        needleY = y;
+        hasNeedlePos = true;
+        forward = !forward;
       }
     }
   }
 
-  /// تنعيم Chaikin خفيف للمنحنيات المتجهية لإزالة التكسّر الحاد في الزوايا
-  static (List<double>, List<double>) _chaikinSmooth(List<double> xs, List<double> ys) {
+  /// تنعيم انتقائي للمنحنيات اللطيفة فقط مع الحفاظ التام على الزوايا الحادة (< 125°) بدون أي تجويف
+  static (List<double>, List<double>) _smoothGentleCurvesOnly(List<double> xs, List<double> ys) {
     final int n = xs.length;
-    if (n < 3) return (xs, ys);
+    if (n < 4) return (xs, ys);
     final outX = <double>[xs.first];
     final outY = <double>[ys.first];
-    for (int i = 0; i < n - 1; i++) {
-      outX.add(xs[i] * 0.75 + xs[i + 1] * 0.25);
-      outY.add(ys[i] * 0.75 + ys[i + 1] * 0.25);
-      outX.add(xs[i] * 0.25 + xs[i + 1] * 0.75);
-      outY.add(ys[i] * 0.25 + ys[i + 1] * 0.75);
+    for (int i = 1; i < n - 1; i++) {
+      final double v1x = xs[i] - xs[i - 1], v1y = ys[i] - ys[i - 1];
+      final double v2x = xs[i + 1] - xs[i], v2y = ys[i + 1] - ys[i];
+      final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
+      final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
+      if (l1 > 0.5 && l2 > 0.5) {
+        final double cosA = (v1x * v2x + v1y * v2y) / (l1 * l2);
+        if (cosA > 0.72) {
+          // منحنى ناعم فقط -> تنعيم خفيف
+          outX.add(xs[i - 1] * 0.15 + xs[i] * 0.70 + xs[i + 1] * 0.15);
+          outY.add(ys[i - 1] * 0.15 + ys[i] * 0.70 + ys[i + 1] * 0.15);
+          continue;
+        }
+      }
+      // زاوية حادة -> نحافظ على النقطة كما هي 100%
+      outX.add(xs[i]);
+      outY.add(ys[i]);
     }
     outX.add(xs.last);
     outY.add(ys.last);
@@ -2015,8 +2176,8 @@ class TarikProFontEngine {
       r2x.add(pt2.$1);
       r2y.add(pt2.$2);
     }
-    final sm1 = _chaikinSmooth(r1x, r1y);
-    final sm2 = _chaikinSmooth(r2x, r2y);
+    final sm1 = _smoothGentleCurvesOnly(r1x, r1y);
+    final sm2 = _smoothGentleCurvesOnly(r2x, r2y);
     outX.add(<double>[...sm1.$1, ...sm2.$1.reversed]);
     outY.add(<double>[...sm1.$2, ...sm2.$2.reversed]);
   }
@@ -2249,14 +2410,114 @@ class TarikProDahaoParser {
     return out;
   }
 
+  static Uint8List _des3Enc(Uint8List data, int start, int len, bool useDhe) {
+    final key = useDhe ? _keyDhe : _keyDha;
+    final k0Inv = _subkeys(key.sublist(0, 8)).reversed.toList();
+    final k1 = _subkeys(key.sublist(8, 16));
+    final k2Inv = _subkeys(key.sublist(16, 24)).reversed.toList();
+    final int blocks = len ~/ 8;
+    final out = Uint8List(blocks * 8);
+    for (int b = 0; b < blocks; b++) {
+      final s1 = _desBlock(data, start + b * 8, k2Inv);
+      final s2 = _desBlock(s1, 0, k1);
+      final s3 = _desBlock(s2, 0, k0Inv);
+      out.setRange(b * 8, b * 8 + 8, s3);
+    }
+    return out;
+  }
+
+  static Uint8List _ringEnc(Uint8List data, int start, int len, int seed16) {
+    int c = seed16 & 0xFFFF;
+    if (c < 0x6E) c += 0x6E;
+    final k = <int>[
+      c % 0x61,
+      (5 * c) % 0x1B,
+      (8 * c) % 0x13,
+      c % 0x49,
+      c % 0x21,
+      (3 * c) % 0x39,
+      (5 * c) % 0x27,
+      c % 0x12,
+    ];
+    if (((k[0] % 0x3D) - (k[1] % 0x3D)).abs() < 6) k[1] += 0x11;
+    if (((k[6] % 0x3F) - (k[7] % 0x3F)).abs() < 7) k[7] += 0x11;
+    int i0 = 0, i1 = 2, i2 = 4, i3 = 6;
+    final out = Uint8List(len);
+    for (int i = 0; i < len; i++) {
+      final int b = data[start + i];
+      if (b < 0x3D) {
+        int v = (b - k[i0]) % 0x3D;
+        if (v < 0) v += 0x3D;
+        out[i] = v;
+        i0 ^= 1;
+      } else if (b < 0x6E) {
+        int v = (b - 0x3D - k[i1]) % 0x31;
+        if (v < 0) v += 0x31;
+        out[i] = v + 0x3D;
+        i1 ^= 1;
+      } else if (b < 0xC1) {
+        int v = (b - 0x6E - k[i2]) % 0x53;
+        if (v < 0) v += 0x53;
+        out[i] = v + 0x6E;
+        i2 ^= 1;
+      } else {
+        int v = (b - 0xC1 - k[i3]) % 0x3F;
+        if (v < 0) v += 0x3F;
+        out[i] = (v + 0xC1) & 0xFF;
+        i3 ^= 1;
+      }
+    }
+    return out;
+  }
+
   static int _u32LE(Uint8List b, int off) =>
       b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24);
   static int _u16LE(Uint8List b, int off) => b[off] | (b[off + 1] << 8);
+  static void _putU32LE(Uint8List b, int off, int v) {
+    b[off] = v & 0xFF;
+    b[off + 1] = (v >>> 8) & 0xFF;
+    b[off + 2] = (v >>> 16) & 0xFF;
+    b[off + 3] = (v >>> 24) & 0xFF;
+  }
+
+  /// استخراج رقم القناة (1..8) من قناع البتّات الثماني (0x01=A .. 0x80=H)
+  static int _maskToChannel1To8(int mask) {
+    for (int bit = 0; bit < 8; bit++) {
+      if ((mask & (1 << bit)) != 0) return bit + 1;
+    }
+    return 1;
+  }
+
+  /// استخراج لوحة الألوان الحقيقية للـ 20 لوناً من ترويسة ملف داهاو (0x1C..0x58) كما في emCAD
+  static Int32List _extractHeaderPalette(Uint8List data) {
+    if (data.length < 0x60) return _palette;
+    final int nCol = _u32LE(data, 0x10);
+    if (nCol >= 1 && nCol <= 32) {
+      final int count = math.min(20, nCol);
+      final List<int> cols = [];
+      int nonZero = 0;
+      for (int i = 0; i < count; i++) {
+        final int o = 0x1C + i * 3;
+        int r = data[o], g = data[o + 1], b = data[o + 2];
+        if (r != 0 || g != 0 || b != 0) nonZero++;
+        // تلطيف اللون الأبيض النقي قليلاً ليظهر بوضوح على خلفية العرض البيضاء
+        if (r > 235 && g > 235 && b > 235) {
+          r = 176;
+          g = 190;
+          b = 197;
+        }
+        cols.add((0xFF << 24) | (r << 16) | (g << 8) | b);
+      }
+      if (nonZero >= 2) return Int32List.fromList(cols);
+    }
+    return _palette;
+  }
 
   static VectorDesignData? decodeSync(Uint8List data, bool preferDhe) {
     if (data.length < 0x130) return null;
 
     int? sOff, sNext, sParam;
+    int? s1Off, s1Next, s1Param;
     int hdrXor = 0;
     bool matchedDhe = preferDhe;
 
@@ -2291,13 +2552,16 @@ class TarikProDahaoParser {
       }
       if (!valid) continue;
       for (int i = 0; i < secs.length - 1; i++) {
-        if (secs[i].$1 == 6) {
+        if (secs[i].$1 == 1) {
+          s1Off = secs[i].$2;
+          s1Next = secs[i + 1].$2;
+          s1Param = secs[i].$3;
+        } else if (secs[i].$1 == 6) {
           sOff = secs[i].$2;
           sNext = secs[i + 1].$2;
           sParam = secs[i].$3;
           hdrXor = hx;
           matchedDhe = useDhe;
-          break;
         }
       }
       if (sOff != null) break;
@@ -2305,6 +2569,27 @@ class TarikProDahaoParser {
 
     if (sOff == null || sNext == null || sParam == null || sNext <= sOff) return null;
 
+    final Int32List activePalette = _extractHeaderPalette(data);
+    // قراءة تسلسل الألوان الحقيقي من القسم 1 (Section 1) تماماً مثل emCAD
+    List<int> sec1ColorSeq = const [];
+    if (s1Off != null && s1Next != null && s1Param != null && s1Next > s1Off) {
+      final s1Plain = _ringDec(data, s1Off, s1Next - s1Off, (s1Param ^ hdrXor ^ 0x3028) & 0xFFFF);
+      if (s1Plain.isNotEmpty) {
+        final List<int> seqList = [];
+        for (int i = 0; i < math.min(256, s1Plain.length); i++) {
+          final int v = s1Plain[i];
+          if (v >= 1 && v <= activePalette.length) {
+            seqList.add(v - 1);
+          } else {
+            break;
+          }
+        }
+        if (seqList.isNotEmpty) sec1ColorSeq = seqList;
+      }
+    }
+    int colorStepIdx = 0;
+    int paletteIndexForStep(int step) =>
+        sec1ColorSeq.isNotEmpty ? sec1ColorSeq[step % sec1ColorSeq.length] : (step % activePalette.length);
     final plain = _ringDec(data, sOff, sNext - sOff, (sParam ^ hdrXor ^ 0x3028) & 0xFFFF);
     final int lim = (sParam > 0 && sParam <= plain.length) ? sParam : plain.length;
 
@@ -2326,15 +2611,17 @@ class TarikProDahaoParser {
     double minX = double.infinity, maxX = -double.infinity;
     double minY = double.infinity, maxY = -double.infinity;
     bool hasBounds = false;
-    int col = 0;
+    int col = paletteIndexForStep(0);
     int colorCount = 1;
     bool hasStitchesInCol = false;
     bool needMove = true;
     bool inDev = false;
     int pulse = 0;
+    double pulseOriginX = 0.0, pulseOriginY = 0.0;
     double ljx = 0.0, ljy = 0.0;
     int jumpsCount = 0;
     int pendingDev = 0;
+    int pendingBeadCenterIdx = -1; // لتوسيط الخرزة في منتصف غرزة التثبيت تماماً مثل emCAD
 
     void trackPt(double x, double y) {
       if (!hasBounds) {
@@ -2360,27 +2647,78 @@ class TarikProDahaoParser {
       trackPt(x, y);
     }
 
-    void recordSeq(double x, double y, int code) {
-      seqX.add(x);
-      seqY.add(y);
-      seqCode.add(code);
-      if (stDev.length > 0 && stDev._buf[stDev.length - 1] == 0) {
-        stDev._buf[stDev.length - 1] = code.clamp(1, 4);
-      } else {
-        pendingDev = code.clamp(1, 4);
-      }
+    int encodeSeqTag(int code) {
+      final int c = code.clamp(1, 8);
+      return c <= 4 ? c : (0x40 | c);
     }
 
-    void recordBead(double x, double y, int code) {
-      beadX.add(x);
-      beadY.add(y);
-      beadCode.add(code);
-      final int tag = (4 + code).clamp(5, 7);
+    int encodeBeadTag(int code) {
+      final int c = code.clamp(1, 8);
+      return c <= 3 ? (4 + c) : (0x80 | c);
+    }
+
+    void recordSeq(double x, double y, int code) {
+      final int c = code.clamp(1, 8);
+      seqX.add(x);
+      seqY.add(y);
+      seqCode.add(c);
+      final int tag = encodeSeqTag(c);
       if (stDev.length > 0 && stDev._buf[stDev.length - 1] == 0) {
         stDev._buf[stDev.length - 1] = tag;
       } else {
         pendingDev = tag;
       }
+    }
+
+    void recordBead(double x, double y, int code, {bool centerOnNextStitch = true}) {
+      final int c = code.clamp(1, 8);
+      beadX.add(x);
+      beadY.add(y);
+      beadCode.add(c);
+      if (centerOnNextStitch) {
+        pendingBeadCenterIdx = beadX.length - 1;
+      }
+      final int tag = encodeBeadTag(c);
+      if (stDev.length > 0 && stDev._buf[stDev.length - 1] == 0) {
+        stDev._buf[stDev.length - 1] = tag;
+      } else {
+        pendingDev = tag;
+      }
+    }
+
+    /// تفريغ نبضات القفز المعايرة 100% وفق emCAD 2.6 و emCAD Pro 2.10:
+    /// 1=ترتر A(3مم)، 2=ترتر B(5مم)، 3..4=خرز A(2.5مم)، 5+=خرز B(4مم)
+    void flushPulse() {
+      if (pulse <= 0) return;
+      int devTag = 0;
+      if (pulse == 1) {
+        seqX.add(ljx);
+        seqY.add(ljy);
+        seqCode.add(1);
+        devTag = 1;
+      } else if (pulse == 2) {
+        seqX.add(ljx);
+        seqY.add(ljy);
+        seqCode.add(2);
+        devTag = 2;
+      } else if (pulse <= 4) {
+        final double mx = (pulseOriginX + ljx) * 0.5;
+        final double my = (pulseOriginY + ljy) * 0.5;
+        beadX.add(mx);
+        beadY.add(my);
+        beadCode.add(1); // خرز A (2.5×2.5 مم)
+        devTag = 5;
+      } else {
+        final double mx = (pulseOriginX + ljx) * 0.5;
+        final double my = (pulseOriginY + ljy) * 0.5;
+        beadX.add(mx);
+        beadY.add(my);
+        beadCode.add(2); // خرز B (4×4 مم)
+        devTag = 6;
+      }
+      emitStitch(ljx, ljy, needMove, devTag);
+      needMove = false;
+      pulse = 0;
     }
 
     for (int p = 0; p + 2 < lim; p += 3) {
@@ -2390,32 +2728,36 @@ class TarikProDahaoParser {
       if (cmd == 0xF8) break;
 
       if (cmd == 0xD7) {
+        flushPulse();
         if (b1 == 0 && b2 == 0) {
           inDev = !inDev;
-          pulse = 0;
         } else if (b1 == 10) {
-          // قناة الخرز الأصلية في .DHE: b2=1 (A: 2.5×2.5مم)، b2=2 (B: 4×4مم)، b2=4 (C: 6×2.5مم)
-          final int bc = (b2 & 4) != 0 ? 3 : ((b2 & 2) != 0 ? 2 : 1);
-          recordBead(cx, cy, bc);
+          // قناة الخرز الحديثة الكاملة (emCAD 2.10 / OutputDHE): 8 قنوات A..H (بتّات 0x01..0x80)
+          final int bc = _maskToChannel1To8(b2);
+          recordBead(cx, cy, bc, centerOnNextStitch: true);
+        } else if (b1 == 6 && b2 >= 16 && !matchedDhe) {
+          // قناة الخرز C/D في emCAD 2.6 (.DHA): 0xD7 (06, 16) = خرز C، 0xD7 (06, 32) = خرز D
+          final int bc = b2 == 16 ? 3 : (b2 == 32 ? 4 : (b2 == 64 ? 5 : 6));
+          recordBead(cx, cy, bc, centerOnNextStitch: true);
         } else if (b1 == 6) {
-          // قناة الترتر الأصلية في .DHE: b2=1 (A: 3مم)، b2=2 (B: 5مم)، b2=4 (C: 3مم)، b2=8 (D: 5مم)
-          final int sc = (b2 & 1) != 0 ? 1 : ((b2 & 2) != 0 ? 2 : ((b2 & 4) != 0 ? 3 : 4));
+          // قناة الترتر الأصلية (A..H: بتّات 0x01..0x80)
+          final int sc = _maskToChannel1To8(b2);
           recordSeq(cx, cy, sc);
-        } else if (b2 == 16 || b2 == 32 || b2 == 48) {
-          recordBead(cx, cy, b2 == 16 ? 1 : (b2 == 32 ? 2 : 3));
         }
         continue;
       }
 
       if (cmd >= 0x88 && cmd <= 0x9F) {
+        flushPulse();
+        pendingBeadCenterIdx = -1;
         if (hasStitchesInCol) {
-          col = (col + 1) % _palette.length;
+          colorStepIdx++;
+          col = paletteIndexForStep(colorStepIdx);
           colorCount++;
           hasStitchesInCol = false;
         }
         needMove = true;
         inDev = false;
-        pulse = 0;
         continue;
       }
 
@@ -2424,64 +2766,54 @@ class TarikProDahaoParser {
       final double dx = ((cmd & 0x20) != 0 ? -b2 : b2).toDouble();
 
       if (kind == 0x81) {
-        cx += dx;
-        cy -= dy;
-        if (inDev && !matchedDhe) {
-          // في ملفات .DHA: القفزة الطويلة (>9.5 مم) هي انتقال حر وليست نبضة إسقاط خرز/ترتر
+        pendingBeadCenterIdx = -1;
+        if (inDev) {
           if (dx.abs() > 95.0 || dy.abs() > 95.0) {
-            pulse = 0;
+            flushPulse();
+            cx += dx;
+            cy -= dy;
             needMove = true;
           } else {
+            // في NONO.DHA (2.10) القفزات المتتالية ذات الحركة غير الصفرية تعني ترترة جديدة لكل قفزة!
+            if ((dx != 0.0 || dy != 0.0) && pulse > 0) {
+              flushPulse();
+            }
+            if (pulse == 0) {
+              pulseOriginX = cx;
+              pulseOriginY = cy;
+            }
+            cx += dx;
+            cy -= dy;
             pulse++;
             ljx = cx;
             ljy = cy;
           }
         } else {
+          cx += dx;
+          cy -= dy;
           needMove = true;
         }
       } else if (kind == 0x80) {
-        if (inDev && !matchedDhe && pulse > 0) {
-          // التوزيع المعاير 100% وفق داهاو emCAD لملفات .DHA:
-          // نبضة1=خرزA(2.5مم)، نبضة2=ترترB(5مم)، نبضة3/5=خرزB(4مم)، نبضة4=ترترA(3مم)، نبضة6+=خرزC(6×2.5مم)
-          int devTag = 0;
-          if (pulse == 1) {
-            beadX.add(ljx);
-            beadY.add(ljy);
-            beadCode.add(1);
-            devTag = 5;
-          } else if (pulse == 2) {
-            seqX.add(ljx);
-            seqY.add(ljy);
-            seqCode.add(2);
-            devTag = 2;
-          } else if (pulse == 4) {
-            seqX.add(ljx);
-            seqY.add(ljy);
-            seqCode.add(1);
-            devTag = 1;
-          } else if (pulse == 3 || pulse == 5) {
-            beadX.add(ljx);
-            beadY.add(ljy);
-            beadCode.add(2);
-            devTag = 6;
-          } else {
-            beadX.add(ljx);
-            beadY.add(ljy);
-            beadCode.add(3);
-            devTag = 7;
-          }
-          emitStitch(ljx, ljy, needMove, devTag);
-          needMove = false;
-          pulse = 0;
-        }
+        flushPulse();
+        final double prevX = cx;
+        final double prevY = cy;
         cx += dx;
         cy -= dy;
+        // توسيط الخرزة على منتصف غرزة التثبيت الفورية (تماماً مثل emCAD)
+        if (pendingBeadCenterIdx >= 0 && pendingBeadCenterIdx < beadX.length) {
+          if (dx.abs() <= 65.0 && dy.abs() <= 65.0 && (dx != 0.0 || dy != 0.0)) {
+            beadX._buf[pendingBeadCenterIdx] = (prevX + cx) * 0.5;
+            beadY._buf[pendingBeadCenterIdx] = (prevY + cy) * 0.5;
+          }
+          pendingBeadCenterIdx = -1;
+        }
         emitStitch(cx, cy, needMove, pendingDev);
         pendingDev = 0;
         needMove = false;
       }
     }
 
+    flushPulse();
     if (stX.length < 2) return null;
     return VectorDesignData(
       stX: stX.finish(),
@@ -2495,7 +2827,7 @@ class TarikProDahaoParser {
       beadX: beadX.finish(),
       beadY: beadY.finish(),
       beadCode: beadCode.finish(),
-      paletteArgb: _palette,
+      paletteArgb: activePalette,
       stitches: stX.length,
       colorCount: colorCount,
       stopsCount: colorCount > 1 ? colorCount - 1 : 0,
@@ -2626,10 +2958,14 @@ class TarikDesignSpatialIndex {
     if (dev != null && dev.length == nSt) {
       int si = 0, bi = 0;
       for (int i = 0; i < nSt; i++) {
-        final int dt = dev[i] & 0x0F;
-        if (dt >= 1 && dt <= 4 && si < nSeq) {
+        final int rawDv = dev[i];
+        final bool isSeqTag = ((rawDv & 0xC0) == 0 && (rawDv & 0x0F) >= 1 && (rawDv & 0x0F) <= 4) ||
+            ((rawDv & 0x40) != 0 && (rawDv & 0x0F) >= 1 && (rawDv & 0x0F) <= 8);
+        final bool isBeadTag = ((rawDv & 0xC0) == 0 && (rawDv & 0x0F) >= 5 && (rawDv & 0x0F) <= 7) ||
+            ((rawDv & 0x80) != 0 && (rawDv & 0x0F) >= 1 && (rawDv & 0x0F) <= 8);
+        if (isSeqTag && si < nSeq) {
           seqStitchIdx[si++] = i;
-        } else if (dt >= 5 && dt <= 7 && bi < nBead) {
+        } else if (isBeadTag && bi < nBead) {
           beadStitchIdx[bi] = i;
           double ang = 0.0;
           if (i > 0 && data.stMove[i] == 0) {
@@ -2705,6 +3041,297 @@ class TarikRenderSpecs {
   static const double beadBDiamUnits = 40.0;
   static const double beadCLenUnits = 60.0;
   static const double beadCHeightUnits = 25.0;
+}
+
+
+/// إعداد قناة واحدة من قنوات الماكينة الثماني (A – H) مثل شريط emCAD العلوي
+class TarikDeviceChannelConfig {
+  final int index; // 0=A .. 7=H
+  /// 0 = خيط عادي (معطّل)، 1 = ترتر (Sequin)، 2 = خرز (Bead)
+  int kind;
+  /// للترتر: 0 = 3 مم، 1 = 5 مم
+  /// للخرز: 0 = مربع 2.5×2.5 مم، 1 = مربع 4×4 مم، 2 = مستطيل 5×2.5 مم، 3 = مستطيل 6×2.5 مم
+  int sizeCode;
+  /// الخامة في المعاينة 3D: 0 = لؤلؤي، 1 = ذهبي، 2 = فضي، 3 = برونزي، 4 = ملوّن/كريستال
+  int finish;
+  bool visible;
+
+  TarikDeviceChannelConfig({
+    required this.index,
+    required this.kind,
+    required this.sizeCode,
+    required this.finish,
+    this.visible = true,
+  });
+
+  String get letter => String.fromCharCode(65 + index.clamp(0, 7));
+
+  TarikDeviceChannelConfig copyWith({
+    int? kind,
+    int? sizeCode,
+    int? finish,
+    bool? visible,
+  }) {
+    return TarikDeviceChannelConfig(
+      index: index,
+      kind: kind ?? this.kind,
+      sizeCode: sizeCode ?? this.sizeCode,
+      finish: finish ?? this.finish,
+      visible: visible ?? this.visible,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'i': index,
+        'k': kind,
+        's': sizeCode,
+        'f': finish,
+        'v': visible,
+      };
+
+  factory TarikDeviceChannelConfig.fromJson(Map<String, dynamic> j, int fallbackIdx) {
+    return TarikDeviceChannelConfig(
+      index: (j['i'] as num?)?.toInt() ?? fallbackIdx,
+      kind: ((j['k'] as num?)?.toInt() ?? 0).clamp(0, 2),
+      sizeCode: ((j['s'] as num?)?.toInt() ?? 0).clamp(0, 3),
+      finish: ((j['f'] as num?)?.toInt() ?? 0).clamp(0, 4),
+      visible: j['v'] != false,
+    );
+  }
+}
+
+/// بروفايل أجهزة الماكينة ذو الـ 8 قنوات (A – H) + قوالب داهاو الجاهزة + نطاق التطبيق على الألوان
+class TarikMachineDeviceProfile {
+  final String presetId; // 'emcad_std', '4b2s', '2b2s', '8b', 'custom'
+  final List<TarikDeviceChannelConfig> channels; // 8 قنوات دائماً: A..H
+  final bool applyToAllColors;
+  final Map<int, String> perColorRule; // عند إيقاف applyToAllColors: رقم اللون -> presetId
+  final bool useCustomFinishes;
+
+  const TarikMachineDeviceProfile({
+    required this.presetId,
+    required this.channels,
+    this.applyToAllColors = true,
+    this.perColorRule = const {},
+    this.useCustomFinishes = false,
+  });
+
+  factory TarikMachineDeviceProfile.preset(String id, {bool applyToAllColors = true}) {
+    switch (id) {
+      case '4b2s':
+        // قاعدة OutputDHE.exe (4 خرز A..D + 2 ترتر E,F)
+        return TarikMachineDeviceProfile(
+          presetId: '4b2s',
+          applyToAllColors: applyToAllColors,
+          channels: [
+            TarikDeviceChannelConfig(index: 0, kind: 2, sizeCode: 0, finish: 0), // A: خرز 2.5×2.5 لؤلؤي
+            TarikDeviceChannelConfig(index: 1, kind: 2, sizeCode: 1, finish: 1), // B: خرز 4×4 ذهبي
+            TarikDeviceChannelConfig(index: 2, kind: 2, sizeCode: 3, finish: 3), // C: خرز 6×2.5 برونزي
+            TarikDeviceChannelConfig(index: 3, kind: 2, sizeCode: 2, finish: 2), // D: خرز 5×2.5 فضي
+            TarikDeviceChannelConfig(index: 4, kind: 1, sizeCode: 0, finish: 1), // E: ترتر 3 مم ذهبي
+            TarikDeviceChannelConfig(index: 5, kind: 1, sizeCode: 1, finish: 3), // F: ترتر 5 مم برونزي
+            TarikDeviceChannelConfig(index: 6, kind: 0, sizeCode: 0, finish: 0), // G: معطّل
+            TarikDeviceChannelConfig(index: 7, kind: 0, sizeCode: 0, finish: 0), // H: معطّل
+          ],
+        );
+      case '2b2s':
+        // قاعدة 2 خرز (A,B) + 2 ترتر (E,F)
+        return TarikMachineDeviceProfile(
+          presetId: '2b2s',
+          applyToAllColors: applyToAllColors,
+          channels: [
+            TarikDeviceChannelConfig(index: 0, kind: 2, sizeCode: 0, finish: 0), // A: خرز 2.5×2.5
+            TarikDeviceChannelConfig(index: 1, kind: 2, sizeCode: 1, finish: 1), // B: خرز 4×4
+            TarikDeviceChannelConfig(index: 2, kind: 0, sizeCode: 0, finish: 0), // C: معطّل
+            TarikDeviceChannelConfig(index: 3, kind: 0, sizeCode: 0, finish: 0), // D: معطّل
+            TarikDeviceChannelConfig(index: 4, kind: 1, sizeCode: 0, finish: 1), // E: ترتر 3 مم
+            TarikDeviceChannelConfig(index: 5, kind: 1, sizeCode: 1, finish: 3), // F: ترتر 5 مم
+            TarikDeviceChannelConfig(index: 6, kind: 0, sizeCode: 0, finish: 0), // G: معطّل
+            TarikDeviceChannelConfig(index: 7, kind: 0, sizeCode: 0, finish: 0), // H: معطّل
+          ],
+        );
+      case '8b':
+        // 8 قنوات خرز فقط (A..H)
+        return TarikMachineDeviceProfile(
+          presetId: '8b',
+          applyToAllColors: applyToAllColors,
+          channels: [
+            TarikDeviceChannelConfig(index: 0, kind: 2, sizeCode: 0, finish: 0), // A: 2.5×2.5 لؤلؤي
+            TarikDeviceChannelConfig(index: 1, kind: 2, sizeCode: 1, finish: 1), // B: 4×4 ذهبي
+            TarikDeviceChannelConfig(index: 2, kind: 2, sizeCode: 3, finish: 3), // C: 6×2.5 برونزي
+            TarikDeviceChannelConfig(index: 3, kind: 2, sizeCode: 2, finish: 2), // D: 5×2.5 فضي
+            TarikDeviceChannelConfig(index: 4, kind: 2, sizeCode: 0, finish: 4), // E: 2.5×2.5 كريستال
+            TarikDeviceChannelConfig(index: 5, kind: 2, sizeCode: 1, finish: 0), // F: 4×4 لؤلؤي
+            TarikDeviceChannelConfig(index: 6, kind: 2, sizeCode: 3, finish: 1), // G: 6×2.5 ذهبي
+            TarikDeviceChannelConfig(index: 7, kind: 2, sizeCode: 2, finish: 4), // H: 5×2.5 كريستال
+          ],
+        );
+      case 'emcad_std':
+      default:
+        // قياسي emCAD: A,B ترتر (3 و5 مم) + C,D,E,F خرز (2.5، 4، 6×2.5، 5×2.5) + G,H ترتر إضافي
+        return TarikMachineDeviceProfile(
+          presetId: 'emcad_std',
+          applyToAllColors: applyToAllColors,
+          channels: [
+            TarikDeviceChannelConfig(index: 0, kind: 1, sizeCode: 0, finish: 1), // A: ترتر 3 مم ذهبي
+            TarikDeviceChannelConfig(index: 1, kind: 1, sizeCode: 1, finish: 3), // B: ترتر 5 مم برونزي
+            TarikDeviceChannelConfig(index: 2, kind: 2, sizeCode: 0, finish: 0), // C: خرز 2.5×2.5 لؤلؤي
+            TarikDeviceChannelConfig(index: 3, kind: 2, sizeCode: 1, finish: 1), // D: خرز 4×4 ذهبي
+            TarikDeviceChannelConfig(index: 4, kind: 2, sizeCode: 3, finish: 3), // E: خرز 6×2.5 برونزي
+            TarikDeviceChannelConfig(index: 5, kind: 2, sizeCode: 2, finish: 2), // F: خرز 5×2.5 فضي
+            TarikDeviceChannelConfig(index: 6, kind: 1, sizeCode: 0, finish: 0), // G: ترتر 3 مم لؤلؤي
+            TarikDeviceChannelConfig(index: 7, kind: 1, sizeCode: 1, finish: 2), // H: ترتر 5 مم فضي
+          ],
+        );
+    }
+  }
+
+  TarikMachineDeviceProfile copyWith({
+    String? presetId,
+    List<TarikDeviceChannelConfig>? channels,
+    bool? applyToAllColors,
+    Map<int, String>? perColorRule,
+    bool? useCustomFinishes,
+  }) {
+    return TarikMachineDeviceProfile(
+      presetId: presetId ?? this.presetId,
+      channels: channels ?? this.channels.map((c) => c.copyWith()).toList(),
+      applyToAllColors: applyToAllColors ?? this.applyToAllColors,
+      perColorRule: perColorRule ?? Map<int, String>.from(this.perColorRule),
+      useCustomFinishes: useCustomFinishes ?? this.useCustomFinishes,
+    );
+  }
+
+  /// قائمة القنوات المفعّلة من نوع ترتر بالترتيب
+  List<TarikDeviceChannelConfig> get sequinChannels =>
+      channels.where((c) => c.kind == 1).toList(growable: false);
+
+  /// قائمة القنوات المفعّلة من نوع خرز بالترتيب
+  List<TarikDeviceChannelConfig> get beadChannels =>
+      channels.where((c) => c.kind == 2).toList(growable: false);
+
+  /// استرجاع إعداد العرض لترتر برقم (1..8) حسب البروفايل النشط
+  TarikDeviceChannelConfig resolveSequinConfig(int code) {
+    final int idx = (code - 1).clamp(0, 7);
+    final seqs = sequinChannels;
+    if (seqs.isNotEmpty) {
+      return seqs[idx % seqs.length];
+    }
+    return channels[idx];
+  }
+
+  /// استرجاع إعداد العرض لخرز برقم (1..8) حسب البروفايل النشط
+  TarikDeviceChannelConfig resolveBeadConfig(int code) {
+    final int idx = (code - 1).clamp(0, 7);
+    final beads = beadChannels;
+    if (beads.isNotEmpty) {
+      return beads[idx % beads.length];
+    }
+    return channels[idx];
+  }
+
+  /// استرجاع البروفايل الفعلي للون معين عند التصدير
+  TarikMachineDeviceProfile effectiveForColor(int colorIndex) {
+    if (applyToAllColors) return this;
+    final override = perColorRule[colorIndex];
+    if (override == null || override == presetId) return this;
+    if (override == 'none') {
+      return TarikMachineDeviceProfile(
+        presetId: 'none',
+        channels: List.generate(
+          8,
+          (i) => TarikDeviceChannelConfig(index: i, kind: 0, sizeCode: 0, finish: 0, visible: false),
+        ),
+      );
+    }
+    return TarikMachineDeviceProfile.preset(override);
+  }
+
+  String label(bool isAr) {
+    switch (presetId) {
+      case '4b2s':
+        return isAr ? '4 خرز + 2 ترتر' : '4 Beads + 2 Sequins';
+      case '2b2s':
+        return isAr ? '2 خرز + 2 ترتر' : '2 Beads + 2 Sequins';
+      case '8b':
+        return isAr ? '8 خرز فقط' : '8 Beads Only';
+      case 'custom':
+        return isAr ? 'مخصص (A–H)' : 'Custom (A–H)';
+      default:
+        return isAr ? 'داهاو قياسي' : 'emCAD Standard';
+    }
+  }
+
+  Map<String, dynamic> toJson() => {
+        'presetId': presetId,
+        'applyToAllColors': applyToAllColors,
+        'useCustomFinishes': useCustomFinishes,
+        'channels': channels.map((c) => c.toJson()).toList(),
+        'perColorRule': perColorRule.map((k, v) => MapEntry(k.toString(), v)),
+      };
+
+  factory TarikMachineDeviceProfile.fromJson(Map<String, dynamic> j) {
+    final String pid = (j['presetId'] ?? 'emcad_std').toString();
+    final rawCh = j['channels'] as List?;
+    List<TarikDeviceChannelConfig> chs;
+    if (rawCh != null && rawCh.length == 8) {
+      chs = List.generate(
+        8,
+        (i) => TarikDeviceChannelConfig.fromJson(Map<String, dynamic>.from(rawCh[i] as Map), i),
+      );
+    } else {
+      chs = TarikMachineDeviceProfile.preset(pid).channels;
+    }
+    final Map<int, String> pcr = {};
+    if (j['perColorRule'] is Map) {
+      (j['perColorRule'] as Map).forEach((k, v) {
+        final ki = int.tryParse(k.toString());
+        if (ki != null && v != null) pcr[ki] = v.toString();
+      });
+    }
+    return TarikMachineDeviceProfile(
+      presetId: pid,
+      channels: chs,
+      applyToAllColors: j['applyToAllColors'] != false,
+      perColorRule: pcr,
+      useCustomFinishes: j['useCustomFinishes'] == true,
+    );
+  }
+}
+
+/// المدير المركزي الدائم لإعدادات أجهزة الماكينة (A – H) عبر التطبيق بالكامل
+class TarikMachineDeviceManager {
+  static TarikMachineDeviceProfile _current = TarikMachineDeviceProfile.preset('emcad_std');
+  static final ValueNotifier<int> versionNotifier = ValueNotifier<int>(0);
+  static String? _prefsFilePath;
+
+  static TarikMachineDeviceProfile get current => _current;
+
+  static Future<void> loadFromFile(String filePath) async {
+    _prefsFilePath = filePath;
+    try {
+      final f = File(filePath);
+      if (await f.exists()) {
+        final raw = await f.readAsString();
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) {
+          _current = TarikMachineDeviceProfile.fromJson(decoded);
+          versionNotifier.value++;
+        }
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> update(TarikMachineDeviceProfile next) async {
+    _current = next;
+    versionNotifier.value++;
+    if (_prefsFilePath != null) {
+      try {
+        final f = File(_prefsFilePath!);
+        await f.writeAsString(jsonEncode(next.toJson()), flush: true);
+      } catch (_) {}
+    }
+  }
 }
 
 /// محسّن معاينات ملفات `.EMB` مع الحفاظ التام على لون الخلفية الأساسي وتمديده لآخر البطاقة بدون حواف بيضاء
@@ -2896,17 +3523,17 @@ class TarikProPbrSprites {
     seqPearl = await _buildSequin(const [240, 234, 224], const [255, 255, 252], const [142, 132, 122], iridescent: true);
     seqRuby = await _buildSequin(const [214, 34, 62], const [255, 205, 215], const [88, 10, 22]);
 
-    beadSqPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 256, h: 256);
-    beadSqGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 256, h: 256);
-    beadSqBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 256, h: 256);
-    beadSqSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 256, h: 256);
-    beadSqCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 256, h: 256);
+    beadSqPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 128, h: 128);
+    beadSqGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 128, h: 128);
+    beadSqBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 128, h: 128);
+    beadSqSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 128, h: 128);
+    beadSqCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 128, h: 128);
 
-    beadRectPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 256, h: 106);
-    beadRectGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 256, h: 106);
-    beadRectBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 256, h: 106);
-    beadRectSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 256, h: 106);
-    beadRectCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 256, h: 106);
+    beadRectPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 128, h: 54);
+    beadRectGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 128, h: 54);
+    beadRectBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 128, h: 54);
+    beadRectSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 128, h: 54);
+    beadRectCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 128, h: 54);
 
     _ready = true;
   }
@@ -2916,7 +3543,7 @@ class TarikProPbrSprites {
     List<int> hiRgb,
     List<int> shRgb, {
     bool iridescent = false,
-    int size = 256,
+    int size = 128,
   }) async {
     final Uint8List pixels = await Isolate.run(() {
       final out = Uint8List(size * size * 4);
@@ -3055,19 +3682,51 @@ class TarikProPbrSprites {
     return bucket == 1 ? seqGold : (bucket == 2 ? seqBronze : (bucket == 3 ? seqPearl : seqGold));
   }
 
+  static ui.Image? sequinByFinish(int finish) {
+    switch (finish) {
+      case 0: return seqPearl;
+      case 1: return seqGold;
+      case 2: return seqSilver;
+      case 3: return seqBronze;
+      case 4: return seqRuby;
+      default: return seqGold;
+    }
+  }
+
+  static ui.Image? beadByFinish(int finish, bool isRect) {
+    if (isRect) {
+      switch (finish) {
+        case 0: return beadRectPearl;
+        case 1: return beadRectGold;
+        case 2: return beadRectSilver;
+        case 3: return beadRectBronze;
+        case 4: return beadRectCrystal;
+        default: return beadRectBronze;
+      }
+    }
+    switch (finish) {
+      case 0: return beadSqPearl;
+      case 1: return beadSqGold;
+      case 2: return beadSqSilver;
+      case 3: return beadSqBronze;
+      case 4: return beadSqCrystal;
+      default: return beadSqPearl;
+    }
+  }
+
   static ui.Image? beadFor(int code, int decorTheme) {
-    final bool isRectC = code == 3;
+    final bool isRectC = code == 3 || code == 4 || code == 7 || code == 8;
     if (decorTheme == 1) {
       if (isRectC) return beadRectSilver;
-      return code == 2 ? beadSqSilver : beadSqPearl;
+      return (code == 2 || code == 6) ? beadSqSilver : beadSqPearl;
     } else if (decorTheme == 2) {
       return isRectC ? beadRectPearl : beadSqPearl;
     } else if (decorTheme == 3) {
       if (isRectC) return beadRectGold;
-      return code == 2 ? beadSqCrystal : beadSqPearl;
+      return (code == 2 || code == 6) ? beadSqCrystal : beadSqPearl;
     }
     if (isRectC) return beadRectBronze;
-    return code == 2 ? beadSqGold : beadSqPearl;
+    return (code == 2 || code == 6) ? beadSqGold : beadSqPearl;
   }
 }
 
@@ -3126,12 +3785,16 @@ class TarikUnifiedCanvasRenderer {
     required double offY,
     bool is3D = true, // العرض 3D فقط في كامل التطبيق
     int decorTheme = 0,
+    int startIndex = 0,
     int? stitchLimit,
+    bool fastSimMode = false,
     Rect? visibleRect,
     double stroke2DPx = TarikRenderSpecs.stroke2DScreenPx,
   }) {
     final int nSt = (stitchLimit ?? data.stX.length).clamp(0, data.stX.length);
-    if (nSt < 2) return;
+    final int sIdx = startIndex.clamp(0, nSt);
+    if (nSt < 2 || sIdx >= nSt) return;
+    final int loopStart = sIdx > 0 ? sIdx - 1 : 0;
 
     final int palLen = math.max(1, data.paletteArgb.length);
     final Float32List stX = data.stX;
@@ -3151,18 +3814,18 @@ class TarikUnifiedCanvasRenderer {
     final double tw = (scale * TarikRenderSpecs.threadWidthUnits3D).clamp(1.15, 28.0);
 
     int visCount = 0;
-    if (tw >= 1.8) {
+    if (!fastSimMode && tw >= 2.0) {
       double pSx = 0, pSy = 0;
-      for (int i = 0; i < nSt; i++) {
+      for (int i = loopStart; i < nSt; i++) {
         final double sx = stX[i] * scale + offX;
         final double sy = stY[i] * scale + offY;
-        if (i > 0 && stMove[i] == 0) {
+        if (i > loopStart && stMove[i] == 0) {
           if (math.max(pSx, sx) >= vLeft &&
               math.min(pSx, sx) <= vRight &&
               math.max(pSy, sy) >= vTop &&
               math.min(pSy, sy) <= vBottom) {
             visCount++;
-            if (visCount > 6500) break;
+            if (visCount > 5500) break;
           }
         }
         pSx = sx;
@@ -3170,7 +3833,7 @@ class TarikUnifiedCanvasRenderer {
       }
     }
 
-    final bool usePerStitchTwisted = tw >= 2.1 && visCount <= 6500;
+    final bool usePerStitchTwisted = !fastSimMode && tw >= 2.1 && visCount <= 5500;
 
     if (usePerStitchTwisted) {
       final bool drawTwistPlies = tw >= 2.8;
@@ -3214,7 +3877,7 @@ class TarikUnifiedCanvasRenderer {
       int prevCol = -1;
       bool hasPrev = false;
 
-      for (int i = 0; i < nSt; i++) {
+      for (int i = loopStart; i < nSt; i++) {
         final int cIdx = stColor[i];
         final double rx = stX[i];
         final double ry = stY[i];
@@ -3408,7 +4071,7 @@ class TarikUnifiedCanvasRenderer {
         hasAnySeg = false;
       }
 
-      for (int i = 0; i < nSt; i++) {
+      for (int i = loopStart; i < nSt; i++) {
         final int cIdx = stColor[i];
         if (cIdx != activeColorIdx) {
           flush3DColor();
@@ -3452,79 +4115,102 @@ class TarikUnifiedCanvasRenderer {
     }
 
     // ================== رسم الترتر (A=3 مم، B=5 مم) والخرز (A=2.5×2.5، B=4×4، C=6×2.5 باتجاه الخيط) بتزامن فوري O(1) ==================
-    final bool isPartialSim = stitchLimit != null && nSt < data.stX.length;
+    final bool isPartialSim = (stitchLimit != null && nSt < data.stX.length) || sIdx > 0;
     final TarikDesignSpatialIndex? spatialIdx =
         (data.seqX.isNotEmpty || data.beadX.isNotEmpty) ? TarikDesignSpatialIndex.of(data) : null;
 
+    final TarikMachineDeviceProfile activeProfile = TarikMachineDeviceManager.current;
+    final bool usePerChannelFinish = activeProfile.useCustomFinishes || decorTheme == 0;
+
+    void drawBeadSprite(double sx, double sy, double ang, TarikDeviceChannelConfig cfg, Paint spritePaint, int fallbackCode) {
+      final bool isRect = cfg.sizeCode == 2 || cfg.sizeCode == 3;
+      final ui.Image? sp = usePerChannelFinish
+          ? TarikProPbrSprites.beadByFinish(cfg.finish, isRect)
+          : TarikProPbrSprites.beadFor(isRect ? 3 : (cfg.sizeCode == 1 ? 2 : fallbackCode), decorTheme);
+      if (sp == null) return;
+      if (isRect) {
+        final double lenUnits = cfg.sizeCode == 2 ? 50.0 : TarikRenderSpecs.beadCLenUnits; // 5×2.5 أو 6×2.5 مم
+        final double wPx = (lenUnits * scale * 1.24).clamp(5.0, 280.0);
+        final double hPx = (TarikRenderSpecs.beadCHeightUnits * scale * 1.24).clamp(3.0, 140.0);
+        canvas.save();
+        canvas.translate(sx, sy);
+        canvas.rotate(ang);
+        canvas.drawImageRect(
+          sp,
+          Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
+          Rect.fromCenter(center: Offset.zero, width: wPx, height: hPx),
+          spritePaint,
+        );
+        canvas.restore();
+      } else {
+        final double units = cfg.sizeCode == 1 ? TarikRenderSpecs.beadBDiamUnits : TarikRenderSpecs.beadADiamUnits;
+        final double dPx = (units * scale * 1.24).clamp(3.2, 220.0);
+        canvas.drawImageRect(
+          sp,
+          Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
+          Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
+          spritePaint,
+        );
+      }
+    }
+
+    void drawSequinSprite(double sx, double sy, TarikDeviceChannelConfig cfg, Paint spritePaint, int fallbackBucket) {
+      final double diamUnits = cfg.sizeCode == 1 ? 50.0 : 30.0; // 5 مم أو 3 مم
+      final double dPx = (diamUnits * scale * 1.25).clamp(3.8, 260.0);
+      final ui.Image? sp = usePerChannelFinish
+          ? TarikProPbrSprites.sequinByFinish(cfg.finish)
+          : TarikProPbrSprites.sequinFor(fallbackBucket, decorTheme);
+      if (sp != null) {
+        canvas.drawImageRect(
+          sp,
+          Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
+          Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
+          spritePaint,
+        );
+      }
+    }
+
     if (data.seqX.isNotEmpty && spatialIdx != null) {
-      final spritePaint = Paint()..filterQuality = FilterQuality.medium;
+      final spritePaint = Paint()..filterQuality = fastSimMode ? FilterQuality.low : FilterQuality.medium;
       final Int32List sIdxArr = spatialIdx.seqStitchIdx;
       for (int i = 0; i < data.seqX.length; i++) {
-        if (isPartialSim && sIdxArr[i] >= nSt) continue;
+        if (isPartialSim && (sIdxArr[i] < sIdx || sIdxArr[i] >= nSt)) continue;
         final double sx = data.seqX[i] * scale + offX;
         final double sy = data.seqY[i] * scale + offY;
         if (sx < vLeft || sx > vRight || sy < vTop || sy > vBottom) continue;
 
         final int code = data.seqCode[i];
-        int b = 0;
-        if (code == 2 || code == 6) {
-          b = 1;
-        } else if (code == 3 || code == 16) {
-          b = 2;
-        } else if (code == 4 || code == 8 || code == 32) {
-          b = 3;
-        }
-        final double dPx = (TarikRenderSpecs.seqDiamUnits[b] * scale * 1.25).clamp(3.8, 260.0);
-        final ui.Image? sp = TarikProPbrSprites.sequinFor(b, decorTheme);
-        if (sp != null) {
-          canvas.drawImageRect(
-            sp,
-            Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
-            Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
-            spritePaint,
-          );
+        int normCode = code;
+        if (code == 6) normCode = 2;
+        else if (code == 16) normCode = 3;
+        else if (code == 32) normCode = 4;
+        final TarikDeviceChannelConfig cfg = activeProfile.resolveSequinConfig(normCode);
+        if (!cfg.visible || cfg.kind == 0) continue;
+        if (cfg.kind == 2) {
+          drawBeadSprite(sx, sy, 0.0, cfg, spritePaint, normCode);
+        } else {
+          drawSequinSprite(sx, sy, cfg, spritePaint, (normCode - 1).clamp(0, 3));
         }
       }
     }
 
     if (data.beadX.isNotEmpty && spatialIdx != null) {
-      final spritePaint = Paint()..filterQuality = FilterQuality.medium;
+      final spritePaint = Paint()..filterQuality = fastSimMode ? FilterQuality.low : FilterQuality.medium;
       final Int32List bIdxArr = spatialIdx.beadStitchIdx;
       final Float32List bAngArr = spatialIdx.beadAngles;
       for (int i = 0; i < data.beadX.length; i++) {
-        if (isPartialSim && bIdxArr[i] >= nSt) continue;
+        if (isPartialSim && (bIdxArr[i] < sIdx || bIdxArr[i] >= nSt)) continue;
         final double sx = data.beadX[i] * scale + offX;
         final double sy = data.beadY[i] * scale + offY;
         if (sx < vLeft || sx > vRight || sy < vTop || sy > vBottom) continue;
 
         final int code = data.beadCode[i];
-        final ui.Image? sp = TarikProPbrSprites.beadFor(code, decorTheme);
-        if (sp == null) continue;
-
-        if (code == 3) {
-          // خرز C: مستطيل مكسور الحواف (6.0 × 2.5 مم) يدور تلقائياً باتجاه الخيط (قراءة فورية O(1))
-          final double wPx = (TarikRenderSpecs.beadCLenUnits * scale * 1.24).clamp(5.0, 280.0);
-          final double hPx = (TarikRenderSpecs.beadCHeightUnits * scale * 1.24).clamp(3.0, 140.0);
-          canvas.save();
-          canvas.translate(sx, sy);
-          canvas.rotate(bAngArr[i]);
-          canvas.drawImageRect(
-            sp,
-            Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
-            Rect.fromCenter(center: Offset.zero, width: wPx, height: hPx),
-            spritePaint,
-          );
-          canvas.restore();
+        final TarikDeviceChannelConfig cfg = activeProfile.resolveBeadConfig(code);
+        if (!cfg.visible || cfg.kind == 0) continue;
+        if (cfg.kind == 1) {
+          drawSequinSprite(sx, sy, cfg, spritePaint, (code - 1).clamp(0, 3));
         } else {
-          // خرز A (2.5×2.5 مم) و B (4.0×4.0 مم): مربع مكسور الحواف
-          final double units = code == 2 ? TarikRenderSpecs.beadBDiamUnits : TarikRenderSpecs.beadADiamUnits;
-          final double dPx = (units * scale * 1.24).clamp(3.2, 220.0);
-          canvas.drawImageRect(
-            sp,
-            Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
-            Rect.fromCenter(center: Offset(sx, sy), width: dPx, height: dPx),
-            spritePaint,
-          );
+          drawBeadSprite(sx, sy, bAngArr[i], cfg, spritePaint, code);
         }
       }
     }
@@ -3745,10 +4431,11 @@ class TarikProObjectEditor {
 
     void countDev(int idx) {
       if (devArr != null && idx < devArr.length) {
-        final int dt = devArr[idx] & 0x0F;
-        if (dt >= 1 && dt <= 4) {
+        final int rawDv = devArr[idx];
+        final int dt = rawDv & 0x0F;
+        if (((rawDv & 0xC0) == 0 && dt >= 1 && dt <= 4) || ((rawDv & 0x40) != 0 && dt >= 1 && dt <= 8)) {
           rSeq++;
-        } else if (dt >= 5 && dt <= 7) {
+        } else if (((rawDv & 0xC0) == 0 && dt >= 5 && dt <= 7) || ((rawDv & 0x80) != 0 && dt >= 1 && dt <= 8)) {
           rBead++;
         }
       }
@@ -3957,11 +4644,19 @@ class TarikProObjectEditor {
             final int dv = src.stDev![i];
             stDev.add(dv);
             final int dt = dv & 0x0F;
-            if (dt >= 1 && dt <= 4) {
+            if ((dv & 0x40) != 0 && dt >= 1 && dt <= 8) {
               seqX.add(rx);
               seqY.add(ry);
               seqCode.add(dt);
-            } else if (dt >= 5 && dt <= 7) {
+            } else if ((dv & 0x80) != 0 && dt >= 1 && dt <= 8) {
+              beadX.add(rx);
+              beadY.add(ry);
+              beadCode.add(dt);
+            } else if ((dv & 0xC0) == 0 && dt >= 1 && dt <= 4) {
+              seqX.add(rx);
+              seqY.add(ry);
+              seqCode.add(dt);
+            } else if ((dv & 0xC0) == 0 && dt >= 5 && dt <= 7) {
               beadX.add(rx);
               beadY.add(ry);
               beadCode.add(dt - 4);
@@ -4767,17 +5462,27 @@ class TarikProTbfParser {
     bool hasStitchesInCurColor = false;
     bool hasAnyDev = false;
 
+    final beadX = _ProFloat32Buf(64);
+    final beadY = _ProFloat32Buf(64);
+    final beadCode = _ProUint8Buf(64);
+    int prevDx = 0, prevDy = 0;
+
     for (int i = 0x600; i + 2 < bytes.length; i += 3) {
       final int dx = _s8(bytes[i]);
       final int dy = _s8(bytes[i + 1]);
       final int ctrl = bytes[i + 2];
 
       if (ctrl == 0x8F) break;
+      final double prevPx = x.toDouble();
+      final double prevPy = -y.toDouble();
       x += dx;
       y += dy;
 
-      if (ctrl == 0x40 || (ctrl >= 0x41 && ctrl <= 0x4F)) {
-        // تغيير لون / إبرة حقيقي فقط (وليس مقص 0x86!)
+      if (ctrl == 0x4D || ctrl == 0x88) {
+        // تفعيل / إيقاف جهاز التزيين في Tajima TBF
+        continue;
+      } else if (ctrl == 0x81 || (ctrl >= 0x40 && ctrl <= 0x4F)) {
+        // تغيير لون / إبرة حقيقي (0x81 في emCAD TBF و 0x40..0x4F)
         if (hasStitchesInCurColor) {
           colorIdx = (colorIdx + 1) % _palette.length;
           colorCount++;
@@ -4789,37 +5494,46 @@ class TarikProTbfParser {
         trimsCount++;
         jumpCount++;
         needMove = true;
-      } else if (ctrl == 0x81 || ctrl == 0x82 || ctrl == 0x84) {
-        // قفزة (Jump)
+      } else if (ctrl == 0x90 || ctrl == 0x82 || ctrl == 0x84) {
+        // قفزة حرة (Jump — 0x90 في emCAD TBF)
         jumpCount++;
         needMove = true;
-      } else if (ctrl == 0x87 || ctrl == 0x90 || ctrl == 0x91) {
-        // أمر ترتر (Sequin Eject / Mode)
+      } else if (ctrl == 0x89 || ctrl == 0x69 || ctrl == 0x87 || ctrl == 0x91) {
         final double px = x.toDouble();
         final double py = -y.toDouble();
-        if (ctrl == 0x87 || ctrl == 0x91) {
+        hasAnyDev = true;
+        int devTag = 1;
+        if (ctrl == 0x69 && (dx * prevDx + dy * prevDy) < -120 && dx.abs() <= 35 && dy.abs() <= 35) {
+          // تراجع قصير مع 0x69 في TBF = خرز A (1.7مم) أو B (2.5مم)
+          final int bc = math.sqrt(dx * dx + dy * dy) > 21.0 ? 2 : 1;
+          beadX.add((prevPx + px) * 0.5);
+          beadY.add((prevPy + py) * 0.5);
+          beadCode.add(bc);
+          devTag = 4 + bc;
+        } else {
+          final int sc = ctrl == 0x69 ? 2 : 1; // 0x89=ترتر A(3مم)، 0x69=ترتر B(5مم)
           seqX.add(px);
           seqY.add(py);
-          seqCode.add(1);
-          hasAnyDev = true;
-          stX.add(px);
-          stY.add(py);
-          stMove.add(needMove ? 1 : 0);
-          stColor.add(colorIdx);
-          stDev.add(1);
-          needMove = false;
-          stitchCount++;
-          hasStitchesInCurColor = true;
-          if (!hasBounds) {
-            minX = maxX = px;
-            minY = maxY = py;
-            hasBounds = true;
-          } else {
-            if (px < minX) minX = px;
-            if (px > maxX) maxX = px;
-            if (py < minY) minY = py;
-            if (py > maxY) maxY = py;
-          }
+          seqCode.add(sc);
+          devTag = sc;
+        }
+        stX.add(px);
+        stY.add(py);
+        stMove.add(needMove ? 1 : 0);
+        stColor.add(colorIdx);
+        stDev.add(devTag);
+        needMove = false;
+        stitchCount++;
+        hasStitchesInCurColor = true;
+        if (!hasBounds) {
+          minX = maxX = px;
+          minY = maxY = py;
+          hasBounds = true;
+        } else {
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
         }
       } else {
         final double px = x.toDouble();
@@ -4832,6 +5546,10 @@ class TarikProTbfParser {
         needMove = false;
         stitchCount++;
         hasStitchesInCurColor = true;
+        if (dx != 0 || dy != 0) {
+          prevDx = dx;
+          prevDy = dy;
+        }
         if (!hasBounds) {
           minX = maxX = px;
           minY = maxY = py;
@@ -4855,16 +5573,16 @@ class TarikProTbfParser {
       seqX: seqX.finish(),
       seqY: seqY.finish(),
       seqCode: seqCode.finish(),
-      beadX: Float32List(0),
-      beadY: Float32List(0),
-      beadCode: Uint8List(0),
+      beadX: beadX.finish(),
+      beadY: beadY.finish(),
+      beadCode: beadCode.finish(),
       paletteArgb: _palette,
       stitches: stitchCount,
       colorCount: colorCount,
       stopsCount: colorCount > 1 ? colorCount - 1 : 0,
       jumpsCount: jumpCount,
       sequinsCount: seqX.length,
-      beadsCount: 0,
+      beadsCount: beadX.length,
       trimsCount: trimsCount,
       minX: hasBounds ? minX : 0.0,
       maxX: hasBounds ? maxX : 0.0,
@@ -5078,5 +5796,608 @@ class TarikProFilmDoctor {
 
     out.stitches = list;
     return out;
+  }
+}
+
+
+// ============================================================================
+// TARIK EMB PRO v6.8 — 8-CHANNEL DAHAO CONVERTER (DST <-> DHA <-> DHE)
+// - قارئ DST ذكي يدعم قنوات emCAD 2.6 الثماني (A..H مع 8 Sequin Patch)
+// - مشفّر DHE / DHA أصلي كامل (3DES + Ring Cipher + 20-Color Header + Sec1 + Sec6)
+// - مصدّر موحّد يدعم DHE و DHA و DST وجميع الصيغ الأخرى بقواعد أجهزة الماكينة (A–H)
+// ============================================================================
+
+/// قارئ ملفات .DST المعاير بقاعدة أجهزة الماكينة الثماني (A – H):
+/// يدعم كلاً من ملفات emCAD 2.6 القياسية وملفات 8 Sequin Patch (A=1, B=2, C=4, D=8, E=7/ABC, F=11/ABD, G=13/ACD, H=14/BCD)
+class TarikProDstDeviceParser {
+  static final Int32List _defaultPalette = Int32List.fromList(const [
+    0xFF009900, 0xFF0000FF, 0xFFFF0000, 0xFFFFFF00, 0xFF00FFFF,
+    0xFFFF00FF, 0xFF00FF00, 0xFF000099, 0xFF990000, 0xFFFF9933,
+    0xFF9900CC, 0xFF996633, 0xFFB0BEC5, 0xFF000000, 0xFFFF7ECC,
+    0xFFFFCC7E, 0xFF66FFCC, 0xFF666666, 0xFF999966, 0xFF7E7EFF,
+  ]);
+
+  /// تحويل عدد قفزات DST المتتالية داخل وضع 0x43 إلى رقم قناة A..H (0..7)
+  static int _pulsesToChannel0To7(int pulses) {
+    if (pulses <= 1) return 0; // A
+    if (pulses == 2) return 1; // B
+    if (pulses == 3 || pulses == 4) return 2; // C
+    if (pulses == 5 || pulses == 6 || pulses == 7) return 4; // E (ABC في 8-Sequin Patch)
+    if (pulses == 8) return 3; // D
+    if (pulses == 9 || pulses == 10 || pulses == 11) return 5; // F (ABD)
+    if (pulses == 12 || pulses == 13) return 6; // G (ACD)
+    return 7; // H (BCD)
+  }
+
+  static VectorDesignData? decodeSync(Uint8List data, TarikMachineDeviceProfile profile) {
+    if (data.length <= 515) return null;
+
+    final stX = _ProFloat32Buf(8192);
+    final stY = _ProFloat32Buf(8192);
+    final stMove = _ProUint8Buf(8192);
+    final stColor = _ProUint8Buf(8192);
+    final stDev = _ProUint8Buf(8192);
+
+    final seqX = _ProFloat32Buf(256);
+    final seqY = _ProFloat32Buf(256);
+    final seqCode = _ProUint8Buf(256);
+
+    final beadX = _ProFloat32Buf(256);
+    final beadY = _ProFloat32Buf(256);
+    final beadCode = _ProUint8Buf(256);
+
+    double cx = 0.0, cy = 0.0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int col = 0;
+    int colorCount = 1;
+    bool hasStitchesInCol = false;
+    bool needMove = true;
+    bool inSeqMode = false;
+    int pulseCount = 0;
+    double pulseOriginX = 0.0, pulseOriginY = 0.0;
+    double ljx = 0.0, ljy = 0.0;
+    int jumpsCount = 0;
+
+    void trackPt(double x, double y) {
+      if (!hasBounds) {
+        minX = maxX = x;
+        minY = maxY = y;
+        hasBounds = true;
+      } else {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    void emitStitch(double x, double y, bool isMove, int devTag) {
+      stX.add(x);
+      stY.add(y);
+      stMove.add(isMove ? 1 : 0);
+      stColor.add(col);
+      stDev.add(devTag);
+      if (isMove) jumpsCount++;
+      hasStitchesInCol = true;
+      trackPt(x, y);
+    }
+
+    void flushPulse() {
+      if (pulseCount <= 0) return;
+      final TarikMachineDeviceProfile activeP = profile.effectiveForColor(col);
+      final int chIdx = _pulsesToChannel0To7(pulseCount);
+      final TarikDeviceChannelConfig chCfg = activeP.channels[chIdx];
+      int devTag = 0;
+
+      if (chCfg.kind == 2) {
+        // خرز -> ترتيب الخرز ضمن القنوات المفعّلة للخرز (1..8)
+        int beadOrdinal = 1;
+        for (int i = 0; i < chIdx; i++) {
+          if (activeP.channels[i].kind == 2) beadOrdinal++;
+        }
+        final double mx = (pulseOriginX + ljx) * 0.5;
+        final double my = (pulseOriginY + ljy) * 0.5;
+        beadX.add(mx);
+        beadY.add(my);
+        beadCode.add(beadOrdinal.clamp(1, 8));
+        devTag = beadOrdinal <= 3 ? (4 + beadOrdinal) : (0x80 | beadOrdinal);
+      } else if (chCfg.kind == 1) {
+        // ترتر -> ترتيب الترتر ضمن القنوات المفعّلة للترتر (1..8)
+        int seqOrdinal = 1;
+        for (int i = 0; i < chIdx; i++) {
+          if (activeP.channels[i].kind == 1) seqOrdinal++;
+        }
+        seqX.add(ljx);
+        seqY.add(ljy);
+        seqCode.add(seqOrdinal.clamp(1, 8));
+        devTag = seqOrdinal <= 4 ? seqOrdinal : (0x40 | seqOrdinal);
+      }
+
+      emitStitch(ljx, ljy, needMove, devTag);
+      needMove = false;
+      pulseCount = 0;
+    }
+
+    for (int off = 512; off + 2 < data.length; off += 3) {
+      final int b0 = data[off];
+      final int b1 = data[off + 1];
+      final int b2 = data[off + 2];
+      if (b2 == 0xF3) break;
+
+      int dx = 0, dy = 0;
+      if ((b0 & 0x01) != 0) dx += 1;
+      if ((b0 & 0x02) != 0) dx -= 1;
+      if ((b0 & 0x04) != 0) dx += 9;
+      if ((b0 & 0x08) != 0) dx -= 9;
+      if ((b0 & 0x80) != 0) dy += 1;
+      if ((b0 & 0x40) != 0) dy -= 1;
+      if ((b0 & 0x20) != 0) dy += 9;
+      if ((b0 & 0x10) != 0) dy -= 9;
+
+      if ((b1 & 0x01) != 0) dx += 3;
+      if ((b1 & 0x02) != 0) dx -= 3;
+      if ((b1 & 0x04) != 0) dx += 27;
+      if ((b1 & 0x08) != 0) dx -= 27;
+      if ((b1 & 0x80) != 0) dy += 3;
+      if ((b1 & 0x40) != 0) dy -= 3;
+      if ((b1 & 0x20) != 0) dy += 27;
+      if ((b1 & 0x10) != 0) dy -= 27;
+
+      if ((b2 & 0x04) != 0) dx += 81;
+      if ((b2 & 0x08) != 0) dx -= 81;
+      if ((b2 & 0x20) != 0) dy += 81;
+      if ((b2 & 0x10) != 0) dy -= 81;
+
+      if (b2 == 0x43) {
+        flushPulse();
+        inSeqMode = !inSeqMode;
+        continue;
+      }
+
+      if ((b2 & 0xC0) == 0xC0) {
+        flushPulse();
+        inSeqMode = false;
+        if (hasStitchesInCol) {
+          col = (col + 1) % _defaultPalette.length;
+          colorCount++;
+          hasStitchesInCol = false;
+        }
+        needMove = true;
+        continue;
+      }
+
+      final bool isJump = (b2 & 0x80) != 0;
+      if (isJump) {
+        if (inSeqMode) {
+          if (dx.abs() > 95 || dy.abs() > 95) {
+            flushPulse();
+            cx += dx;
+            cy -= dy;
+            needMove = true;
+          } else {
+            if ((dx != 0 || dy != 0) && pulseCount > 0) {
+              flushPulse();
+            }
+            if (pulseCount == 0) {
+              pulseOriginX = cx;
+              pulseOriginY = cy;
+            }
+            cx += dx;
+            cy -= dy;
+            pulseCount++;
+            ljx = cx;
+            ljy = cy;
+          }
+        } else {
+          cx += dx;
+          cy -= dy;
+          needMove = true;
+        }
+      } else {
+        flushPulse();
+        cx += dx;
+        cy -= dy;
+        emitStitch(cx, cy, needMove, 0);
+        needMove = false;
+      }
+    }
+
+    flushPulse();
+    if (stX.length < 2) return null;
+
+    return VectorDesignData(
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      stDev: (seqX.length > 0 || beadX.length > 0) ? stDev.finish() : null,
+      seqX: seqX.finish(),
+      seqY: seqY.finish(),
+      seqCode: seqCode.finish(),
+      beadX: beadX.finish(),
+      beadY: beadY.finish(),
+      beadCode: beadCode.finish(),
+      paletteArgb: _defaultPalette,
+      stitches: stX.length,
+      colorCount: colorCount,
+      stopsCount: colorCount > 1 ? colorCount - 1 : 0,
+      jumpsCount: jumpsCount,
+      sequinsCount: seqX.length,
+      beadsCount: beadX.length,
+      trimsCount: 0,
+      minX: hasBounds ? minX : 0.0,
+      maxX: hasBounds ? maxX : 0.0,
+      minY: hasBounds ? minY : 0.0,
+      maxY: hasBounds ? maxY : 0.0,
+      hasBounds: hasBounds,
+      machineType: 'Tajima (DST • ${profile.label(false)})',
+    );
+  }
+
+  static Future<VectorDesignData?> loadVector(
+    String filePath, {
+    TarikMachineDeviceProfile? profile,
+  }) async {
+    try {
+      final f = File(filePath);
+      if (!await f.exists()) return null;
+      final bytes = await f.readAsBytes();
+      final p = profile ?? TarikMachineDeviceManager.current;
+      return await Isolate.run(() => decodeSync(bytes, p));
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// مشفّر ومصدّر داهاو الأصلي الكامل (.DHE و .DHA) بدقة emCAD 2.10 و OutputDHE.exe:
+/// - يكتب ترويسة 20 لوناً حقيقية + جدول الأقسام مشفّراً بـ 3DES (مفتاح DHE أو DHA)
+/// - يشفّر القسم 1 (تسلسل الألوان) والقسم 2 والقسم 6 (الغرز + أوامر الخرز 0xD7 0A والترتر 0xD7 06 لـ 8 قنوات A–H)
+class TarikProDahaoEncoder {
+  static const List<int> _stdEmcadRgb = [
+    0x009900, 0x0000FF, 0xFF0000, 0xFFFF00, 0x00FFFF,
+    0xFF00FF, 0x00FF00, 0x000099, 0x990000, 0xFF9933,
+    0x9900CC, 0x996633, 0xFFFFFF, 0x000000, 0xFF7ECC,
+    0xFFCC7E, 0x66FFCC, 0x666666, 0x999966, 0x7E7EFF,
+  ];
+
+  static Uint8List encode(
+    VectorDesignData vec, {
+    required bool asDhe,
+    TarikMachineDeviceProfile? profile,
+  }) {
+    final TarikMachineDeviceProfile activeProf = profile ?? TarikMachineDeviceManager.current;
+    final int n = vec.stX.length;
+    if (n < 2) return Uint8List(0);
+
+    // 1) بناء لوحة الألوان (20 لوناً في الترويسة) وتسلسل الألوان في القسم 1
+    final List<int> pal20 = List<int>.from(_stdEmcadRgb);
+    for (int i = 0; i < math.min(20, vec.paletteArgb.length); i++) {
+      pal20[i] = vec.paletteArgb[i] & 0xFFFFFF;
+    }
+
+    final List<int> colorSeq = [];
+    int lastSeenCol = -1;
+    for (int i = 0; i < n; i++) {
+      final int c = vec.stColor[i] % 20;
+      if (c != lastSeenCol) {
+        colorSeq.add(c + 1); // 1-based color index
+        lastSeenCol = c;
+      }
+    }
+    if (colorSeq.isEmpty) colorSeq.add(1);
+
+    // 2) بناء بايتات القسم 6 (غرز داهاو ثلاثية البايت + أوامر 0xD7 0A / 0xD7 06)
+    final sec6Buf = BytesBuilder(copy: false);
+    final Uint8List? stDev = vec.stDev;
+    final TarikDesignSpatialIndex? spatial =
+        (vec.seqX.isNotEmpty || vec.beadX.isNotEmpty) ? TarikDesignSpatialIndex.of(vec) : null;
+
+    // ربط مباشر لرقم الغرزة بأوامر الخرز والترتر لضمان عدم ضياع أي قطعة حتى لو لم يكن stDev مكتملاً
+    final Map<int, int> seqAtStitch = {};
+    final Map<int, int> beadAtStitch = {};
+    if (spatial != null) {
+      for (int i = 0; i < vec.seqX.length; i++) {
+        seqAtStitch[spatial.seqStitchIdx[i]] = vec.seqCode[i];
+      }
+      for (int i = 0; i < vec.beadX.length; i++) {
+        beadAtStitch[spatial.beadStitchIdx[i]] = vec.beadCode[i];
+      }
+    }
+
+    int curX = 0, curY = 0;
+    int activeColor = vec.stColor[0];
+    bool inDevMode = false;
+
+    void emitRecord(int cmd, int b1, int b2) {
+      sec6Buf.add([cmd & 0xFF, b1 & 0xFF, b2 & 0xFF]);
+    }
+
+    void emitMoveSteps(int dx, int dy, bool isJump) {
+      int remX = dx;
+      int remY = dy;
+      while (remX.abs() > 127 || remY.abs() > 127) {
+        final int sx = remX.clamp(-127, 127);
+        final int sy = remY.clamp(-127, 127);
+        int cmd = 0x81;
+        if (sy < 0) cmd |= 0x40;
+        if (sx < 0) cmd |= 0x20;
+        emitRecord(cmd, sy.abs(), sx.abs());
+        curX += sx;
+        curY += sy;
+        remX -= sx;
+        remY -= sy;
+      }
+      int cmd = isJump ? 0x81 : 0x80;
+      if (remY < 0) cmd |= 0x40;
+      if (remX < 0) cmd |= 0x20;
+      emitRecord(cmd, remY.abs(), remX.abs());
+      curX += remX;
+      curY += remY;
+    }
+
+    // بداية التصميم
+    emitRecord(0x81, 0, 0);
+
+    for (int i = 0; i < n; i++) {
+      final int tx = vec.stX[i].round();
+      final int ty = (-vec.stY[i]).round(); // Dahao Y للأعلى موجب
+      final int c = vec.stColor[i];
+
+      if (i > 0 && c != activeColor) {
+        if (inDevMode) {
+          emitRecord(0xD7, 0x00, 0x00);
+          inDevMode = false;
+        }
+        // كود تغيير اللون في داهاو (0x8B..0x9F)
+        emitRecord(0x8B + (c % 12), 0x00, 0x00);
+        activeColor = c;
+      }
+
+      // فحص هل توجد خرزة أو ترترة على هذه الغرزة
+      int? seqOrd = seqAtStitch[i];
+      int? beadOrd = beadAtStitch[i];
+      if (seqOrd == null && beadOrd == null && stDev != null && i < stDev.length) {
+        final int dv = stDev[i];
+        if ((dv & 0x80) != 0) {
+          beadOrd = dv & 0x0F;
+        } else if ((dv & 0x40) != 0) {
+          seqOrd = dv & 0x0F;
+        } else {
+          final int low = dv & 0x0F;
+          if (low >= 1 && low <= 4) seqOrd = low;
+          else if (low >= 5 && low <= 7) beadOrd = low - 4;
+        }
+      }
+
+      final TarikMachineDeviceProfile colProf = activeProf.effectiveForColor(c);
+      int emitKind = 0; // 0=none, 1=sequin, 2=bead
+      int emitChannelIdx = 0; // 0..7 (A..H)
+
+      if (beadOrd != null) {
+        final cfg = colProf.resolveBeadConfig(beadOrd);
+        if (cfg.visible && cfg.kind != 0) {
+          emitKind = cfg.kind;
+          emitChannelIdx = (beadOrd - 1).clamp(0, 7);
+        }
+      } else if (seqOrd != null) {
+        final cfg = colProf.resolveSequinConfig(seqOrd);
+        if (cfg.visible && cfg.kind != 0) {
+          emitKind = cfg.kind;
+          emitChannelIdx = (seqOrd - 1).clamp(0, 7);
+        }
+      }
+
+      final int dx = tx - curX;
+      final int dy = ty - curY;
+      final bool isMove = vec.stMove[i] != 0;
+
+      if (emitKind == 0 && inDevMode && isMove && (dx.abs() > 95 || dy.abs() > 95)) {
+        emitRecord(0xD7, 0x00, 0x00);
+        inDevMode = false;
+      }
+
+      if (emitKind == 2) {
+        // أمر خرز صريح في قناة 0xD7 (0x0A, 1<<ch) — مدعوم في emCAD 2.10 DHE و DHA!
+        if (!inDevMode) {
+          emitMoveSteps(dx, dy, isMove);
+          emitRecord(0xD7, 0x00, 0x00);
+          inDevMode = true;
+        } else {
+          emitMoveSteps(dx, dy, false);
+        }
+        emitRecord(0xD7, 0x0A, 1 << emitChannelIdx);
+      } else if (emitKind == 1) {
+        // أمر ترتر
+        if (!inDevMode) {
+          emitMoveSteps(dx, dy, isMove);
+          emitRecord(0xD7, 0x00, 0x00);
+          inDevMode = true;
+        } else if (asDhe) {
+          emitMoveSteps(dx, dy, false);
+        }
+        if (asDhe) {
+          emitRecord(0xD7, 0x06, 1 << emitChannelIdx);
+        } else {
+          // في DHA (2.10) الترتر A=قفزة 1، B=قفزتان (الثانية صفرية) باستخدام الإزاحة المتبقية الفعلية
+          emitMoveSteps(tx - curX, ty - curY, true);
+          if (emitChannelIdx >= 1) {
+            emitRecord(0x81, 0, 0);
+          }
+        }
+      } else {
+        if (inDevMode && isMove) {
+          emitRecord(0xD7, 0x00, 0x00);
+          inDevMode = false;
+        }
+        if (isMove && (dx != 0 || dy != 0)) {
+          emitMoveSteps(dx, dy, true);
+          emitRecord(0x80, 0, 0);
+        } else {
+          emitMoveSteps(dx, dy, false);
+        }
+      }
+    }
+
+    if (inDevMode) {
+      emitRecord(0xD7, 0x00, 0x00);
+      inDevMode = false;
+    }
+    emitRecord(0xF8, 0x00, 0x00);
+
+    final Uint8List sec6PlainRaw = sec6Buf.takeBytes();
+    final int sec6RawLen = sec6PlainRaw.length;
+    final int sec6PaddedLen = ((sec6RawLen + 15) ~/ 16) * 16;
+    final Uint8List sec6Plain = Uint8List(sec6PaddedLen);
+    sec6Plain.setRange(0, sec6RawLen, sec6PlainRaw);
+    final Uint8List sec6Enc = TarikProDahaoParser._ringEnc(
+      sec6Plain,
+      0,
+      sec6PaddedLen,
+      (sec6RawLen ^ 0x3028) & 0xFFFF,
+    );
+
+    // 3) القسم 1 (1000 بايت: تسلسل الألوان المتكرر مشفّر بـ Ring Cipher)
+    final Uint8List sec1Plain = Uint8List(1000);
+    for (int i = 0; i < 1000; i++) {
+      sec1Plain[i] = colorSeq[i % colorSeq.length];
+    }
+    final Uint8List sec1Enc = TarikProDahaoParser._ringEnc(sec1Plain, 0, 1000, (1000 ^ 0x3028) & 0xFFFF);
+
+    // 4) القسم 2 (16 بايت metadata مشفّر بـ Ring Cipher)
+    final Uint8List sec2Plain = Uint8List(16);
+    final Uint8List sec2Enc = TarikProDahaoParser._ringEnc(sec2Plain, 0, 16, (2 ^ 0x3028) & 0xFFFF);
+
+    // 5) الترويسة (0x00..0x100) + جدول الأقسام المشفّر بـ 3DES (0x100..0x140)
+    final Uint8List header = Uint8List(0x100);
+    // Version 2.10.7070 (02 0A 9E 1B 0A 00 + flags 03 00 for DHE / 00 00 for DHA)
+    header[0] = 0x02;
+    header[1] = 0x0A;
+    header[2] = 0x9E;
+    header[3] = 0x1B;
+    header[4] = 0x0A;
+    header[5] = 0x00;
+    header[6] = asDhe ? 0x03 : 0x00;
+    header[7] = 0x00;
+    // hdr[0x08..0x10] = 0 (hdr_xor = 0)
+    TarikProDahaoParser._putU32LE(header, 0x10, 20);
+    for (int i = 0; i < 20; i++) {
+      final int o = 0x1C + i * 3;
+      header[o] = (pal20[i] >> 16) & 0xFF;
+      header[o + 1] = (pal20[i] >> 8) & 0xFF;
+      header[o + 2] = pal20[i] & 0xFF;
+    }
+
+    const int offSec1 = 0x140;
+    const int offSec2 = 0x140 + 1000; // 0x528
+    const int offSec6 = offSec2 + 16; // 0x538
+    final int offEnd = offSec6 + sec6PaddedLen;
+
+    final Uint8List secTablePlain = Uint8List(0x40);
+    TarikProDahaoParser._putU32LE(secTablePlain, 0, 1);
+    TarikProDahaoParser._putU32LE(secTablePlain, 4, offSec1);
+    TarikProDahaoParser._putU32LE(secTablePlain, 8, 1000);
+
+    TarikProDahaoParser._putU32LE(secTablePlain, 16, 2);
+    TarikProDahaoParser._putU32LE(secTablePlain, 20, offSec2);
+    TarikProDahaoParser._putU32LE(secTablePlain, 24, 2);
+
+    TarikProDahaoParser._putU32LE(secTablePlain, 32, 6);
+    TarikProDahaoParser._putU32LE(secTablePlain, 36, offSec6);
+    TarikProDahaoParser._putU32LE(secTablePlain, 40, sec6RawLen);
+
+    TarikProDahaoParser._putU32LE(secTablePlain, 48, 0);
+    TarikProDahaoParser._putU32LE(secTablePlain, 52, offEnd);
+    TarikProDahaoParser._putU32LE(secTablePlain, 56, 0);
+
+    final Uint8List secTableEnc = TarikProDahaoParser._des3Enc(secTablePlain, 0, 0x40, asDhe);
+
+    final out = BytesBuilder(copy: false);
+    out.add(header);
+    out.add(secTableEnc);
+    out.add(sec1Enc);
+    out.add(sec2Enc);
+    out.add(sec6Enc);
+    return out.takeBytes();
+  }
+}
+
+/// المصدّر الشامل الموحّد (يدعم DHE و DHA و DST وجميع الصيغ القياسية مع ضبط القنوات A–H)
+class TarikProUniversalExporter {
+  static List<Map<String, String>> get supportedFormats {
+    final List<Map<String, String>> list = [
+      {'ext': 'DHE', 'name': 'Dahao Extended — 8 Beads/Sequins (.DHE)'},
+      {'ext': 'DHA', 'name': 'Dahao Machine (.DHA)'},
+    ];
+    for (final f in UniversalExporter.supportedFormats) {
+      final ext = (f['ext'] ?? '').toUpperCase();
+      if (ext != 'DHE' && ext != 'DHA') {
+        list.add(f);
+      }
+    }
+    return list;
+  }
+
+  static bool canExport(String filePath) {
+    final low = filePath.toLowerCase();
+    if (low.endsWith('.emb')) return false;
+    return low.endsWith('.dhe') ||
+        low.endsWith('.dha') ||
+        low.endsWith('.dhp') ||
+        low.endsWith('.dst') ||
+        low.endsWith('.tbf') ||
+        UniversalExporter.canExport(filePath);
+  }
+
+  static Future<String?> exportVector(
+    VectorDesignData vec,
+    String outPath,
+    String formatExt, {
+    String baseName = 'tarik_emb',
+    TarikMachineDeviceProfile? profile,
+  }) async {
+    final ext = formatExt.toUpperCase().replaceAll('.', '');
+    if (ext == 'DHE' || ext == 'DHA') {
+      try {
+        final p = profile ?? TarikMachineDeviceManager.current;
+        final bytes = await Isolate.run(() => TarikProDahaoEncoder.encode(vec, asDhe: ext == 'DHE', profile: p));
+        if (bytes.isEmpty) return null;
+        final file = File(outPath);
+        await file.writeAsBytes(bytes, flush: true);
+        return outPath;
+      } catch (_) {
+        return null;
+      }
+    }
+    return TarikProDstEncoder.exportToFile(vec, outPath, ext, baseName: baseName);
+  }
+
+  static Future<String?> exportFromFile(
+    String srcPath,
+    String outPath,
+    String formatExt, {
+    TarikMachineDeviceProfile? profile,
+  }) async {
+    final ext = formatExt.toUpperCase().replaceAll('.', '');
+    final p = profile ?? TarikMachineDeviceManager.current;
+    final low = srcPath.toLowerCase();
+    if (ext == 'DHE' || ext == 'DHA' || (ext == 'DST' && (low.endsWith('.dhe') || low.endsWith('.dha') || low.endsWith('.dst') || low.endsWith('.tbf')))) {
+      VectorDesignData? vec;
+      if (low.endsWith('.dhe') || low.endsWith('.dha')) {
+        vec = await TarikProDahaoParser.loadVector(srcPath);
+      } else if (low.endsWith('.dst')) {
+        vec = await TarikProDstDeviceParser.loadVector(srcPath, profile: p);
+      } else if (low.endsWith('.tbf')) {
+        vec = await TarikProTbfParser.loadVector(srcPath);
+      }
+      vec ??= await VectorDesignLoader.load(srcPath);
+      if (vec != null && vec.stX.length >= 2) {
+        final baseName = srcPath.split(Platform.pathSeparator).last.replaceAll(RegExp(r'\.[^.]+$'), '');
+        return exportVector(vec, outPath, ext, baseName: baseName, profile: p);
+      }
+    }
+    return UniversalExporter.exportToFormat(srcPath, outPath, ext);
   }
 }
