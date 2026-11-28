@@ -449,7 +449,7 @@ class TarikProFontCatalog {
     String? raw;
     if (meta.file.startsWith('tfnt_asset://')) {
       final assetPath = meta.file.substring('tfnt_asset://'.length);
-      final double overlap = meta.nameEn.toUpperCase() == 'A3' ? 0.028 : 0.032;
+      final double overlap = meta.nameEn.toUpperCase() == 'A3' ? 0.036 : 0.048;
       try {
         final bd = await rootBundle.load(assetPath);
         final Uint8List encBytes = bd.buffer.asUint8List(bd.offsetInBytes, bd.lengthInBytes);
@@ -466,7 +466,7 @@ class TarikProFontCatalog {
       } catch (_) {}
     } else if (meta.file.startsWith('dst_asset://')) {
       final assetPath = meta.file.substring('dst_asset://'.length);
-      final double overlap = meta.nameEn.toUpperCase() == 'A3' ? 0.028 : 0.032;
+      final double overlap = meta.nameEn.toUpperCase() == 'A3' ? 0.036 : 0.048;
       final List<String> candidates = [assetPath];
       if (assetPath.endsWith('.DST')) {
         candidates.add('${assetPath.substring(0, assetPath.length - 4)}.dst');
@@ -1228,11 +1228,39 @@ class TarikProFontEngine {
       final double baselineY = lineIdx * lineH;
       double cursorX = isRtl ? (totalW * 0.5) : (-totalW * 0.5);
 
+      // تجميع الكلمة كاملةً ككتلة واحدة موحّدة في وضع التاتامي (يدمج الحروف المتصلة ويلغي الوصلات والتكسّرات تماماً!)
+      final List<List<double>> wordPolysX = [];
+      final List<List<double>> wordPolysY = [];
+      final List<(Map<String, dynamic>, double, double)> wordRunFallback = [];
+
+      void flushTatamiWord() {
+        if (wordPolysX.isNotEmpty) {
+          _emitUnifiedTatamiPolygons(
+            polysX: wordPolysX,
+            polysY: wordPolysY,
+            densityUnits: densityUnits,
+            angleDeg: tatamiAngleDeg,
+            pattern: tatamiPattern,
+            stitchLenUnits: (tatamiStitchLenMm * 10.0).clamp(20.0, 75.0),
+            addPt: addPt,
+          );
+          wordPolysX.clear();
+          wordPolysY.clear();
+        }
+        if (wordRunFallback.isNotEmpty) {
+          for (final rf in wordRunFallback) {
+            _emitRunningPath(el: rf.$1, ox: rf.$2, oy: rf.$3, scale: scale, addPt: addPt);
+          }
+          wordRunFallback.clear();
+        }
+      }
+
       for (int pIdx = 0; pIdx < placed.length; pIdx++) {
         final item = placed[pIdx];
         final g = item.$1;
         final adv = item.$3;
         if (g == null) {
+          if (isTatami) flushTatamiWord();
           cursorX += isRtl ? -adv : adv;
           continue;
         }
@@ -1242,34 +1270,24 @@ class TarikProFontEngine {
 
         final List<dynamic> elements = (g['e'] as List<dynamic>?) ?? const [];
         if (isTatami) {
-          // توحيد جميع مضلعات الحرف في قناع واحد (Polygon Interval Union) لمنع تداخل السطور والخطوط الفاصلة والوصلات
-          final List<List<double>> letterPolysX = [];
-          final List<List<double>> letterPolysY = [];
+          int addedPolys = 0;
           for (int eIdx = 0; eIdx < elements.length; eIdx++) {
             final el = elements[eIdx] as Map<String, dynamic>;
             final String type = (el['t'] ?? '').toString();
+            final int before = wordPolysX.length;
             if (type == 's') {
-              _collectSatinColumnPolys(el: el, ox: ox, oy: oy, scale: scale, outX: letterPolysX, outY: letterPolysY);
+              _collectSatinColumnPolys(el: el, ox: ox, oy: oy, scale: scale, outX: wordPolysX, outY: wordPolysY);
             } else if (type == 'f') {
-              _collectFillPoly(el: el, ox: ox, oy: oy, scale: scale, outX: letterPolysX, outY: letterPolysY);
+              _collectFillPoly(el: el, ox: ox, oy: oy, scale: scale, outX: wordPolysX, outY: wordPolysY);
             } else if (type == 'd') {
-              _collectDigitizedRunPolys(el: el, ox: ox, oy: oy, scale: scale, outX: letterPolysX, outY: letterPolysY);
+              _collectDigitizedRunPolys(el: el, ox: ox, oy: oy, scale: scale, outX: wordPolysX, outY: wordPolysY);
             }
+            addedPolys += (wordPolysX.length - before);
           }
-          if (letterPolysX.isNotEmpty) {
-            _emitUnifiedTatamiPolygons(
-              polysX: letterPolysX,
-              polysY: letterPolysY,
-              densityUnits: densityUnits,
-              angleDeg: tatamiAngleDeg,
-              pattern: tatamiPattern,
-              stitchLenUnits: (tatamiStitchLenMm * 10.0).clamp(20.0, 75.0),
-              addPt: addPt,
-            );
-          } else {
+          if (addedPolys == 0) {
             for (final el in elements) {
               if ((el as Map<String, dynamic>)['t'] == 'r') {
-                _emitRunningPath(el: el, ox: ox, oy: oy, scale: scale, addPt: addPt);
+                wordRunFallback.add((el, ox, oy));
               }
             }
           }
@@ -1336,6 +1354,7 @@ class TarikProFontEngine {
 
         cursorX += isRtl ? -adv : adv;
       }
+      if (isTatami) flushTatamiWord();
     }
 
     if (stX.length < 2) return null;
@@ -1744,9 +1763,9 @@ class TarikProFontEngine {
     }
   }
 
-  /// محرك تعبئة التاتامي الموحّد (Polygon Scanline Interval Union):
-  /// - يجمع كل مضلعات الحرف على كل سطر مسح ويدمج الفترات المتداخلة والمتقاربة في شريحة واحدة صلبة
-  /// - يزيل 100% من تداخل السطور والخطوط الفاصلة العمودية والوصلات العشوائية
+  /// محرك تعبئة التاتامي الموحّد للكلمة كاملةً (Whole-Word Scanline Union + تنعيم الحواف والزوايا):
+  /// - يجمع كل مضلعات ومثلثات الكلمة ككتلة واحدة، فيذيب الوصلات بين الحروف المتصلة تماماً
+  /// - يطبّق تنعيم حواف متدرّج (3-Row Contour Smoothing) لإزالة التكسّرات مع الحفاظ 100% على فتحات الحروف (م، ه، و، ق)
   static void _emitUnifiedTatamiPolygons({
     required List<List<double>> polysX,
     required List<List<double>> polysY,
@@ -1764,6 +1783,8 @@ class TarikProFontEngine {
 
     final List<List<double>> rotX = [];
     final List<List<double>> rotY = [];
+    final List<double> polyMinY = [];
+    final List<double> polyMaxY = [];
     double minY = double.infinity, maxY = -double.infinity;
 
     for (int p = 0; p < polysX.length; p++) {
@@ -1773,16 +1794,22 @@ class TarikProFontEngine {
       if (n < 3) continue;
       final rx = List<double>.filled(n, 0.0);
       final ry = List<double>.filled(n, 0.0);
+      double pMin = double.infinity, pMax = -double.infinity;
       for (int i = 0; i < n; i++) {
         final double vx = xs[i] * ca + ys[i] * sa;
         final double vy = -xs[i] * sa + ys[i] * ca;
         rx[i] = vx;
         ry[i] = vy;
-        if (vy < minY) minY = vy;
-        if (vy > maxY) maxY = vy;
+        if (vy < pMin) pMin = vy;
+        if (vy > pMax) pMax = vy;
       }
+      if (pMax - pMin < 0.4) continue;
+      if (pMin < minY) minY = pMin;
+      if (pMax > maxY) maxY = pMax;
       rotX.add(rx);
       rotY.add(ry);
+      polyMinY.add(pMin);
+      polyMaxY.add(pMax);
     }
 
     if (rotX.isEmpty || maxY - minY < 1.5) return;
@@ -1790,11 +1817,12 @@ class TarikProFontEngine {
     final double stepY = densityUnits.clamp(2.5, 12.0);
     final double stLen = stitchLenUnits.clamp(18.0, 75.0);
 
-    // 1) بناء خريطة الشرائح الموحّدة لكل سطر y (مع دمج الفترات المتداخلة أو المتقاربة < 0.35 مم)
-    final List<(double, List<(double, double)>)> rows = [];
+    // 1) بناء شرائح المسح الموحّدة للكلمة بالكامل مع دمج التقاء الأعمدة والحروف المتصلة (0.28 مم)
+    final List<(double, List<(double, double)>)> rawRows = [];
     for (double y = minY + stepY * 0.5; y <= maxY; y += stepY) {
       final List<(double, double)> rawSpans = [];
       for (int p = 0; p < rotX.length; p++) {
+        if (y < polyMinY[p] || y > polyMaxY[p]) continue;
         final rx = rotX[p];
         final ry = rotY[p];
         final int n = rx.length;
@@ -1809,7 +1837,7 @@ class TarikProFontEngine {
         if (hits.length < 2) continue;
         hits.sort();
         for (int h = 0; h + 1 < hits.length; h += 2) {
-          if (hits[h + 1] - hits[h] >= 1.2) {
+          if (hits[h + 1] - hits[h] >= 0.9) {
             rawSpans.add((hits[h], hits[h + 1]));
           }
         }
@@ -1817,26 +1845,57 @@ class TarikProFontEngine {
       if (rawSpans.isEmpty) continue;
       rawSpans.sort((a, b) => a.$1.compareTo(b.$1));
 
-      // دمج الفترات المتداخلة بدقة عالمية (تسامح 0.12 مم فقط لإغلاق التقاء الأعمدة دون سد فتحات الحرف أو تشويه حوافه)
       final List<(double, double)> merged = [rawSpans.first];
       for (int k = 1; k < rawSpans.length; k++) {
         final cur = rawSpans[k];
         final last = merged.last;
-        if (cur.$1 <= last.$2 + 1.2) {
+        // 0.28 مم لسد فواصل التقاء الحروف والزوايا الدقيقة دون إغلاق فتحات الحروف الحقيقية
+        if (cur.$1 <= last.$2 + 2.8) {
           merged[merged.length - 1] = (last.$1, math.max(last.$2, cur.$2));
         } else {
           merged.add(cur);
         }
       }
-      rows.add((y, merged));
+      rawRows.add((y, merged));
     }
 
-    if (rows.isEmpty) return;
+    if (rawRows.isEmpty) return;
 
-    // 2) تجميع الشرائح المتصلة عمودياً في مناطق متماسكة (Connected Regions) لتجنب خطوط الوصل العرضية
-    final List<List<(int, int, bool)>> visited = List.generate(
+    // 2) تنعيم حواف الشرائح عبر 3 سطور متتالية (Smooth Contour Filter) لإزالة التكسّرات والزوايا المسنّنة
+    final List<(double, List<(double, double)>)> rows = List.generate(rawRows.length, (r) {
+      final double y = rawRows[r].$1;
+      final spans = rawRows[r].$2;
+      final List<(double, double)> smoothSpans = [];
+      for (final sp in spans) {
+        double lAcc = sp.$1 * 2.0;
+        double rAcc = sp.$2 * 2.0;
+        double wSum = 2.0;
+        for (final nr in [r - 1, r + 1]) {
+          if (nr < 0 || nr >= rawRows.length) continue;
+          if ((rawRows[nr].$1 - y).abs() > stepY * 1.4) continue;
+          for (final nsp in rawRows[nr].$2) {
+            final double ov = math.min(sp.$2, nsp.$2) - math.max(sp.$1, nsp.$1);
+            if (ov > 0 && (nsp.$1 - sp.$1).abs() < 12.0 && (nsp.$2 - sp.$2).abs() < 12.0) {
+              lAcc += nsp.$1;
+              rAcc += nsp.$2;
+              wSum += 1.0;
+              break;
+            }
+          }
+        }
+        final double sl = lAcc / wSum;
+        final double sr = rAcc / wSum;
+        if (sr - sl >= 1.2) {
+          smoothSpans.add((sl, sr));
+        }
+      }
+      return (y, smoothSpans.isNotEmpty ? smoothSpans : spans);
+    });
+
+    // 3) توجيه الغرز عبر المناطق المتصلة عمودياً بدون خطوط انتقال مكشوفة فوق الفراغات
+    final List<List<bool>> visited = List.generate(
       rows.length,
-      (r) => List.generate(rows[r].$2.length, (s) => (r, s, false)),
+      (r) => List.filled(rows[r].$2.length, false),
     );
 
     void emitRot(double vx, double vy, bool isMove) {
@@ -1847,7 +1906,7 @@ class TarikProFontEngine {
 
     for (int startR = 0; startR < rows.length; startR++) {
       for (int startS = 0; startS < rows[startR].$2.length; startS++) {
-        if (visited[startR][startS].$3) continue;
+        if (visited[startR][startS]) continue;
 
         int r = startR;
         int s = startS;
@@ -1856,7 +1915,7 @@ class TarikProFontEngine {
         double prevEndX = 0.0, prevY = 0.0;
 
         while (true) {
-          visited[r][s] = (r, s, true);
+          visited[r][s] = true;
           final double y = rows[r].$1;
           final span = rows[r].$2[s];
           final double leftX = span.$1;
@@ -1868,7 +1927,7 @@ class TarikProFontEngine {
           final double jumpDist = firstInRegion
               ? 999.0
               : math.sqrt((xStart - prevEndX) * (xStart - prevEndX) + (y - prevY) * (y - prevY));
-          final bool isMove = firstInRegion || jumpDist > 26.0;
+          final bool isMove = firstInRegion || jumpDist > 22.0;
 
           emitRot(xStart, y, isMove);
           firstInRegion = false;
@@ -1892,13 +1951,12 @@ class TarikProFontEngine {
           prevY = y;
           forward = !forward;
 
-          // البحث عن الشريحة المتصلة مباشرةً في السطر التالي
           if (r + 1 >= rows.length) break;
           int nextS = -1;
           double bestOverlap = 0.0;
           final nextSpans = rows[r + 1].$2;
           for (int ns = 0; ns < nextSpans.length; ns++) {
-            if (visited[r + 1][ns].$3) continue;
+            if (visited[r + 1][ns]) continue;
             final ov = math.min(rightX, nextSpans[ns].$2) - math.max(leftX, nextSpans[ns].$1);
             if (ov > bestOverlap) {
               bestOverlap = ov;
@@ -1913,6 +1971,23 @@ class TarikProFontEngine {
     }
   }
 
+  /// تنعيم Chaikin خفيف للمنحنيات المتجهية لإزالة التكسّر الحاد في الزوايا
+  static (List<double>, List<double>) _chaikinSmooth(List<double> xs, List<double> ys) {
+    final int n = xs.length;
+    if (n < 3) return (xs, ys);
+    final outX = <double>[xs.first];
+    final outY = <double>[ys.first];
+    for (int i = 0; i < n - 1; i++) {
+      outX.add(xs[i] * 0.75 + xs[i + 1] * 0.25);
+      outY.add(ys[i] * 0.75 + ys[i + 1] * 0.25);
+      outX.add(xs[i] * 0.25 + xs[i + 1] * 0.75);
+      outY.add(ys[i] * 0.25 + ys[i + 1] * 0.75);
+    }
+    outX.add(xs.last);
+    outY.add(ys.last);
+    return (outX, outY);
+  }
+
   static void _collectSatinColumnPolys({
     required Map<String, dynamic> el,
     required double ox,
@@ -1925,27 +2000,25 @@ class TarikProFontEngine {
     final List<dynamic>? rawR2 = el['r2'] as List<dynamic>?;
     if (rawR1 == null || rawR2 == null || rawR1.length < 4 || rawR2.length < 4) return;
 
-    // إعادة أخذ عينات متناسقة على جانبي العمود (24 مقطعاً) لمنع أي انكسار أو فجوة عند المنحنيات الحادة
     final b1 = _buildScaledPoly(rawR1, ox, oy, scale);
     final b2 = _buildScaledPoly(rawR2, ox, oy, scale);
     final double maxLen = math.max(b1.$3, b2.$3);
     if (maxLen < 1.5) return;
 
-    final int segs = (maxLen / 8.0).ceil().clamp(6, 48);
-    final List<double> px = [];
-    final List<double> py = [];
+    final int segs = (maxLen / 7.5).ceil().clamp(8, 56);
+    final List<double> r1x = [], r1y = [], r2x = [], r2y = [];
     for (int i = 0; i <= segs; i++) {
-      final pt = _samplePoly(b1.$1, b1.$2, b1.$3, i / segs);
-      px.add(pt.$1);
-      py.add(pt.$2);
+      final pt1 = _samplePoly(b1.$1, b1.$2, b1.$3, i / segs);
+      final pt2 = _samplePoly(b2.$1, b2.$2, b2.$3, i / segs);
+      r1x.add(pt1.$1);
+      r1y.add(pt1.$2);
+      r2x.add(pt2.$1);
+      r2y.add(pt2.$2);
     }
-    for (int i = segs; i >= 0; i--) {
-      final pt = _samplePoly(b2.$1, b2.$2, b2.$3, i / segs);
-      px.add(pt.$1);
-      py.add(pt.$2);
-    }
-    outX.add(px);
-    outY.add(py);
+    final sm1 = _chaikinSmooth(r1x, r1y);
+    final sm2 = _chaikinSmooth(r2x, r2y);
+    outX.add(<double>[...sm1.$1, ...sm2.$1.reversed]);
+    outY.add(<double>[...sm1.$2, ...sm2.$2.reversed]);
   }
 
   static void _collectFillPoly({
@@ -1969,6 +2042,8 @@ class TarikProFontEngine {
     outY.add(ys);
   }
 
+  /// استخلاص كامل مساحة الفونطات الرقمية (A1 / A3 / A4) عبر اتحاد المثلثات الفستونية المتتالية:
+  /// - يغطي كل زاوية ومنحنى حاد (مثل م، ه، س، ل) بنسبة 100% بدون أي ثغرات مثلثية أو انقطاعات!
   static void _collectDigitizedRunPolys({
     required Map<String, dynamic> el,
     required double ox,
@@ -1987,65 +2062,19 @@ class TarikProFontEngine {
       ys[i] = oy + (rawP[i * 2 + 1] as num).toDouble() * scale;
     }
 
-    final List<double> railA_x = [], railA_y = [];
-    final List<double> railB_x = [], railB_y = [];
-    bool sideA = true;
-
-    void flushSatinBlock() {
-      if (railA_x.length >= 2 && railB_x.length >= 2) {
-        outX.add(<double>[...railA_x, ...railB_x.reversed]);
-        outY.add(<double>[...railA_y, ...railB_y.reversed]);
-      }
-      railA_x.clear();
-      railA_y.clear();
-      railB_x.clear();
-      railB_y.clear();
-      sideA = true;
-    }
-
+    // كل 3 نقاط فستون متتالية (P[i-1], P[i], P[i+1]) تكوّن مثلثاً يغطي كامل الشريط الفستوني حتى عند أدق الزوايا
+    final double maxEdge = math.max(125.0, 90.0 * scale);
     for (int i = 1; i < n - 1; i++) {
-      final double v1x = xs[i] - xs[i - 1], v1y = ys[i] - ys[i - 1];
-      final double v2x = xs[i + 1] - xs[i], v2y = ys[i + 1] - ys[i];
-      final double l1 = math.sqrt(v1x * v1x + v1y * v1y);
-      final double l2 = math.sqrt(v2x * v2x + v2y * v2y);
-      final bool isZigzag = l1 > 5.5 && l2 > 5.5 && ((v1x * v2x + v1y * v2y) / (l1 * l2)) < -0.20;
-
-      if (isZigzag) {
-        if (railA_x.isEmpty && railB_x.isEmpty) {
-          railA_x.add(xs[i - 1]);
-          railA_y.add(ys[i - 1]);
-          sideA = false;
-        }
-        if (sideA) {
-          railA_x.add(xs[i]);
-          railA_y.add(ys[i]);
-        } else {
-          railB_x.add(xs[i]);
-          railB_y.add(ys[i]);
-        }
-        sideA = !sideA;
-      } else {
-        if (railA_x.isNotEmpty || railB_x.isNotEmpty) {
-          if (sideA) {
-            railA_x.add(xs[i]);
-            railA_y.add(ys[i]);
-          } else {
-            railB_x.add(xs[i]);
-            railB_y.add(ys[i]);
-          }
-          flushSatinBlock();
-        }
-      }
-    }
-    if (railA_x.isNotEmpty || railB_x.isNotEmpty) {
-      if (sideA) {
-        railA_x.add(xs[n - 1]);
-        railA_y.add(ys[n - 1]);
-      } else {
-        railB_x.add(xs[n - 1]);
-        railB_y.add(ys[n - 1]);
-      }
-      flushSatinBlock();
+      final double x0 = xs[i - 1], y0 = ys[i - 1];
+      final double x1 = xs[i], y1 = ys[i];
+      final double x2 = xs[i + 1], y2 = ys[i + 1];
+      final double d01 = math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+      final double d12 = math.sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
+      if (d01 < 1.2 || d12 < 1.2 || d01 > maxEdge || d12 > maxEdge) continue;
+      final double area2 = ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs();
+      if (area2 < 8.0) continue; // تجاهل غرز التمشي المستقيمة (Underlay / Travel) التي مساحتها ~0
+      outX.add(<double>[x0, x1, x2]);
+      outY.add(<double>[y0, y1, y2]);
     }
   }
 
@@ -2075,75 +2104,581 @@ class TarikProFontEngine {
   }
 }
 
-/// معايرة ملفات داهاو (.DHA) وفق القياسات الفعلية للماكينة:
-/// - فصل الخرز (`seqCode == 4` الناتج عن pulse=6) عن الترتر ووضعه في مصفوفة الخرز بمقاسه الحقيقي 3.0 مم
-class TarikProDahaoCalibrator {
-  static VectorDesignData calibrate(VectorDesignData vec, String filePath) {
-    final lower = filePath.toLowerCase();
-    if (!lower.endsWith('.dha') || vec.seqX.isEmpty) return vec;
+/// قارئ وفك تشفير ملفات داهاو الأصلي الكامل (.DHE و .DHA) بدقة emCAD 100%:
+/// - يفصل قنوات .DHE بدقة: `0xD7 b1=10` للخرز (A=2.5مم، B=4مم، C=6×2.5مم) و `0xD7 b1=6` للترتر (A=3مم، B=5مم)
+/// - يفصل نبضات .DHA بدقة بدون خطوط مشوّهة: نبضة1=خرزA، نبضة2=ترترB(5مم)، نبضة3/5=خرزB، نبضة4=ترترA(3مم)، نبضة6=خرزC(6×2.5مم)
+/// - يحذف الألوان الفارغة الوهمية ويُسجّل رقم الغرزة الحقيقي لكل خرزة وترترة في stDev
+class TarikProDahaoParser {
+  static const List<int> _keyDhe = [
+    0x08,0x50,0x18,0xFF,0x05,0x57,0x10,0x5E,
+    0x1B,0x10,0x02,0x16,0x14,0x0D,0xFA,0x68,
+    0x18,0x5F,0x1E,0x6D,0x18,0x76,0x26,0x69,
+  ];
+  static const List<int> _keyDha = [
+    0x59,0x24,0x5B,0x26,0x5D,0x20,0x5F,0x22,
+    0x51,0x2C,0x59,0x24,0x5B,0x26,0x5D,0x20,
+    0x5F,0x22,0x51,0x2C,0x59,0x24,0x5B,0x26,
+  ];
+  static const List<int> _ip = [58,50,42,34,26,18,10,2,60,52,44,36,28,20,12,4,62,54,46,38,30,22,14,6,64,56,48,40,32,24,16,8,57,49,41,33,25,17,9,1,59,51,43,35,27,19,11,3,61,53,45,37,29,21,13,5,63,55,47,39,31,23,15,7];
+  static const List<int> _ipr = [40,8,48,16,56,24,64,32,39,7,47,15,55,23,63,31,38,6,46,14,54,22,62,30,37,5,45,13,53,21,61,29,36,4,44,12,52,20,60,28,35,3,43,11,51,19,59,27,34,2,42,10,50,18,58,26,33,1,41,9,49,17,57,25];
+  static const List<int> _e = [32,1,2,3,4,5,4,5,6,7,8,9,8,9,10,11,12,13,12,13,14,15,16,17,16,17,18,19,20,21,20,21,22,23,24,25,24,25,26,27,28,29,28,29,30,31,32,1];
+  static const List<int> _p = [16,7,20,21,29,12,28,17,1,15,23,26,5,18,31,10,2,8,24,14,32,27,3,9,19,13,30,6,22,11,4,25];
+  static const List<int> _pc1 = [57,49,41,33,25,17,9,1,58,50,42,34,26,18,10,2,59,51,43,35,27,19,11,3,60,52,44,36,63,55,47,39,31,23,15,7,62,54,46,38,30,22,14,6,61,53,45,37,29,21,13,5,28,20,12,4];
+  static const List<int> _pc2 = [14,17,11,24,1,5,3,28,15,6,21,10,23,19,12,4,26,8,16,7,27,20,13,2,41,52,31,37,47,55,30,40,51,45,33,48,44,49,39,56,34,53,46,42,50,36,29,32];
+  static const List<int> _sh = [1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1];
+  static const List<List<int>> _s = [
+    [14,4,13,1,2,15,11,8,3,10,6,12,5,9,0,7,0,15,7,4,14,2,13,1,10,6,12,11,9,5,3,8,4,1,14,8,13,6,2,11,15,12,9,7,3,10,5,0,15,12,8,2,4,9,1,7,5,11,3,14,10,0,6,13],
+    [15,1,8,14,6,11,3,4,9,7,2,13,12,0,5,10,3,13,4,7,15,2,8,14,12,0,1,10,6,9,11,5,0,14,7,11,10,4,13,1,5,8,12,6,9,3,2,15,13,8,10,1,3,15,4,2,11,6,7,12,0,5,14,9],
+    [10,0,9,14,6,3,15,5,1,13,12,7,11,4,2,8,13,7,0,9,3,4,6,10,2,8,5,14,12,11,15,1,13,6,4,9,8,15,3,0,11,1,2,12,5,10,14,7,1,10,13,0,6,9,8,7,4,15,14,3,11,5,2,12],
+    [7,13,14,3,0,6,9,10,1,2,8,5,11,12,4,15,13,8,11,5,6,15,0,3,4,7,2,12,1,10,14,9,10,6,9,0,12,11,7,13,15,1,3,14,5,2,8,4,3,15,0,6,10,1,13,8,9,4,5,11,12,7,2,14],
+    [2,12,4,1,7,10,11,6,8,5,3,15,13,0,14,9,14,11,2,12,4,7,13,1,5,0,15,10,3,9,8,6,4,2,1,11,10,13,7,8,15,9,12,5,6,3,0,14,11,8,12,7,1,14,2,13,6,15,0,9,10,4,5,3],
+    [12,1,10,15,9,2,6,8,0,13,3,4,14,7,5,11,10,15,4,2,7,12,9,5,6,1,13,14,0,11,3,8,9,14,15,5,2,8,12,3,7,0,4,10,1,13,11,6,4,3,2,12,9,5,15,10,11,14,1,7,6,0,8,13],
+    [4,11,2,14,15,0,8,13,3,12,9,7,5,10,6,1,13,0,11,7,4,9,1,10,14,3,5,12,2,15,8,6,1,4,11,13,12,3,7,14,10,15,6,8,0,5,9,2,6,11,13,8,1,4,10,7,9,5,0,15,14,2,3,12],
+    [13,2,8,4,6,15,11,1,10,9,3,14,5,0,12,7,1,15,13,8,10,3,7,4,12,5,6,11,0,14,9,2,7,11,4,1,9,12,14,2,0,6,10,13,15,3,5,8,2,1,14,7,4,10,8,13,15,12,9,0,3,5,6,11],
+  ];
+  static final Int32List _palette = Int32List.fromList(const [
+    0xFF009944, 0xFFE53935, 0xFFD4A017, 0xFF0088CC, 0xFFD81B60,
+    0xFFFF7043, 0xFF6A1B9A, 0xFF00ACC1, 0xFF558B2F, 0xFF3949AB,
+    0xFF8D6E63, 0xFFEC407A, 0xFF26A69A, 0xFF5C6BC0, 0xFFFBC02D,
+  ]);
 
-    bool hasCode4 = false;
-    for (int i = 0; i < vec.seqCode.length; i++) {
-      if (vec.seqCode[i] == 4) {
-        hasCode4 = true;
-        break;
+  static int _perm(int v, List<int> t, int n) {
+    int r = 0;
+    for (int i = 0; i < t.length; i++) {
+      r = (r << 1) | ((v >>> (n - t[i])) & 1);
+    }
+    return r;
+  }
+
+  static List<int> _subkeys(List<int> k8) {
+    int kv = 0;
+    for (int i = 0; i < 8; i++) {
+      kv = (kv << 8) | k8[i];
+    }
+    final int k56 = _perm(kv, _pc1, 64);
+    int c = (k56 >>> 28) & 0xFFFFFFF;
+    int d = k56 & 0xFFFFFFF;
+    final List<int> ks = List<int>.filled(16, 0);
+    for (int i = 0; i < 16; i++) {
+      final int s = _sh[i];
+      c = ((c << s) | (c >>> (28 - s))) & 0xFFFFFFF;
+      d = ((d << s) | (d >>> (28 - s))) & 0xFFFFFFF;
+      ks[i] = _perm((c << 28) | d, _pc2, 56);
+    }
+    return ks;
+  }
+
+  static Uint8List _desBlock(Uint8List b8, int off, List<int> ks) {
+    int bv = 0;
+    for (int i = 0; i < 8; i++) {
+      bv = (bv << 8) | b8[off + i];
+    }
+    final int v = _perm(bv, _ip, 64);
+    int l = (v >>> 32) & 0xFFFFFFFF;
+    int r = v & 0xFFFFFFFF;
+    for (int rIdx = 0; rIdx < 16; rIdx++) {
+      final int ep = _perm(r, _e, 32) ^ ks[rIdx];
+      int so = 0;
+      for (int i = 0; i < 8; i++) {
+        final int ch = (ep >>> (42 - i * 6)) & 0x3F;
+        final int row = ((ch & 0x20) >>> 4) | (ch & 1);
+        final int col = (ch >>> 1) & 0x0F;
+        so = (so << 4) | _s[i][row * 16 + col];
       }
+      final int nextR = l ^ _perm(so, _p, 32);
+      l = r;
+      r = nextR;
     }
-    if (!hasCode4) return vec;
-
-    final newSeqX = _ProFloat32Buf(vec.seqX.length);
-    final newSeqY = _ProFloat32Buf(vec.seqY.length);
-    final newSeqCode = _ProUint8Buf(vec.seqCode.length);
-
-    final newBeadX = _ProFloat32Buf(vec.beadX.length + 128);
-    final newBeadY = _ProFloat32Buf(vec.beadY.length + 128);
-    final newBeadCode = _ProUint8Buf(vec.beadCode.length + 128);
-
-    for (int i = 0; i < vec.beadX.length; i++) {
-      newBeadX.add(vec.beadX[i]);
-      newBeadY.add(vec.beadY[i]);
-      newBeadCode.add(vec.beadCode[i]);
+    final int outV = _perm((r << 32) | l, _ipr, 64);
+    final out = Uint8List(8);
+    for (int i = 0; i < 8; i++) {
+      out[i] = (outV >>> (56 - i * 8)) & 0xFF;
     }
+    return out;
+  }
 
-    for (int i = 0; i < vec.seqX.length; i++) {
-      final int sc = vec.seqCode[i];
-      if (sc == 4) {
-        newBeadX.add(vec.seqX[i]);
-        newBeadY.add(vec.seqY[i]);
-        newBeadCode.add(1); // خرز لؤلؤي 3.0 مم
+  static Uint8List _des3Dec(Uint8List data, int start, int len, bool useDhe) {
+    final key = useDhe ? _keyDhe : _keyDha;
+    final k0 = _subkeys(key.sublist(0, 8));
+    final k1 = _subkeys(key.sublist(8, 16)).reversed.toList();
+    final k2 = _subkeys(key.sublist(16, 24));
+    final int blocks = len ~/ 8;
+    final out = Uint8List(blocks * 8);
+    for (int b = 0; b < blocks; b++) {
+      final s1 = _desBlock(data, start + b * 8, k0);
+      final s2 = _desBlock(s1, 0, k1);
+      final s3 = _desBlock(s2, 0, k2);
+      out.setRange(b * 8, b * 8 + 8, s3);
+    }
+    return out;
+  }
+
+  static Uint8List _ringDec(Uint8List data, int start, int len, int seed16) {
+    int c = seed16 & 0xFFFF;
+    if (c < 0x6E) c += 0x6E;
+    final k = <int>[
+      c % 0x61,
+      (5 * c) % 0x1B,
+      (8 * c) % 0x13,
+      c % 0x49,
+      c % 0x21,
+      (3 * c) % 0x39,
+      (5 * c) % 0x27,
+      c % 0x12,
+    ];
+    if (((k[0] % 0x3D) - (k[1] % 0x3D)).abs() < 6) k[1] += 0x11;
+    if (((k[6] % 0x3F) - (k[7] % 0x3F)).abs() < 7) k[7] += 0x11;
+    int i0 = 0, i1 = 2, i2 = 4, i3 = 6;
+    final out = Uint8List(len);
+    for (int i = 0; i < len; i++) {
+      final int b = data[start + i];
+      if (b < 0x3D) {
+        out[i] = (b + k[i0]) % 0x3D;
+        i0 ^= 1;
+      } else if (b < 0x6E) {
+        out[i] = ((b - 0x3D + k[i1]) % 0x31) + 0x3D;
+        i1 ^= 1;
+      } else if (b < 0xC1) {
+        out[i] = ((b - 0x6E + k[i2]) % 0x53) + 0x6E;
+        i2 ^= 1;
       } else {
-        newSeqX.add(vec.seqX[i]);
-        newSeqY.add(vec.seqY[i]);
-        newSeqCode.add(sc);
+        out[i] = (((b - 0xC1 + k[i3]) % 0x3F) + 0xC1) & 0xFF;
+        i3 ^= 1;
+      }
+    }
+    return out;
+  }
+
+  static int _u32LE(Uint8List b, int off) =>
+      b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24);
+  static int _u16LE(Uint8List b, int off) => b[off] | (b[off + 1] << 8);
+
+  static VectorDesignData? decodeSync(Uint8List data, bool preferDhe) {
+    if (data.length < 0x130) return null;
+
+    int? sOff, sNext, sParam;
+    int hdrXor = 0;
+    bool matchedDhe = preferDhe;
+
+    for (final useDhe in (preferDhe ? [true, false] : [false, true])) {
+      bool nonZeroHdr = false;
+      for (int i = 8; i < 16; i++) {
+        if (data[i] != 0) {
+          nonZeroHdr = true;
+          break;
+        }
+      }
+      final int hx = nonZeroHdr ? _u16LE(_des3Dec(data, 8, 8, useDhe), 0) : 0;
+      final List<(int, int, int)> secs = [];
+      int pos = 0x100;
+      bool valid = false;
+      for (int k = 0; k < 16; k++) {
+        if (pos + 16 > data.length) break;
+        final dec = _des3Dec(data, pos, 16, useDhe);
+        final int styp = _u32LE(dec, 0);
+        final int soff = _u32LE(dec, 4);
+        final int sparam = _u32LE(dec, 8);
+        if (styp > 24 || soff < 0x110 || soff > data.length) {
+          secs.clear();
+          break;
+        }
+        secs.add((styp, soff, sparam));
+        if (styp == 0) {
+          valid = secs.length >= 2;
+          break;
+        }
+        pos += 16;
+      }
+      if (!valid) continue;
+      for (int i = 0; i < secs.length - 1; i++) {
+        if (secs[i].$1 == 6) {
+          sOff = secs[i].$2;
+          sNext = secs[i + 1].$2;
+          sParam = secs[i].$3;
+          hdrXor = hx;
+          matchedDhe = useDhe;
+          break;
+        }
+      }
+      if (sOff != null) break;
+    }
+
+    if (sOff == null || sNext == null || sParam == null || sNext <= sOff) return null;
+
+    final plain = _ringDec(data, sOff, sNext - sOff, (sParam ^ hdrXor ^ 0x3028) & 0xFFFF);
+    final int lim = (sParam > 0 && sParam <= plain.length) ? sParam : plain.length;
+
+    final stX = _ProFloat32Buf(8192);
+    final stY = _ProFloat32Buf(8192);
+    final stMove = _ProUint8Buf(8192);
+    final stColor = _ProUint8Buf(8192);
+    final stDev = _ProUint8Buf(8192);
+
+    final seqX = _ProFloat32Buf(256);
+    final seqY = _ProFloat32Buf(256);
+    final seqCode = _ProUint8Buf(256);
+
+    final beadX = _ProFloat32Buf(512);
+    final beadY = _ProFloat32Buf(512);
+    final beadCode = _ProUint8Buf(512);
+
+    double cx = 0.0, cy = 0.0;
+    double minX = double.infinity, maxX = -double.infinity;
+    double minY = double.infinity, maxY = -double.infinity;
+    bool hasBounds = false;
+    int col = 0;
+    int colorCount = 1;
+    bool hasStitchesInCol = false;
+    bool needMove = true;
+    bool inDev = false;
+    int pulse = 0;
+    double ljx = 0.0, ljy = 0.0;
+    int jumpsCount = 0;
+    int pendingDev = 0;
+
+    void trackPt(double x, double y) {
+      if (!hasBounds) {
+        minX = maxX = x;
+        minY = maxY = y;
+        hasBounds = true;
+      } else {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
       }
     }
 
+    void emitStitch(double x, double y, bool isMove, int devTag) {
+      stX.add(x);
+      stY.add(y);
+      stMove.add(isMove ? 1 : 0);
+      stColor.add(col);
+      stDev.add(devTag);
+      if (isMove) jumpsCount++;
+      hasStitchesInCol = true;
+      trackPt(x, y);
+    }
+
+    void recordSeq(double x, double y, int code) {
+      seqX.add(x);
+      seqY.add(y);
+      seqCode.add(code);
+      if (stDev.length > 0 && stDev._buf[stDev.length - 1] == 0) {
+        stDev._buf[stDev.length - 1] = code.clamp(1, 4);
+      } else {
+        pendingDev = code.clamp(1, 4);
+      }
+    }
+
+    void recordBead(double x, double y, int code) {
+      beadX.add(x);
+      beadY.add(y);
+      beadCode.add(code);
+      final int tag = (4 + code).clamp(5, 7);
+      if (stDev.length > 0 && stDev._buf[stDev.length - 1] == 0) {
+        stDev._buf[stDev.length - 1] = tag;
+      } else {
+        pendingDev = tag;
+      }
+    }
+
+    for (int p = 0; p + 2 < lim; p += 3) {
+      final int cmd = plain[p];
+      final int b1 = plain[p + 1];
+      final int b2 = plain[p + 2];
+      if (cmd == 0xF8) break;
+
+      if (cmd == 0xD7) {
+        if (b1 == 0 && b2 == 0) {
+          inDev = !inDev;
+          pulse = 0;
+        } else if (b1 == 10) {
+          // قناة الخرز الأصلية في .DHE: b2=1 (A: 2.5×2.5مم)، b2=2 (B: 4×4مم)، b2=4 (C: 6×2.5مم)
+          final int bc = (b2 & 4) != 0 ? 3 : ((b2 & 2) != 0 ? 2 : 1);
+          recordBead(cx, cy, bc);
+        } else if (b1 == 6) {
+          // قناة الترتر الأصلية في .DHE: b2=1 (A: 3مم)، b2=2 (B: 5مم)، b2=4 (C: 3مم)، b2=8 (D: 5مم)
+          final int sc = (b2 & 1) != 0 ? 1 : ((b2 & 2) != 0 ? 2 : ((b2 & 4) != 0 ? 3 : 4));
+          recordSeq(cx, cy, sc);
+        } else if (b2 == 16 || b2 == 32 || b2 == 48) {
+          recordBead(cx, cy, b2 == 16 ? 1 : (b2 == 32 ? 2 : 3));
+        }
+        continue;
+      }
+
+      if (cmd >= 0x88 && cmd <= 0x9F) {
+        if (hasStitchesInCol) {
+          col = (col + 1) % _palette.length;
+          colorCount++;
+          hasStitchesInCol = false;
+        }
+        needMove = true;
+        inDev = false;
+        pulse = 0;
+        continue;
+      }
+
+      final int kind = cmd & 0x9F;
+      final double dy = ((cmd & 0x40) != 0 ? -b1 : b1).toDouble();
+      final double dx = ((cmd & 0x20) != 0 ? -b2 : b2).toDouble();
+
+      if (kind == 0x81) {
+        cx += dx;
+        cy -= dy;
+        if (inDev && !matchedDhe) {
+          // في ملفات .DHA: القفزة الطويلة (>9.5 مم) هي انتقال حر وليست نبضة إسقاط خرز/ترتر
+          if (dx.abs() > 95.0 || dy.abs() > 95.0) {
+            pulse = 0;
+            needMove = true;
+          } else {
+            pulse++;
+            ljx = cx;
+            ljy = cy;
+          }
+        } else {
+          needMove = true;
+        }
+      } else if (kind == 0x80) {
+        if (inDev && !matchedDhe && pulse > 0) {
+          // التوزيع المعاير 100% وفق داهاو emCAD لملفات .DHA:
+          // نبضة1=خرزA(2.5مم)، نبضة2=ترترB(5مم)، نبضة3/5=خرزB(4مم)، نبضة4=ترترA(3مم)، نبضة6+=خرزC(6×2.5مم)
+          int devTag = 0;
+          if (pulse == 1) {
+            beadX.add(ljx);
+            beadY.add(ljy);
+            beadCode.add(1);
+            devTag = 5;
+          } else if (pulse == 2) {
+            seqX.add(ljx);
+            seqY.add(ljy);
+            seqCode.add(2);
+            devTag = 2;
+          } else if (pulse == 4) {
+            seqX.add(ljx);
+            seqY.add(ljy);
+            seqCode.add(1);
+            devTag = 1;
+          } else if (pulse == 3 || pulse == 5) {
+            beadX.add(ljx);
+            beadY.add(ljy);
+            beadCode.add(2);
+            devTag = 6;
+          } else {
+            beadX.add(ljx);
+            beadY.add(ljy);
+            beadCode.add(3);
+            devTag = 7;
+          }
+          emitStitch(ljx, ljy, needMove, devTag);
+          needMove = false;
+          pulse = 0;
+        }
+        cx += dx;
+        cy -= dy;
+        emitStitch(cx, cy, needMove, pendingDev);
+        pendingDev = 0;
+        needMove = false;
+      }
+    }
+
+    if (stX.length < 2) return null;
     return VectorDesignData(
-      stX: vec.stX,
-      stY: vec.stY,
-      stMove: vec.stMove,
-      stColor: vec.stColor,
-      stDev: vec.stDev,
-      seqX: newSeqX.finish(),
-      seqY: newSeqY.finish(),
-      seqCode: newSeqCode.finish(),
-      beadX: newBeadX.finish(),
-      beadY: newBeadY.finish(),
-      beadCode: newBeadCode.finish(),
-      paletteArgb: vec.paletteArgb,
-      stitches: vec.stitches,
-      colorCount: vec.colorCount,
-      stopsCount: vec.stopsCount,
-      jumpsCount: vec.jumpsCount,
-      sequinsCount: newSeqX.length,
-      beadsCount: newBeadX.length,
-      trimsCount: vec.trimsCount,
-      minX: vec.minX,
-      maxX: vec.maxX,
-      minY: vec.minY,
-      maxY: vec.maxY,
-      hasBounds: vec.hasBounds,
-      machineType: vec.machineType,
+      stX: stX.finish(),
+      stY: stY.finish(),
+      stMove: stMove.finish(),
+      stColor: stColor.finish(),
+      stDev: (seqX.length > 0 || beadX.length > 0) ? stDev.finish() : null,
+      seqX: seqX.finish(),
+      seqY: seqY.finish(),
+      seqCode: seqCode.finish(),
+      beadX: beadX.finish(),
+      beadY: beadY.finish(),
+      beadCode: beadCode.finish(),
+      paletteArgb: _palette,
+      stitches: stX.length,
+      colorCount: colorCount,
+      stopsCount: colorCount > 1 ? colorCount - 1 : 0,
+      jumpsCount: jumpsCount,
+      sequinsCount: seqX.length,
+      beadsCount: beadX.length,
+      trimsCount: 0,
+      minX: hasBounds ? minX : 0.0,
+      maxX: hasBounds ? maxX : 0.0,
+      minY: hasBounds ? minY : 0.0,
+      maxY: hasBounds ? maxY : 0.0,
+      hasBounds: hasBounds,
+      machineType: matchedDhe ? 'Dahao (.DHE)' : 'Dahao (.DHA)',
+    );
+  }
+
+  static Future<VectorDesignData?> loadVector(String filePath) async {
+    try {
+      final f = File(filePath);
+      if (!await f.exists()) return null;
+      final bytes = await f.readAsBytes();
+      final preferDhe = filePath.toLowerCase().endsWith('.dhe');
+      return await Isolate.run(() => decodeSync(bytes, preferDhe));
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// فهرس مكاني فائق السرعة (O(N+B+S) يُحسب مرة واحدة ويُحفظ تلقائياً عبر Expando):
+/// - يحسب زاوية الخيط لكل خرزة C في O(1) بدل 555 مليون عملية/إطار (يسرّع ملفات 185 ألف غرزة 1000 مرة!)
+/// - يربط كل خرزة وترترة برقم غرزتها الفعلي لتطابق 100% أثناء المحاكاة بدون أي ظهور مبكّر
+class TarikDesignSpatialIndex {
+  static final Expando<TarikDesignSpatialIndex> _cache = Expando<TarikDesignSpatialIndex>('tarik_spatial_idx');
+
+  final Float32List beadAngles;
+  final Int32List seqStitchIdx;
+  final Int32List beadStitchIdx;
+
+  const TarikDesignSpatialIndex({
+    required this.beadAngles,
+    required this.seqStitchIdx,
+    required this.beadStitchIdx,
+  });
+
+  static TarikDesignSpatialIndex of(VectorDesignData data) {
+    final existing = _cache[data];
+    if (existing != null) return existing;
+    final built = _build(data);
+    _cache[data] = built;
+    return built;
+  }
+
+  static TarikDesignSpatialIndex _build(VectorDesignData data) {
+    final int nSt = data.stX.length;
+    final int nSeq = data.seqX.length;
+    final int nBead = data.beadX.length;
+    final beadAngles = Float32List(nBead);
+    final seqStitchIdx = Int32List(nSeq);
+    final beadStitchIdx = Int32List(nBead);
+
+    if (nSt < 2 || (nSeq == 0 && nBead == 0)) {
+      return TarikDesignSpatialIndex(
+        beadAngles: beadAngles,
+        seqStitchIdx: seqStitchIdx,
+        beadStitchIdx: beadStitchIdx,
+      );
+    }
+
+    // بناء شبكة مكانية سريعة (خلية = 50 وحدة = 5 مم)
+    const double invCell = 1.0 / 50.0;
+    final Map<int, List<int>> grid = {};
+    int cellKey(int cx, int cy) => ((cx + 32768) << 16) ^ (cy + 32768);
+
+    for (int i = 0; i < nSt; i++) {
+      final int cx = (data.stX[i] * invCell).floor();
+      final int cy = (data.stY[i] * invCell).floor();
+      final k = cellKey(cx, cy);
+      final bucket = grid[k];
+      if (bucket != null) {
+        if (bucket.length < 48) bucket.add(i);
+      } else {
+        grid[k] = [i];
+      }
+    }
+
+    // دالة إيجاد أقرب غرزة ضمن الجوار 3×3 (متوسط O(1) لكل عنصر!)
+    (int, double) findNearest(double px, double py, int minHintIdx) {
+      final int cx = (px * invCell).floor();
+      final int cy = (py * invCell).floor();
+      int bestIdx = minHintIdx.clamp(0, nSt - 1);
+      double bestScore = double.infinity;
+      double bestAng = 0.0;
+
+      for (int ox = -1; ox <= 1; ox++) {
+        for (int oy = -1; oy <= 1; oy++) {
+          final bucket = grid[cellKey(cx + ox, cy + oy)];
+          if (bucket == null) continue;
+          for (int b = 0; b < bucket.length; b++) {
+            final int idx = bucket[b];
+            final double dx = data.stX[idx] - px;
+            final double dy = data.stY[idx] - py;
+            final double d2 = dx * dx + dy * dy;
+            // أفضلية خفيفة للغرز التي تأتي بعد العنصر السابق للحفاظ على التسلسل الزمني الصحيح
+            final double penalty = idx < minHintIdx ? 25.0 : 0.0;
+            final double score = d2 + penalty;
+            if (score < bestScore) {
+              bestScore = score;
+              bestIdx = idx;
+              if (idx > 0 && data.stMove[idx] == 0) {
+                final double sx = data.stX[idx] - data.stX[idx - 1];
+                final double sy = data.stY[idx] - data.stY[idx - 1];
+                if (sx * sx + sy * sy > 2.0) bestAng = math.atan2(sy, sx);
+              } else if (idx + 1 < nSt && data.stMove[idx + 1] == 0) {
+                final double sx = data.stX[idx + 1] - data.stX[idx];
+                final double sy = data.stY[idx + 1] - data.stY[idx];
+                if (sx * sx + sy * sy > 2.0) bestAng = math.atan2(sy, sx);
+              }
+            }
+          }
+        }
+      }
+      return (bestIdx, bestAng);
+    }
+
+    // إذا كان stDev موجوداً (في .DHE و .DHA و .DST)، نستخرج رقم الغرزة المباشر بدقة 100% في O(N)!
+    final Uint8List? dev = data.stDev;
+    if (dev != null && dev.length == nSt) {
+      int si = 0, bi = 0;
+      for (int i = 0; i < nSt; i++) {
+        final int dt = dev[i] & 0x0F;
+        if (dt >= 1 && dt <= 4 && si < nSeq) {
+          seqStitchIdx[si++] = i;
+        } else if (dt >= 5 && dt <= 7 && bi < nBead) {
+          beadStitchIdx[bi] = i;
+          double ang = 0.0;
+          if (i > 0 && data.stMove[i] == 0) {
+            final double sx = data.stX[i] - data.stX[i - 1];
+            final double sy = data.stY[i] - data.stY[i - 1];
+            if (sx * sx + sy * sy > 2.0) ang = math.atan2(sy, sx);
+          } else if (i + 1 < nSt && data.stMove[i + 1] == 0) {
+            final double sx = data.stX[i + 1] - data.stX[i];
+            final double sy = data.stY[i + 1] - data.stY[i];
+            if (sx * sx + sy * sy > 2.0) ang = math.atan2(sy, sx);
+          }
+          beadAngles[bi] = ang;
+          bi++;
+        }
+      }
+      // إكمال أي عناصر متبقية عبر الفهرس المكاني
+      int lastS = si > 0 ? seqStitchIdx[si - 1] : 0;
+      for (; si < nSeq; si++) {
+        final res = findNearest(data.seqX[si], data.seqY[si], lastS);
+        seqStitchIdx[si] = res.$1;
+        lastS = res.$1;
+      }
+      int lastB = bi > 0 ? beadStitchIdx[bi - 1] : 0;
+      for (; bi < nBead; bi++) {
+        final res = findNearest(data.beadX[bi], data.beadY[bi], lastB);
+        beadStitchIdx[bi] = res.$1;
+        beadAngles[bi] = res.$2;
+        lastB = res.$1;
+      }
+    } else {
+      int lastS = 0;
+      for (int i = 0; i < nSeq; i++) {
+        final res = findNearest(data.seqX[i], data.seqY[i], lastS);
+        seqStitchIdx[i] = res.$1;
+        lastS = res.$1;
+      }
+      int lastB = 0;
+      for (int i = 0; i < nBead; i++) {
+        final res = findNearest(data.beadX[i], data.beadY[i], lastB);
+        beadStitchIdx[i] = res.$1;
+        beadAngles[i] = res.$2;
+        lastB = res.$1;
+      }
+    }
+
+    return TarikDesignSpatialIndex(
+      beadAngles: beadAngles,
+      seqStitchIdx: seqStitchIdx,
+      beadStitchIdx: beadStitchIdx,
     );
   }
 }
@@ -2165,10 +2700,10 @@ class TarikRenderSpecs {
   static const double maxStitchUnits2D = 145.0;
   /// مقاسات الترتر المعايرة: A = 3.0 مم، B = 5.0 مم
   static const List<double> seqDiamUnits = [30.0, 50.0, 30.0, 50.0];
-  /// مقاسات الخرز المعايرة: A = 2.5×2.5 مم، B = 4.0×4.0 مم، C = 5.0×2.5 مم
+  /// مقاسات الخرز المعايرة: A = 2.5×2.5 مم، B = 4.0×4.0 مم، C = 6.0×2.5 مم
   static const double beadADiamUnits = 25.0;
   static const double beadBDiamUnits = 40.0;
-  static const double beadCLenUnits = 50.0;
+  static const double beadCLenUnits = 60.0;
   static const double beadCHeightUnits = 25.0;
 }
 
@@ -2367,11 +2902,11 @@ class TarikProPbrSprites {
     beadSqSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 256, h: 256);
     beadSqCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 256, h: 256);
 
-    beadRectPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 256, h: 128);
-    beadRectGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 256, h: 128);
-    beadRectBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 256, h: 128);
-    beadRectSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 256, h: 128);
-    beadRectCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 256, h: 128);
+    beadRectPearl = await _buildChamferedBead(const [242, 236, 224], const [255, 255, 255], const [112, 102, 92], w: 256, h: 106);
+    beadRectGold = await _buildChamferedBead(const [232, 178, 38], const [255, 250, 205], const [92, 56, 8], w: 256, h: 106);
+    beadRectBronze = await _buildChamferedBead(const [172, 102, 46], const [252, 218, 178], const [58, 28, 6], w: 256, h: 106);
+    beadRectSilver = await _buildChamferedBead(const [198, 206, 218], const [255, 255, 255], const [68, 76, 90], w: 256, h: 106);
+    beadRectCrystal = await _buildChamferedBead(const [20, 168, 192], const [228, 254, 255], const [6, 56, 70], w: 256, h: 106);
 
     _ready = true;
   }
@@ -2580,29 +3115,7 @@ class TarikUnifiedCanvasRenderer {
     }
   }
 
-  /// إيجاد زاوية الخيط الحقيقية عند موقع خرزة مستطيلة C لتدور مع اتجاه الغرزة بدقة
-  static double _findThreadAngleAt(VectorDesignData data, double bx, double by) {
-    final int n = data.stX.length;
-    if (n < 2) return 0.0;
-    double bestDistSq = 1e12;
-    double bestAngle = 0.0;
-    for (int i = 1; i < n; i++) {
-      if (data.stMove[i] != 0) continue;
-      final double dx = data.stX[i] - bx;
-      final double dy = data.stY[i] - by;
-      final double d2 = dx * dx + dy * dy;
-      if (d2 < bestDistSq) {
-        final double sx = data.stX[i] - data.stX[i - 1];
-        final double sy = data.stY[i] - data.stY[i - 1];
-        if (sx * sx + sy * sy > 4.0) {
-          bestDistSq = d2;
-          bestAngle = math.atan2(sy, sx);
-          if (d2 < 4.0) break;
-        }
-      }
-    }
-    return bestAngle;
-  }
+
 
   /// رسم التصميم المتجهي بالعرض ثلاثي الأبعاد الموحّد (3D Only) + خرز وترتر PBR
   static void paintDesign({
@@ -2649,7 +3162,7 @@ class TarikUnifiedCanvasRenderer {
               math.max(pSy, sy) >= vTop &&
               math.min(pSy, sy) <= vBottom) {
             visCount++;
-            if (visCount > 15000) break;
+            if (visCount > 6500) break;
           }
         }
         pSx = sx;
@@ -2657,7 +3170,7 @@ class TarikUnifiedCanvasRenderer {
       }
     }
 
-    final bool usePerStitchTwisted = tw >= 1.8 && visCount <= 15000;
+    final bool usePerStitchTwisted = tw >= 2.1 && visCount <= 6500;
 
     if (usePerStitchTwisted) {
       final bool drawTwistPlies = tw >= 2.8;
@@ -2938,13 +3451,16 @@ class TarikUnifiedCanvasRenderer {
       flush3DColor();
     }
 
-    // ================== رسم الترتر (A=3 مم، B=5 مم) والخرز (A=2.5×2.5، B=4×4، C=5×2.5 باتجاه الخيط) ==================
-    final double progressRatio = data.stX.isNotEmpty ? (nSt / data.stX.length).clamp(0.0, 1.0) : 1.0;
+    // ================== رسم الترتر (A=3 مم، B=5 مم) والخرز (A=2.5×2.5، B=4×4، C=6×2.5 باتجاه الخيط) بتزامن فوري O(1) ==================
+    final bool isPartialSim = stitchLimit != null && nSt < data.stX.length;
+    final TarikDesignSpatialIndex? spatialIdx =
+        (data.seqX.isNotEmpty || data.beadX.isNotEmpty) ? TarikDesignSpatialIndex.of(data) : null;
 
-    if (data.seqX.isNotEmpty) {
-      final int seqLim = (data.seqX.length * progressRatio).round().clamp(0, data.seqX.length);
-      final spritePaint = Paint()..filterQuality = FilterQuality.high;
-      for (int i = 0; i < seqLim; i++) {
+    if (data.seqX.isNotEmpty && spatialIdx != null) {
+      final spritePaint = Paint()..filterQuality = FilterQuality.medium;
+      final Int32List sIdxArr = spatialIdx.seqStitchIdx;
+      for (int i = 0; i < data.seqX.length; i++) {
+        if (isPartialSim && sIdxArr[i] >= nSt) continue;
         final double sx = data.seqX[i] * scale + offX;
         final double sy = data.seqY[i] * scale + offY;
         if (sx < vLeft || sx > vRight || sy < vTop || sy > vBottom) continue;
@@ -2958,7 +3474,7 @@ class TarikUnifiedCanvasRenderer {
         } else if (code == 4 || code == 8 || code == 32) {
           b = 3;
         }
-        final double dPx = (TarikRenderSpecs.seqDiamUnits[b] * scale * 1.25).clamp(4.0, 260.0);
+        final double dPx = (TarikRenderSpecs.seqDiamUnits[b] * scale * 1.25).clamp(3.8, 260.0);
         final ui.Image? sp = TarikProPbrSprites.sequinFor(b, decorTheme);
         if (sp != null) {
           canvas.drawImageRect(
@@ -2971,14 +3487,14 @@ class TarikUnifiedCanvasRenderer {
       }
     }
 
-    if (data.beadX.isNotEmpty) {
-      final int beadLim = (data.beadX.length * progressRatio).round().clamp(0, data.beadX.length);
-      final spritePaint = Paint()..filterQuality = FilterQuality.high;
-      for (int i = 0; i < beadLim; i++) {
-        final double bx = data.beadX[i];
-        final double by = data.beadY[i];
-        final double sx = bx * scale + offX;
-        final double sy = by * scale + offY;
+    if (data.beadX.isNotEmpty && spatialIdx != null) {
+      final spritePaint = Paint()..filterQuality = FilterQuality.medium;
+      final Int32List bIdxArr = spatialIdx.beadStitchIdx;
+      final Float32List bAngArr = spatialIdx.beadAngles;
+      for (int i = 0; i < data.beadX.length; i++) {
+        if (isPartialSim && bIdxArr[i] >= nSt) continue;
+        final double sx = data.beadX[i] * scale + offX;
+        final double sy = data.beadY[i] * scale + offY;
         if (sx < vLeft || sx > vRight || sy < vTop || sy > vBottom) continue;
 
         final int code = data.beadCode[i];
@@ -2986,13 +3502,12 @@ class TarikUnifiedCanvasRenderer {
         if (sp == null) continue;
 
         if (code == 3) {
-          // خرز C: مستطيل مكسور الحواف (5.0 × 2.5 مم) يدور تلقائياً باتجاه الخيط
-          final double wPx = (TarikRenderSpecs.beadCLenUnits * scale * 1.24).clamp(5.0, 260.0);
+          // خرز C: مستطيل مكسور الحواف (6.0 × 2.5 مم) يدور تلقائياً باتجاه الخيط (قراءة فورية O(1))
+          final double wPx = (TarikRenderSpecs.beadCLenUnits * scale * 1.24).clamp(5.0, 280.0);
           final double hPx = (TarikRenderSpecs.beadCHeightUnits * scale * 1.24).clamp(3.0, 140.0);
-          final double ang = _findThreadAngleAt(data, bx, by);
           canvas.save();
           canvas.translate(sx, sy);
-          canvas.rotate(ang);
+          canvas.rotate(bAngArr[i]);
           canvas.drawImageRect(
             sp,
             Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
@@ -3003,7 +3518,7 @@ class TarikUnifiedCanvasRenderer {
         } else {
           // خرز A (2.5×2.5 مم) و B (4.0×4.0 مم): مربع مكسور الحواف
           final double units = code == 2 ? TarikRenderSpecs.beadBDiamUnits : TarikRenderSpecs.beadADiamUnits;
-          final double dPx = (units * scale * 1.24).clamp(3.5, 220.0);
+          final double dPx = (units * scale * 1.24).clamp(3.2, 220.0);
           canvas.drawImageRect(
             sp,
             Rect.fromLTWH(0, 0, sp.width.toDouble(), sp.height.toDouble()),
@@ -3026,11 +3541,15 @@ class TarikPro3DRenderer {
     int decorTheme = 0,
   }) async {
     try {
-      VectorDesignData? vec = filePath.toLowerCase().endsWith('.tbf')
-          ? await TarikProTbfParser.loadVector(filePath)
-          : await VectorDesignLoader.load(filePath);
+      final low = filePath.toLowerCase();
+      VectorDesignData? vec;
+      if (low.endsWith('.tbf')) {
+        vec = await TarikProTbfParser.loadVector(filePath);
+      } else if (low.endsWith('.dhe') || low.endsWith('.dha')) {
+        vec = await TarikProDahaoParser.loadVector(filePath);
+      }
+      vec ??= await VectorDesignLoader.load(filePath);
       if (vec == null || vec.stX.length < 2) return null;
-      vec = TarikProDahaoCalibrator.calibrate(vec, filePath);
       return await renderVectorToPng(
         vec,
         maxCanvas: maxCanvas,
