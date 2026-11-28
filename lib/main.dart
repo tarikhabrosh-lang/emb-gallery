@@ -19,6 +19,7 @@ import 'parsers/tarik_pro_engine.dart';
 final ValueNotifier<bool> isArabicNotifier = ValueNotifier<bool>(true);
 final ValueNotifier<int> galleryRefreshNotifier = ValueNotifier<int>(0);
 String? lastMutatedFilePath;
+int activeHeavyScreensCount = 0;
 
 void notifyDesignFilesChanged([String? path]) {
   lastMutatedFilePath = path;
@@ -61,6 +62,8 @@ Future<VectorDesignData?> loadAnyVectorDesign(String path) async {
     v = await TarikProTbfParser.loadVector(path);
   } else if (lower.endsWith('.dhe') || lower.endsWith('.dha')) {
     v = await TarikProDahaoParser.loadVector(path);
+  } else if (lower.endsWith('.dst')) {
+    v = await TarikProDstDeviceParser.loadVector(path, profile: TarikMachineDeviceManager.current);
   }
   v ??= await VectorDesignLoader.load(path);
   if (v != null && (v.seqX.isNotEmpty || v.beadX.isNotEmpty)) {
@@ -217,7 +220,7 @@ class DesignCacheManager {
   static Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final supportDir = await getApplicationSupportDirectory();
-    final dir = Directory('${supportDir.path}/design_cache_v11');
+    final dir = Directory('${supportDir.path}/design_cache_v13');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -452,6 +455,10 @@ class _EmbGalleryAppState extends State<EmbGalleryApp> {
 
   Future<void> _initApp() async {
     await _loadLanguagePreference();
+    try {
+      final dir = await getApplicationSupportDirectory();
+      await TarikMachineDeviceManager.loadFromFile('${dir.path}/tarik_machine_devices_v1.json');
+    } catch (_) {}
     final lic = await LicenseManager.checkLicense();
     if (mounted) {
       setState(() {
@@ -1043,6 +1050,10 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> with WidgetsBin
       if (folder.coverBytes == null && folder.filePaths.isNotEmpty) {
         for (final pathStr in folder.filePaths) {
           if (!mounted || token != _scanToken) return;
+          while (activeHeavyScreensCount > 0 && mounted && token == _scanToken) {
+            await Future.delayed(const Duration(milliseconds: 250));
+          }
+          if (!mounted || token != _scanToken) return;
           final EmbDesignInfo? info = await DesignCacheManager.getOrParse(pathStr);
           if (info?.previewJpeg != null && mounted && token == _scanToken) {
             setState(() {
@@ -1059,9 +1070,13 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> with WidgetsBin
       if (!mounted || token != _scanToken) return;
       for (final pathStr in folder.filePaths) {
         if (!mounted || token != _scanToken) return;
+        while (activeHeavyScreensCount > 0 && mounted && token == _scanToken) {
+          await Future.delayed(const Duration(milliseconds: 280));
+        }
+        if (!mounted || token != _scanToken) return;
         if (DesignCacheManager.getFromMemory(pathStr) == null) {
           await DesignCacheManager.getOrParse(pathStr);
-          await Future.delayed(const Duration(milliseconds: 8));
+          await Future.delayed(const Duration(milliseconds: 24));
         }
       }
     }
@@ -1262,6 +1277,14 @@ class _FoldersGalleryPageState extends State<FoldersGalleryPage> with WidgetsBin
                     MaterialPageRoute(builder: (_) => const TextToEmbroideryScreen()),
                   );
                 },
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                icon: const Icon(Icons.settings_outlined, color: Color(0xFFD4AF37), size: 21),
+                tooltip: tr('ضبط أجهزة الماكينة (A–H)', 'Machine Devices (A–H)'),
+                onPressed: () => showMachineDeviceConfigSheet(context),
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
@@ -1702,31 +1725,55 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
 
     final String? chosenExt = await showModalBottomSheet<String>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF18202E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4)),
-              ),
-              Text(
-                tr(
-                  'تحويل ${_selectedPaths.length} ملف إلى صيغة:',
-                  'Convert ${_selectedPaths.length} file(s) to format:',
-                ),
-                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 15),
-              ),
-              const SizedBox(height: 10),
-              ...UniversalExporter.supportedFormats.map((fmt) {
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.78),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4)),
+                  ),
+                  Text(
+                    tr(
+                      'تحويل ${_selectedPaths.length} ملف إلى صيغة:',
+                      'Convert ${_selectedPaths.length} file(s) to format:',
+                    ),
+                    style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      await showMachineDeviceConfigSheet(ctx);
+                      setSheetState(() {});
+                    },
+                    icon: const Icon(Icons.settings_outlined, size: 16, color: Color(0xFF56CCF2)),
+                    label: Text(
+                      '${tr('أجهزة الماكينة (A–H):', 'Devices (A–H):')} ${TarikMachineDeviceManager.current.label(isArabicNotifier.value)}',
+                      style: const TextStyle(color: Color(0xFF56CCF2), fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: const Color(0xFF56CCF2).withOpacity(0.55)),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Flexible(
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        ...TarikProUniversalExporter.supportedFormats.map((fmt) {
                 final ext = fmt['ext']!;
                 final label = fmt['name']!;
                 return ListTile(
@@ -1746,25 +1793,62 @@ class _FolderDetailsScreenState extends State<FolderDetailsScreen> {
                   onTap: () => Navigator.pop(ctx, ext),
                 );
               }),
-            ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
     );
 
     if (chosenExt == null || !mounted) return;
+    final bool hasBeadFiles = _designs.any((d) => _selectedPaths.contains(d.filePath) && d.beadsCount > 0);
+    if (hasBeadFiles && chosenExt != 'DHP' && chosenExt != 'DHA' && chosenExt != 'DHE') {
+      final bool? proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF18202E),
+          title: Text(
+            tr('تنبيه أمان الماكينة (ملفات خرز)', 'Machine Safety Warning (Beads)'),
+            style: const TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold, fontSize: 15),
+          ),
+          content: Text(
+            tr(
+              'بعض الملفات المحددة تحتوي على خرز داهاو. التحويل إلى .$chosenExt قد يفقد أوامر الخرز (مثل خرز C) على الماكينة.',
+              'Some selected files contain Dahao beads. Converting to .$chosenExt may lose bead commands on the machine.',
+            ),
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(tr('إلغاء', 'Cancel'), style: const TextStyle(color: Color(0xFFD4AF37))),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
+              child: Text(tr('متابعة', 'Proceed')),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true || !mounted) return;
+    }
     setState(() => _isBatchWorking = true);
     int okCount = 0;
     final List<String> targets = List<String>.from(_selectedPaths);
 
     for (final srcPath in targets) {
-      if (srcPath.toLowerCase().endsWith('.emb') || !UniversalExporter.canExport(srcPath)) continue;
+      if (srcPath.toLowerCase().endsWith('.emb') || !TarikProUniversalExporter.canExport(srcPath)) continue;
       final fileName = srcPath.split(Platform.pathSeparator).last;
       final baseName = fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
       final parentDir = File(srcPath).parent.path;
       final outPath = joinCleanPath(parentDir, '$baseName.$chosenExt');
-      String? res = await UniversalExporter.exportToFormat(srcPath, outPath, chosenExt);
-      res ??= await UniversalExporter.exportToFormat(
+      String? res = await TarikProUniversalExporter.exportFromFile(srcPath, outPath, chosenExt);
+      res ??= await TarikProUniversalExporter.exportFromFile(
         srcPath,
         '/storage/emulated/0/Download/$baseName.$chosenExt',
         chosenExt,
@@ -2227,11 +2311,31 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   bool _loadingSharp = false;
   int _decorTheme = 0; // 0=ذهبي ولؤلؤي، 1=فضي ولؤلؤي، 2=لؤلؤي، 3=ملوّن
 
+  int _deviceProfileVer = 0;
+
+  void _onDeviceProfileChanged() {
+    if (!mounted) return;
+    setState(() => _deviceProfileVer = TarikMachineDeviceManager.versionNotifier.value);
+    if (widget.design.filePath.toLowerCase().endsWith('.dst')) {
+      _loadLiveVector();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    activeHeavyScreensCount++;
+    _deviceProfileVer = TarikMachineDeviceManager.versionNotifier.value;
+    TarikMachineDeviceManager.versionNotifier.addListener(_onDeviceProfileChanged);
     _loadLiveVector();
     _detectEmbBg();
+  }
+
+  @override
+  void dispose() {
+    TarikMachineDeviceManager.versionNotifier.removeListener(_onDeviceProfileChanged);
+    activeHeavyScreensCount = max(0, activeHeavyScreensCount - 1);
+    super.dispose();
   }
 
   Future<void> _detectEmbBg() async {
@@ -2292,37 +2396,79 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
   Future<void> _showFormatPickerAndExport({required bool shareAfter}) async {
     if (_isExportingDst) return;
     final currentExt = widget.design.filePath.split('.').last.toUpperCase();
-    final formats = UniversalExporter.supportedFormats
+    final allFmts = TarikProUniversalExporter.supportedFormats;
+    final formats = allFmts
         .where((f) => f['ext'] != currentExt)
         .toList();
-    final listToShow = formats.isNotEmpty ? formats : UniversalExporter.supportedFormats;
+    final listToShow = formats.isNotEmpty ? formats : allFmts;
 
     final String? chosenExt = await showModalBottomSheet<String>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF18202E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4)),
-              ),
-              Text(
-                shareAfter
-                    ? tr('اختر الصيغة للتصدير والمشاركة', 'Choose format to Export & Share')
-                    : tr('اختر الصيغة للتحويل والحفظ', 'Choose format to Convert & Save'),
-                style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 16),
-              ),
-              const SizedBox(height: 12),
-              ...listToShow.map((fmt) {
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.78),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4)),
+                  ),
+                  Text(
+                    shareAfter
+                        ? tr('اختر الصيغة للتصدير والمشاركة', 'Choose format to Export & Share')
+                        : tr('اختر الصيغة للتحويل والحفظ', 'Choose format to Convert & Save'),
+                    style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  InkWell(
+                    onTap: () async {
+                      await showMachineDeviceConfigSheet(
+                        ctx,
+                        designColorsCount: max(1, widget.design.colorCount),
+                      );
+                      setSheetState(() {});
+                    },
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF56CCF2).withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFF56CCF2).withOpacity(0.45)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.settings_outlined, color: Color(0xFF56CCF2), size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '${tr('إعدادات أجهزة الخرز والترتر (A–H):', 'Machine Devices (A–H):')} ${TarikMachineDeviceManager.current.label(isArabicNotifier.value)}',
+                              style: const TextStyle(color: Color(0xFF56CCF2), fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
+                          ),
+                          Text(tr('تعديل', 'Edit'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Flexible(
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        ...listToShow.map((fmt) {
                 final ext = fmt['ext']!;
                 final label = fmt['name']!;
                 return ListTile(
@@ -2349,13 +2495,74 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                   onTap: () => Navigator.pop(ctx, ext),
                 );
               }),
-            ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
     );
 
     if (chosenExt == null || !mounted) return;
+    final bool isDahaoBeadFile = widget.design.beadsCount > 0 ||
+        ((widget.design.filePath.toLowerCase().endsWith('.dhe') ||
+                widget.design.filePath.toLowerCase().endsWith('.dha') ||
+                widget.design.filePath.toLowerCase().endsWith('.dhp')) &&
+            widget.design.beadsCount > 0);
+    if (isDahaoBeadFile && chosenExt != 'DHP' && chosenExt != 'DHA' && chosenExt != 'DHE') {
+      final bool? proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF18202E),
+          title: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent, size: 24),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  tr('تنبيه أمان الماكينة (ملف خرز)', 'Machine Safety Warning (Beads)'),
+                  style: const TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold, fontSize: 15),
+                ),
+              ),
+            ],
+          ),
+          content: Text(
+            tr(
+              'هذا التصميم يحتوي على ${widget.design.beadsCount} خرزة.\nالتحويل إلى صيغة .$chosenExt قد يفقد أوامر الخرز (وخصوصاً خرز C مقاس 6×2.5 مم) أو يغيّر قراءتها على الماكينة.\n\nللتشغيل الآمن 100% على الماكينة يُنصح بمشاركة الملف الأصلي كما هو.',
+              'This design contains ${widget.design.beadsCount} bead(s).\nConverting to .$chosenExt may lose bead commands (especially Bead C 6x2.5mm) on the embroidery machine.\n\nFor 100% safe machine output, share the original file directly.',
+            ),
+            style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.45),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(tr('إلغاء (الأفضل)', 'Cancel'), style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
+              child: Text(tr('متابعة على مسؤوليتي', 'Proceed Anyway')),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true || !mounted) return;
+    }
+    final bool needsDeviceConfirm = (chosenExt == 'DHE' || chosenExt == 'DHA') &&
+        (widget.design.beadsCount > 0 || widget.design.sequinsCount > 0 || widget.design.filePath.toLowerCase().endsWith('.dst'));
+    if (needsDeviceConfirm) {
+      final bool? confirmedExport = await showMachineDeviceConfigSheet(
+        context,
+        designColorsCount: max(1, widget.design.colorCount),
+        isExportConfirm: true,
+        targetFormatExt: chosenExt,
+      );
+      if (confirmedExport != true || !mounted) return;
+    }
+
     setState(() => _isExportingDst = true);
     try {
       final baseName = widget.design.fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
@@ -2368,11 +2575,20 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
         outPath = joinCleanPath(parentDir, '$baseName.$chosenExt');
       }
 
-      String? resultPath = await UniversalExporter.exportToFormat(widget.design.filePath, outPath, chosenExt);
+      String? resultPath = await TarikProUniversalExporter.exportFromFile(
+        widget.design.filePath,
+        outPath,
+        chosenExt,
+        profile: TarikMachineDeviceManager.current,
+      );
       if (resultPath == null && !shareAfter) {
-        // احتياطياً الحفظ في مجلد Download إذا لم يسمح المجلد الأصلي بالكتابة
         final fallbackPath = '/storage/emulated/0/Download/$baseName.$chosenExt';
-        resultPath = await UniversalExporter.exportToFormat(widget.design.filePath, fallbackPath, chosenExt);
+        resultPath = await TarikProUniversalExporter.exportFromFile(
+          widget.design.filePath,
+          fallbackPath,
+          chosenExt,
+          profile: TarikMachineDeviceManager.current,
+        );
       }
 
       if (resultPath != null && await File(resultPath).exists()) {
@@ -2506,6 +2722,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                     data: _liveVec!,
                                     is3D: true,
                                     decorTheme: _decorTheme,
+                                    profileVersion: _deviceProfileVer,
                                     bgColor: Colors.white,
                                     showCmGrid: false,
                                   )
@@ -2594,6 +2811,29 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                                             '✨ ${_decorThemeLabel(_decorTheme)}',
                                             style: const TextStyle(
                                               color: Color(0xFFD4AF37),
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Material(
+                                      color: const Color(0xFF0E131D).withOpacity(0.88),
+                                      borderRadius: BorderRadius.circular(18),
+                                      child: InkWell(
+                                        onTap: () => showMachineDeviceConfigSheet(
+                                          context,
+                                          designColorsCount: max(1, d.colorCount),
+                                        ),
+                                        borderRadius: BorderRadius.circular(18),
+                                        child: const Padding(
+                                          padding: EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                                          child: Text(
+                                            '⚙ A–H',
+                                            style: TextStyle(
+                                              color: Color(0xFF56CCF2),
                                               fontSize: 11,
                                               fontWeight: FontWeight.bold,
                                             ),
@@ -2782,7 +3022,7 @@ class _DesignDetailScreenState extends State<DesignDetailScreen> {
                             const SizedBox(height: 7),
                           ],
                           // صف الأوامر 3: تصدير وحفظ + تصدير ومشاركة (ظاهر دائماً بدون رفع الشاشة)
-                          if (!d.filePath.toLowerCase().endsWith('.emb') && UniversalExporter.canExport(d.filePath))
+                          if (!d.filePath.toLowerCase().endsWith('.emb') && TarikProUniversalExporter.canExport(d.filePath))
                             Row(
                               children: [
                                 Expanded(
@@ -2976,9 +3216,22 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
   VectorDesignData? _liveVec;
   bool _loadingVec = false;
 
+  int _deviceProfileVer = 0;
+
+  void _onDeviceProfileChanged() {
+    if (!mounted) return;
+    setState(() => _deviceProfileVer = TarikMachineDeviceManager.versionNotifier.value);
+    if (widget.design.filePath.toLowerCase().endsWith('.dst')) {
+      _loadVectorIfSupported();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    activeHeavyScreensCount++;
+    _deviceProfileVer = TarikMachineDeviceManager.versionNotifier.value;
+    TarikMachineDeviceManager.versionNotifier.addListener(_onDeviceProfileChanged);
     _canvasBg = widget.initialBgColor;
     _decorTheme = widget.initialDecorTheme;
     _loadVectorIfSupported();
@@ -2986,6 +3239,8 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
 
   @override
   void dispose() {
+    TarikMachineDeviceManager.versionNotifier.removeListener(_onDeviceProfileChanged);
+    activeHeavyScreensCount = max(0, activeHeavyScreensCount - 1);
     _transformController.dispose();
     super.dispose();
   }
@@ -3071,6 +3326,7 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                     data: _liveVec!,
                     is3D: true,
                     decorTheme: _decorTheme,
+                    profileVersion: _deviceProfileVer,
                     bgColor: _canvasBg,
                     showCmGrid: _showCmGrid,
                     maxZoom: 35.0,
@@ -3127,19 +3383,36 @@ class _FullScreenDesignViewerState extends State<FullScreenDesignViewer> {
                     children: [
                       if (_liveVec != null) ...[
 
-                        if (_liveVec!.seqX.isNotEmpty || _liveVec!.beadX.isNotEmpty) ...[
+                        if (_liveVec!.seqX.isNotEmpty || _liveVec!.beadX.isNotEmpty || d.filePath.toLowerCase().endsWith('.dst')) ...[
                           TextButton(
                             onPressed: () => setState(() => _decorTheme = (_decorTheme + 1) % 4),
                             style: TextButton.styleFrom(
                               backgroundColor: const Color(0xFFD4AF37).withOpacity(0.20),
-                              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                              minimumSize: Size.zero,
                             ),
                             child: Text(
                               '✨ ${_decorThemeLabel(_decorTheme)}',
-                              style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11.5, fontWeight: FontWeight.bold),
+                              style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11, fontWeight: FontWeight.bold),
                             ),
                           ),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: 4),
+                          TextButton(
+                            onPressed: () => showMachineDeviceConfigSheet(
+                              context,
+                              designColorsCount: max(1, d.colorCount),
+                            ),
+                            style: TextButton.styleFrom(
+                              backgroundColor: const Color(0xFF56CCF2).withOpacity(0.18),
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                              minimumSize: Size.zero,
+                            ),
+                            child: const Text(
+                              '⚙ A–H',
+                              style: TextStyle(color: Color(0xFF56CCF2), fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
                         ],
                         TextButton.icon(
                           onPressed: () => setState(() => _showCmGrid = !_showCmGrid),
@@ -3174,6 +3447,7 @@ class _LiveVectorViewport extends StatefulWidget {
   final VectorDesignData data;
   final bool is3D;
   final int decorTheme;
+  final int profileVersion;
   final Color bgColor;
   final bool showCmGrid;
   final double maxZoom;
@@ -3183,6 +3457,7 @@ class _LiveVectorViewport extends StatefulWidget {
     required this.data,
     required this.is3D,
     this.decorTheme = 0,
+    this.profileVersion = 0,
     this.bgColor = Colors.white,
     this.showCmGrid = false,
     this.maxZoom = 30.0,
@@ -3221,6 +3496,7 @@ class _LiveVectorViewportState extends State<_LiveVectorViewport> {
     if (oldWidget.data != widget.data ||
         oldWidget.is3D != widget.is3D ||
         oldWidget.decorTheme != widget.decorTheme ||
+        oldWidget.profileVersion != widget.profileVersion ||
         oldWidget.bgColor != widget.bgColor ||
         oldWidget.showCmGrid != widget.showCmGrid) {
       _scheduleSnapshot(immediate: true);
@@ -3247,7 +3523,7 @@ class _LiveVectorViewportState extends State<_LiveVectorViewport> {
     if (immediate) {
       _renderSnapshotNow();
     } else {
-      _debounceTimer = Timer(const Duration(milliseconds: 90), _renderSnapshotNow);
+      _debounceTimer = Timer(const Duration(milliseconds: 180), _renderSnapshotNow);
     }
   }
 
@@ -3258,9 +3534,10 @@ class _LiveVectorViewportState extends State<_LiveVectorViewport> {
     final double curZoom = _zoom;
     final Offset curPan = _pan;
     final double dpr = (MediaQuery.maybeOf(context)?.devicePixelRatio ?? 2.0).clamp(1.0, 2.0);
-    // سقف دقة GPU متوازن (1400px) لضمان استجابة لحظية (<50ms) ووضوح فائق
+    // لقطة سريعة بدقة 720px عند العرض العادي تُحرّك كصورة عادية بسرعة 60 FPS، وترتفع إلى 1080px فقط عند التكبير وتوقف الإصبع
+    final double capPx = curZoom <= 1.35 ? 720.0 : 1080.0;
     final double maxSide = max(sz.width, sz.height) * dpr;
-    final double effDpr = maxSide > 1400.0 ? (1400.0 / max(sz.width, sz.height)) : dpr;
+    final double effDpr = maxSide > capPx ? (capPx / max(sz.width, sz.height)) : dpr;
     final int imgW = max(32, (sz.width * effDpr).round());
     final int imgH = max(32, (sz.height * effDpr).round());
 
@@ -3632,26 +3909,156 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
   bool _playing = false;
   int _currentStitch = 0;
   int _speedIndex = 0; // يبدأ من أبطأ سرعة (0.2x)
-  static const List<int> _speedSteps = [1, 3, 8, 20, 55, 140, 350];
+  static const List<int> _speedSteps = [1, 3, 8, 22, 60, 160, 420];
   static const List<String> _speedLabels = ['0.2x', '0.5x', '1x', '3x', '8x', '20x', '45x'];
   Timer? _timer;
+
+  // زوم وتحريك + توسيط تلقائي لحركة الإبرة (Auto-Follow Needle)
   double _simZoom = 1.0;
   Offset _simPan = Offset.zero;
   double _simStartZoom = 1.0;
   Offset _simStartPan = Offset.zero;
   Offset _simStartFocal = Offset.zero;
   Size _simSize = Size.zero;
+  bool _autoFollowNeedle = true;
+  bool _userTouching = false;
+
+  // كاش الرسم التراكمي نصف الدقة (Incremental Baking ~720px):
+  // يطبع الغرز المنجزة على طبقة محفوظة، وفي كل إطار يرسم فقط الغرز الجديدة (<450 غرزة) لسرعة 60 FPS بدون تقطيع!
+  ui.Image? _bakedLayer;
+  int _bakedUpTo = 0;
+  int _bakedImgW = 0;
+  int _bakedImgH = 0;
+  double _bakedScale = 1.0;
+  double _bakedOffX = 0.0;
+  double _bakedOffY = 0.0;
+  bool _isBaking = false;
+  int _bakeSession = 0;
 
   @override
   void initState() {
     super.initState();
+    activeHeavyScreensCount++;
     _loadVector();
   }
 
   @override
   void dispose() {
+    activeHeavyScreensCount = max(0, activeHeavyScreensCount - 1);
     _timer?.cancel();
+    _bakedLayer?.dispose();
     super.dispose();
+  }
+
+  void _resetBakedLayer() {
+    _bakeSession++;
+    _bakedLayer?.dispose();
+    _bakedLayer = null;
+    _bakedUpTo = 0;
+    _isBaking = false;
+  }
+
+  void _initBakedGeometry(VectorDesignData v) {
+    final double rawW = max(1.0, v.maxX - v.minX);
+    final double rawH = max(1.0, v.maxY - v.minY);
+    // دقة نصفية خفيفة وسلسة للمحاكاة (720px) تمنع أي تقطيع مع الحفاظ على وضوح 3D والخرز
+    const double targetMax = 720.0;
+    const double pad = 16.0;
+    _bakedScale = (targetMax - pad * 2) / max(rawW, rawH);
+    _bakedImgW = max(64, (rawW * _bakedScale + pad * 2).ceil());
+    _bakedImgH = max(64, (rawH * _bakedScale + pad * 2).ceil());
+    _bakedOffX = -v.minX * _bakedScale + pad;
+    _bakedOffY = -v.minY * _bakedScale + pad;
+  }
+
+  Future<void> _bakeIncrementIfNeeded({bool force = false}) async {
+    final v = _vec;
+    if (v == null || _isBaking || !mounted) return;
+    if (_currentStitch < _bakedUpTo) {
+      _resetBakedLayer();
+      return;
+    }
+    final int delta = _currentStitch - _bakedUpTo;
+    if (!force && delta < 420) return;
+    if (delta <= 0) return;
+
+    _isBaking = true;
+    final int session = _bakeSession;
+    final int targetIdx = _currentStitch;
+    final int fromIdx = _bakedUpTo;
+    final ui.Image? prevImg = _bakedLayer;
+
+    try {
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, _bakedImgW.toDouble(), _bakedImgH.toDouble()));
+      if (prevImg != null && fromIdx > 0) {
+        canvas.drawImage(prevImg, Offset.zero, Paint());
+      } else {
+        canvas.drawRect(
+          Rect.fromLTWH(0, 0, _bakedImgW.toDouble(), _bakedImgH.toDouble()),
+          Paint()..color = Colors.white,
+        );
+      }
+
+      TarikUnifiedCanvasRenderer.paintDesign(
+        canvas: canvas,
+        data: v,
+        scale: _bakedScale,
+        offX: _bakedOffX,
+        offY: _bakedOffY,
+        is3D: true,
+        decorTheme: 0,
+        startIndex: fromIdx,
+        stitchLimit: targetIdx,
+        fastSimMode: true,
+      );
+
+      final pic = recorder.endRecording();
+      final ui.Image nextImg = await pic.toImage(_bakedImgW, _bakedImgH);
+      pic.dispose();
+
+      if (!mounted || session != _bakeSession) {
+        nextImg.dispose();
+        return;
+      }
+      final old = _bakedLayer;
+      setState(() {
+        _bakedLayer = nextImg;
+        _bakedUpTo = targetIdx;
+      });
+      old?.dispose();
+    } catch (_) {
+    } finally {
+      _isBaking = false;
+    }
+  }
+
+  /// حساب إزاحة الكاميرا لتوسيط الإبرة تلقائياً في منتصف الشاشة أثناء المحاكاة
+  void _updateAutoCenterPan({bool instant = false}) {
+    if (!_autoFollowNeedle || _userTouching || _vec == null || _simSize == Size.zero) return;
+    if (_simZoom <= 1.04) {
+      if (_simPan.distance > 0.5) {
+        _simPan = instant ? Offset.zero : Offset.lerp(_simPan, Offset.zero, 0.25)!;
+      }
+      return;
+    }
+    final v = _vec!;
+    final int idx = (_currentStitch - 1).clamp(0, v.stX.length - 1);
+    final double rawW = max(1.0, v.maxX - v.minX);
+    final double rawH = max(1.0, v.maxY - v.minY);
+    const double pad = 22.0;
+    final double baseScale = min((_simSize.width - pad * 2) / rawW, (_simSize.height - pad * 2) / rawH);
+    final double baseOffX = (_simSize.width - rawW * baseScale) * 0.5 - v.minX * baseScale;
+    final double baseOffY = (_simSize.height - rawH * baseScale) * 0.5 - v.minY * baseScale;
+    final double cx = _simSize.width * 0.5;
+    final double cy = _simSize.height * 0.5;
+
+    // موقع الإبرة عند pan == 0:
+    final double nxNoPan = (v.stX[idx] * baseScale + baseOffX - cx) * _simZoom + cx;
+    final double nyNoPan = (v.stY[idx] * baseScale + baseOffY - cy) * _simZoom + cy;
+    final Offset targetPan = Offset(cx - nxNoPan, cy - nyNoPan);
+
+    _simPan = instant ? targetPan : Offset.lerp(_simPan, targetPan, 0.22)!;
   }
 
   List<int> _computeColorStarts(VectorDesignData v) {
@@ -3676,14 +4083,27 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
     return idx;
   }
 
+  void _seekToStitch(int target) {
+    if (_vec == null) return;
+    final int clamped = target.clamp(0, _vec!.stX.length);
+    if (clamped < _bakedUpTo) {
+      _resetBakedLayer();
+    }
+    setState(() {
+      _currentStitch = clamped;
+      _updateAutoCenterPan(instant: true);
+    });
+    _bakeIncrementIfNeeded(force: true);
+  }
+
   void _jumpToNextColor() {
     if (_vec == null || _colorStarts.isEmpty) return;
     final int cur = _activeColorBlock;
     if (cur + 1 < _colorStarts.length) {
-      setState(() => _currentStitch = _colorStarts[cur + 1]);
+      _seekToStitch(_colorStarts[cur + 1]);
     } else {
       _pausePlayback();
-      setState(() => _currentStitch = _vec!.stX.length);
+      _seekToStitch(_vec!.stX.length);
     }
   }
 
@@ -3691,19 +4111,21 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
     if (_vec == null || _colorStarts.isEmpty) return;
     final int cur = _activeColorBlock;
     if (_currentStitch > _colorStarts[cur] + 2) {
-      setState(() => _currentStitch = _colorStarts[cur]);
+      _seekToStitch(_colorStarts[cur]);
     } else if (cur > 0) {
-      setState(() => _currentStitch = _colorStarts[cur - 1]);
+      _seekToStitch(_colorStarts[cur - 1]);
     } else {
-      setState(() => _currentStitch = 0);
+      _seekToStitch(0);
     }
   }
 
   void _stopPlayback() {
     _timer?.cancel();
+    _resetBakedLayer();
     setState(() {
       _playing = false;
       _currentStitch = 0;
+      _simPan = Offset.zero;
     });
   }
 
@@ -3713,6 +4135,7 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
       await TarikProPbrSprites.ensureLoaded();
     }
     if (!mounted) return;
+    if (v != null) _initBakedGeometry(v);
     setState(() {
       _vec = v;
       _colorStarts = v != null ? _computeColorStarts(v) : [0];
@@ -3729,11 +4152,12 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
     if (_vec == null) return;
     final total = _vec!.stX.length;
     if (_currentStitch >= total - 1) {
+      _resetBakedLayer();
       _currentStitch = 0;
     }
     _timer?.cancel();
     setState(() => _playing = true);
-    _timer = Timer.periodic(const Duration(milliseconds: 35), (_) {
+    _timer = Timer.periodic(const Duration(milliseconds: 33), (_) {
       if (!mounted || _vec == null) return;
       final step = _speedSteps[_speedIndex];
       final next = _currentStitch + step;
@@ -3741,10 +4165,16 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
         setState(() {
           _currentStitch = total;
           _playing = false;
+          _updateAutoCenterPan();
         });
         _timer?.cancel();
+        _bakeIncrementIfNeeded(force: true);
       } else {
-        setState(() => _currentStitch = next);
+        setState(() {
+          _currentStitch = next;
+          _updateAutoCenterPan();
+        });
+        _bakeIncrementIfNeeded();
       }
     });
   }
@@ -3765,7 +4195,43 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
       backgroundColor: const Color(0xFF0E131D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0E131D),
-        title: Text(tr('محاكاة سير الغرز (3D)', 'Stitch Simulator (3D)'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 16)),
+        title: Text(tr('محاكاة سير الغرز (3D)', 'Stitch Simulator (3D)'), style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 15.5)),
+        actions: [
+          TextButton.icon(
+            onPressed: () {
+              setState(() {
+                _autoFollowNeedle = !_autoFollowNeedle;
+                if (_autoFollowNeedle) _updateAutoCenterPan(instant: true);
+              });
+            },
+            style: TextButton.styleFrom(
+              backgroundColor: _autoFollowNeedle ? Colors.tealAccent.withOpacity(0.18) : Colors.white10,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              minimumSize: Size.zero,
+            ),
+            icon: Icon(
+              Icons.my_location,
+              size: 15,
+              color: _autoFollowNeedle ? Colors.tealAccent : Colors.white54,
+            ),
+            label: Text(
+              tr('توسيط', 'Follow'),
+              style: TextStyle(
+                color: _autoFollowNeedle ? Colors.tealAccent : Colors.white54,
+                fontSize: 11.5,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          IconButton(
+            onPressed: () => setState(() {
+              _simZoom = 1.0;
+              _simPan = Offset.zero;
+            }),
+            icon: const Icon(Icons.fit_screen, color: Colors.white70, size: 20),
+            tooltip: tr('إعادة ضبط التكبير', 'Reset Zoom'),
+          ),
+        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
@@ -3792,17 +4258,19 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                                     _simZoom = 1.0;
                                     _simPan = Offset.zero;
                                   } else {
-                                    _simZoom = 4.0;
+                                    _simZoom = 3.5;
+                                    _updateAutoCenterPan(instant: true);
                                   }
                                 }),
                                 onScaleStart: (d) {
+                                  _userTouching = true;
                                   _simStartZoom = _simZoom;
                                   _simStartPan = _simPan;
                                   _simStartFocal = d.localFocalPoint;
                                 },
                                 onScaleUpdate: (d) {
                                   if (_simSize == Size.zero) return;
-                                  final nextZ = (_simStartZoom * d.scale).clamp(0.6, 24.0);
+                                  final nextZ = (_simStartZoom * d.scale).clamp(0.6, 20.0);
                                   final ctr = Offset(_simSize.width * 0.5, _simSize.height * 0.5);
                                   final foc = _simStartFocal - ctr;
                                   final ratio = nextZ / _simStartZoom;
@@ -3811,12 +4279,18 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                                     _simPan = (_simStartPan - foc) * ratio + foc + (d.localFocalPoint - _simStartFocal);
                                   });
                                 },
+                                onScaleEnd: (_) {
+                                  _userTouching = false;
+                                },
                                 child: CustomPaint(
-                                  painter: _VectorStitchPainter(
+                                  painter: _IncrementalSimPainter(
                                     data: _vec!,
-                                    limit: _currentStitch,
-                                    showNeedle: true,
-                                    is3D: true,
+                                    currentStitch: _currentStitch,
+                                    bakedLayer: _bakedLayer,
+                                    bakedUpTo: _bakedUpTo,
+                                    bakedScale: _bakedScale,
+                                    bakedOffX: _bakedOffX,
+                                    bakedOffY: _bakedOffY,
                                     zoomFactor: _simZoom,
                                     panOffset: _simPan,
                                   ),
@@ -3857,25 +4331,28 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                             activeColor: const Color(0xFFD4AF37),
                             inactiveColor: Colors.white24,
                             onChanged: (v) {
-                              setState(() => _currentStitch = v.round());
+                              final int nextSt = v.round();
+                              if (nextSt < _bakedUpTo) _resetBakedLayer();
+                              setState(() {
+                                _currentStitch = nextSt;
+                                _updateAutoCenterPan(instant: true);
+                              });
                             },
+                            onChangeEnd: (_) => _bakeIncrementIfNeeded(force: true),
                           ),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              // ترجيع لون
                               IconButton(
                                 onPressed: _jumpToPrevColor,
                                 icon: const Icon(Icons.skip_previous, color: Color(0xFF56CCF2), size: 26),
                                 tooltip: tr('اللون السابق', 'Prev Color'),
                               ),
-                              // ستوب (إيقاف وإعادة للصفر)
                               IconButton(
                                 onPressed: _stopPlayback,
                                 icon: const Icon(Icons.stop_circle_outlined, color: Colors.redAccent, size: 26),
                                 tooltip: tr('ستوب', 'Stop'),
                               ),
-                              // تشغيل / إيقاف مؤقت
                               ElevatedButton.icon(
                                 onPressed: _playing ? _pausePlayback : _startPlayback,
                                 icon: Icon(_playing ? Icons.pause : Icons.play_arrow, size: 22),
@@ -3889,13 +4366,11 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                                 ),
                               ),
-                              // تقديم لون
                               IconButton(
                                 onPressed: _jumpToNextColor,
                                 icon: const Icon(Icons.skip_next, color: Color(0xFF56CCF2), size: 26),
                                 tooltip: tr('اللون التالي', 'Next Color'),
                               ),
-                              // التحكم بالسرعة
                               Container(
                                 decoration: BoxDecoration(
                                   color: Colors.white10,
@@ -3935,6 +4410,123 @@ class _StitchSimulatorScreenState extends State<StitchSimulatorScreen> {
                   ],
                 ),
     );
+  }
+}
+
+/// رسّام المحاكاة التراكمي فائق السرعة (60 FPS):
+/// يعرض الطبقة المحفوظة (0..bakedUpTo) كصورة GPU واحدة + الغرز الجديدة فقط (bakedUpTo..currentStitch) بنصف الدقة
+class _IncrementalSimPainter extends CustomPainter {
+  final VectorDesignData data;
+  final int currentStitch;
+  final ui.Image? bakedLayer;
+  final int bakedUpTo;
+  final double bakedScale;
+  final double bakedOffX;
+  final double bakedOffY;
+  final double zoomFactor;
+  final Offset panOffset;
+
+  const _IncrementalSimPainter({
+    required this.data,
+    required this.currentStitch,
+    required this.bakedLayer,
+    required this.bakedUpTo,
+    required this.bakedScale,
+    required this.bakedOffX,
+    required this.bakedOffY,
+    required this.zoomFactor,
+    required this.panOffset,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (!data.hasBounds || data.stX.length < 2) return;
+    final double rawW = max(1.0, data.maxX - data.minX);
+    final double rawH = max(1.0, data.maxY - data.minY);
+
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+
+    const double pad = 22.0;
+    final double baseScale = min((size.width - pad * 2) / rawW, (size.height - pad * 2) / rawH);
+    final double scale = baseScale * zoomFactor;
+    final double baseOffX = (size.width - rawW * baseScale) * 0.5 - data.minX * baseScale;
+    final double baseOffY = (size.height - rawH * baseScale) * 0.5 - data.minY * baseScale;
+    final double cx = size.width * 0.5;
+    final double cy = size.height * 0.5;
+    final double offX = (baseOffX - cx) * zoomFactor + cx + panOffset.dx;
+    final double offY = (baseOffY - cy) * zoomFactor + cy + panOffset.dy;
+
+    final int count = currentStitch.clamp(0, data.stX.length);
+    int deltaStart = 0;
+
+    // 1) رسم الطبقة التراكمية المحفوظة في خطوة GPU واحدة
+    if (bakedLayer != null && bakedUpTo > 0 && bakedUpTo <= count && bakedScale > 0.001) {
+      final double relS = scale / bakedScale;
+      final double dstLeft = offX - bakedOffX * relS;
+      final double dstTop = offY - bakedOffY * relS;
+      final Rect dstRect = Rect.fromLTWH(
+        dstLeft,
+        dstTop,
+        bakedLayer!.width * relS,
+        bakedLayer!.height * relS,
+      );
+      canvas.drawImageRect(
+        bakedLayer!,
+        Rect.fromLTWH(0, 0, bakedLayer!.width.toDouble(), bakedLayer!.height.toDouble()),
+        dstRect,
+        Paint()..filterQuality = FilterQuality.low,
+      );
+      deltaStart = bakedUpTo;
+    }
+
+    // 2) رسم الغرز الجديدة فقط منذ آخر لقطة تراكمية (سريع جداً < 450 غرزة)
+    if (count > deltaStart && count >= 2) {
+      TarikUnifiedCanvasRenderer.paintDesign(
+        canvas: canvas,
+        data: data,
+        scale: scale,
+        offX: offX,
+        offY: offY,
+        is3D: true,
+        decorTheme: 0,
+        startIndex: deltaStart,
+        stitchLimit: count,
+        fastSimMode: true,
+        visibleRect: Offset.zero & size,
+      );
+    }
+
+    // 3) رسم مؤشر الإبرة (+) بحجم ثابت وواضح
+    if (count > 0) {
+      final double lastX = data.stX[count - 1] * scale + offX;
+      final double lastY = data.stY[count - 1] * scale + offY;
+      const double arm = 10.0;
+      canvas.drawCircle(Offset(lastX, lastY), 5.0, Paint()..color = Colors.redAccent.withOpacity(0.25));
+      final crossShadow = Paint()
+        ..color = Colors.white
+        ..strokeWidth = 3.4
+        ..strokeCap = StrokeCap.round;
+      final crossPaint = Paint()
+        ..color = Colors.redAccent
+        ..strokeWidth = 1.9
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(Offset(lastX - arm, lastY), Offset(lastX + arm, lastY), crossShadow);
+      canvas.drawLine(Offset(lastX, lastY - arm), Offset(lastX, lastY + arm), crossShadow);
+      canvas.drawLine(Offset(lastX - arm, lastY), Offset(lastX + arm, lastY), crossPaint);
+      canvas.drawLine(Offset(lastX, lastY - arm), Offset(lastX, lastY + arm), crossPaint);
+    }
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _IncrementalSimPainter oldDelegate) {
+    return oldDelegate.currentStitch != currentStitch ||
+        oldDelegate.bakedLayer != bakedLayer ||
+        oldDelegate.bakedUpTo != bakedUpTo ||
+        oldDelegate.zoomFactor != zoomFactor ||
+        oldDelegate.panOffset != panOffset;
   }
 }
 
@@ -4305,7 +4897,7 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
 
     if (widget.design != null) {
       final origExt = widget.design!.filePath.split('.').last.toUpperCase();
-      if (UniversalExporter.supportedFormats.any((f) => f['ext'] == origExt)) {
+      if (TarikProUniversalExporter.supportedFormats.any((f) => f['ext'] == origExt)) {
         targetExt = origExt;
       }
       baseName = '${widget.design!.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_edit';
@@ -4317,8 +4909,8 @@ class _DesignEditorScreenState extends State<DesignEditorScreen> {
     setState(() => _saving = true);
     try {
       String outPath = joinCleanPath(outDir, '$baseName.$targetExt');
-      String? res = await TarikProDstEncoder.exportToFile(_edited!, outPath, targetExt, baseName: baseName);
-      res ??= await TarikProDstEncoder.exportToFile(
+      String? res = await TarikProUniversalExporter.exportVector(_edited!, outPath, targetExt, baseName: baseName);
+      res ??= await TarikProUniversalExporter.exportVector(
         _edited!,
         '/storage/emulated/0/Download/$baseName.$targetExt',
         targetExt,
@@ -5894,6 +6486,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
   @override
   void initState() {
     super.initState();
+    activeHeavyScreensCount++;
     _initFontsAndGenerate();
   }
 
@@ -5958,6 +6551,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
 
   @override
   void dispose() {
+    activeHeavyScreensCount = max(0, activeHeavyScreensCount - 1);
     _liveTypeTimer?.cancel();
     _textCtrl.dispose();
     _widthCmCtrl.dispose();
@@ -6071,7 +6665,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
           ? joinCleanPath((await getTemporaryDirectory()).path, '$safeName.$ext')
           : joinCleanPath('/storage/emulated/0/Download', '$safeName.$ext');
 
-      final res = await TarikProDstEncoder.exportToFile(
+      final res = await TarikProUniversalExporter.exportVector(
         _vec!,
         outPath,
         ext,
@@ -6743,7 +7337,7 @@ class _TextToEmbroideryScreenState extends State<TextToEmbroideryScreen> {
                               value: _exportFormat,
                               dropdownColor: const Color(0xFF18202E),
                               style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 12),
-                              items: UniversalExporter.supportedFormats
+                              items: TarikProUniversalExporter.supportedFormats
                                   .map((f) => DropdownMenuItem<String>(
                                         value: f['ext'],
                                         child: Text('.${f['ext']}'),
@@ -7500,8 +8094,8 @@ class _ObjectEditorScreenState extends State<ObjectEditorScreen> {
         baseName = '${widget.defaultBaseName}_${DateTime.now().millisecondsSinceEpoch}';
       }
 
-      String? res = await TarikProDstEncoder.exportToFile(_composed!, joinCleanPath(outDir, '$baseName.$targetExt'), targetExt, baseName: baseName);
-      res ??= await TarikProDstEncoder.exportToFile(_composed!, '/storage/emulated/0/Download/$baseName.$targetExt', targetExt, baseName: baseName);
+      String? res = await TarikProUniversalExporter.exportVector(_composed!, joinCleanPath(outDir, '$baseName.$targetExt'), targetExt, baseName: baseName);
+      res ??= await TarikProUniversalExporter.exportVector(_composed!, '/storage/emulated/0/Download/$baseName.$targetExt', targetExt, baseName: baseName);
 
       if (res != null && await File(res).exists()) {
         await DesignCacheManager.invalidate(res);
@@ -8762,4 +9356,527 @@ class _EmbroideryCalculatorScreenState extends State<EmbroideryCalculatorScreen>
     );
   }
 }
-// Tarik emb - Pro v6.6
+// Tarik emb - Pro v6.8
+
+
+/// نافذة ضبط أجهزة الماكينة (8 قنوات A – H) للمعاينة ثلاثية الأبعاد وللتصدير والتحويل (DST ↔ DHA ↔ DHE)
+Future<bool?> showMachineDeviceConfigSheet(
+  BuildContext context, {
+  int designColorsCount = 1,
+  bool isExportConfirm = false,
+  String? targetFormatExt,
+}) {
+  return showModalBottomSheet<bool>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: const Color(0xFF141B27),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    ),
+    builder: (ctx) => _MachineDeviceConfigSheet(
+      designColorsCount: designColorsCount,
+      isExportConfirm: isExportConfirm,
+      targetFormatExt: targetFormatExt,
+    ),
+  );
+}
+
+class _MachineDeviceConfigSheet extends StatefulWidget {
+  final int designColorsCount;
+  final bool isExportConfirm;
+  final String? targetFormatExt;
+
+  const _MachineDeviceConfigSheet({
+    required this.designColorsCount,
+    required this.isExportConfirm,
+    this.targetFormatExt,
+  });
+
+  @override
+  State<_MachineDeviceConfigSheet> createState() => _MachineDeviceConfigSheetState();
+}
+
+class _MachineDeviceConfigSheetState extends State<_MachineDeviceConfigSheet> {
+  late TarikMachineDeviceProfile _draft;
+
+  static const List<Color> _finishDotColors = [
+    Color(0xFFF3ECE0), // 0: لؤلؤي
+    Color(0xFFE8B42A), // 1: ذهبي
+    Color(0xFFC6CEDB), // 2: فضي
+    Color(0xFFB06C30), // 3: برونزي
+    Color(0xFF14A8C0), // 4: كريستال / ملوّن
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _draft = TarikMachineDeviceManager.current.copyWith();
+  }
+
+  void _selectPreset(String presetId) {
+    setState(() {
+      _draft = TarikMachineDeviceProfile.preset(
+        presetId,
+        applyToAllColors: _draft.applyToAllColors,
+      );
+    });
+  }
+
+  void _updateChannel(int idx, TarikDeviceChannelConfig nextCh, {bool touchedFinish = false}) {
+    final nextList = _draft.channels.map((c) => c.copyWith()).toList();
+    nextList[idx] = nextCh;
+    setState(() {
+      _draft = _draft.copyWith(
+        presetId: 'custom',
+        channels: nextList,
+        useCustomFinishes: _draft.useCustomFinishes || touchedFinish,
+      );
+    });
+  }
+
+  String _beadSizeLabel(int s) {
+    switch (s) {
+      case 0: return '2.5×2.5';
+      case 1: return '4×4';
+      case 2: return '5×2.5';
+      case 3: return '6×2.5';
+      default: return '2.5×2.5';
+    }
+  }
+
+  String _seqSizeLabel(int s) => s == 1 ? '5 mm' : '3 mm';
+
+  String _finishName(int f) {
+    switch (f) {
+      case 0: return tr('لؤلؤي', 'Pearl');
+      case 1: return tr('ذهبي', 'Gold');
+      case 2: return tr('فضي', 'Silver');
+      case 3: return tr('برونزي', 'Bronze');
+      case 4: return tr('ملوّن', 'Color');
+      default: return tr('لؤلؤي', 'Pearl');
+    }
+  }
+
+  String _ruleShortName(String r) {
+    switch (r) {
+      case '4b2s': return '4B+2S';
+      case '2b2s': return '2B+2S';
+      case '8b': return '8B';
+      case 'none': return tr('خيط', 'Off');
+      default: return tr('قياسي', 'Std');
+    }
+  }
+
+  Future<void> _saveAndClose({required bool result}) async {
+    await TarikMachineDeviceManager.update(_draft);
+    if (mounted) Navigator.pop(context, result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String ext = (widget.targetFormatExt ?? 'DHE').toUpperCase();
+    final bool isFullDahao = ext == 'DHE' || ext == 'DHA';
+    final int beadCount = _draft.channels.where((c) => c.kind == 2 && c.visible).length;
+    final int seqCount = _draft.channels.where((c) => c.kind == 1 && c.visible).length;
+
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 42,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 10),
+                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4)),
+              ),
+              Row(
+                children: [
+                  const Icon(Icons.settings_suggest_outlined, color: Color(0xFFD4AF37), size: 22),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.isExportConfirm
+                              ? '${tr('تأكيد أجهزة الماكينة قبل التصدير إلى', 'Confirm Machine Devices before')} .$ext'
+                              : tr('ضبط أجهزة الماكينة (A – H)', 'Machine Devices Setup (A – H)'),
+                          style: const TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold, fontSize: 15),
+                        ),
+                        Text(
+                          tr(
+                            'المفعّل حالياً: $beadCount خرز • $seqCount ترتر  (المعاينة لا تعدّل الملف الأصلي)',
+                            'Active: $beadCount Beads • $seqCount Sequins  (Preview never alters original file)',
+                          ),
+                          style: const TextStyle(color: Colors.white60, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              // القوالب الجاهزة بضغطة واحدة (Presets)
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final pr in [
+                      ('emcad_std', tr('داهاو قياسي', 'emCAD Std')),
+                      ('4b2s', tr('4 خرز + 2 ترتر', '4B + 2S')),
+                      ('2b2s', tr('2 خرز + 2 ترتر', '2B + 2S')),
+                      ('8b', tr('8 خرز فقط', '8 Beads')),
+                    ])
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 3),
+                        child: ChoiceChip(
+                          label: Text(
+                            pr.$2,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.bold,
+                              color: _draft.presetId == pr.$1 ? Colors.black : Colors.white,
+                            ),
+                          ),
+                          selected: _draft.presetId == pr.$1,
+                          selectedColor: const Color(0xFFD4AF37),
+                          backgroundColor: Colors.white10,
+                          visualDensity: VisualDensity.compact,
+                          onSelected: (_) => _selectPreset(pr.$1),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              // جدول القنوات الثماني (A - H)
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (int i = 0; i < 8; i++) _buildChannelRow(i, _draft.channels[i]),
+                    const SizedBox(height: 8),
+                    // نطاق التطبيق على الألوان (مفعّل على كل الألوان افتراضياً لتجنب خطأ نسيان بقية الألوان!)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      tr('تطبيق القاعدة على كل الألوان (موصى به)', 'Apply Rule to All Colors (Recommended)'),
+                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+                                    ),
+                                    Text(
+                                      tr(
+                                        'يمنع ضياع الخرز في اللون الثاني وما بعده عند التحويل',
+                                        'Prevents losing beads on 2nd+ colors during conversion',
+                                      ),
+                                      style: const TextStyle(color: Colors.white54, fontSize: 10.5),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Switch(
+                                value: _draft.applyToAllColors,
+                                activeColor: const Color(0xFFD4AF37),
+                                onChanged: (v) => setState(() => _draft = _draft.copyWith(applyToAllColors: v)),
+                              ),
+                            ],
+                          ),
+                          if (!_draft.applyToAllColors) ...[
+                            const Divider(color: Colors.white12, height: 14),
+                            Text(
+                              tr('تخصيص لكل لون/إبرة (اضغط لتبديل القاعدة):', 'Per-Color Rule (tap to cycle):'),
+                              style: const TextStyle(color: Color(0xFF56CCF2), fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: List.generate(max(4, min(12, widget.designColorsCount)), (cIdx) {
+                                final curRule = _draft.perColorRule[cIdx] ?? _draft.presetId;
+                                const cycle = ['emcad_std', '4b2s', '2b2s', '8b', 'none'];
+                                return InkWell(
+                                  onTap: () {
+                                    final nextIdx = (cycle.indexOf(curRule) + 1) % cycle.length;
+                                    final nextMap = Map<int, String>.from(_draft.perColorRule);
+                                    nextMap[cIdx] = cycle[nextIdx];
+                                    setState(() => _draft = _draft.copyWith(perColorRule: nextMap));
+                                  },
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white10,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: const Color(0xFF56CCF2).withOpacity(0.45)),
+                                    ),
+                                    child: Text(
+                                      '#${cIdx + 1}: ${_ruleShortName(curRule)}',
+                                      style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                );
+                              }),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (widget.isExportConfirm) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: (isFullDahao ? Colors.greenAccent : Colors.orangeAccent).withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: (isFullDahao ? Colors.greenAccent : Colors.orangeAccent).withOpacity(0.5),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              isFullDahao ? Icons.verified_outlined : Icons.warning_amber_rounded,
+                              color: isFullDahao ? Colors.greenAccent : Colors.orangeAccent,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                isFullDahao
+                                    ? tr(
+                                        'صيغة .$ext تحفظ جميع قنوات الخرز والترتر (A–H) مفصولة بالكامل ومشفّرة للماكينة.',
+                                        '.$ext preserves all 8 Bead & Sequin channels (A–H) separated and machine-encrypted.',
+                                      )
+                                    : tr(
+                                        'تنبيه: صيغة .$ext قد لا تحفظ قنوات الخرز الإضافية؛ يُفضّل التصدير بصيغة .DHE.',
+                                        'Warning: .$ext may drop extra bead channels; .DHE is recommended.',
+                                      ),
+                                style: const TextStyle(color: Colors.white70, fontSize: 11.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Colors.white24),
+                        padding: const EdgeInsets.symmetric(vertical: 11),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: Text(tr('إلغاء', 'Cancel'), style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 2,
+                    child: ElevatedButton.icon(
+                      onPressed: () => _saveAndClose(result: true),
+                      icon: Icon(widget.isExportConfirm ? Icons.check_circle_outline : Icons.save_outlined, size: 19),
+                      label: Text(
+                        widget.isExportConfirm
+                            ? '${tr('اعتماد وتصدير', 'Confirm & Export')} .$ext'
+                            : tr('حفظ وتطبيق على المعاينة', 'Save & Apply to Preview'),
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFD4AF37),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 11),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChannelRow(int idx, TarikDeviceChannelConfig cfg) {
+    final bool active = cfg.kind != 0 && cfg.visible;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: active ? const Color(0xFF1D2638) : Colors.black26,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(
+          color: cfg.kind == 2
+              ? const Color(0xFFD4AF37).withOpacity(active ? 0.55 : 0.2)
+              : (cfg.kind == 1 ? const Color(0xFF56CCF2).withOpacity(active ? 0.55 : 0.2) : Colors.white10),
+        ),
+      ),
+      child: Row(
+        children: [
+          // حرف القناة (A .. H)
+          Container(
+            width: 28,
+            height: 28,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: cfg.kind == 2
+                  ? const Color(0xFFD4AF37)
+                  : (cfg.kind == 1 ? const Color(0xFF56CCF2) : Colors.white12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              cfg.letter,
+              style: TextStyle(
+                color: cfg.kind == 0 ? Colors.white54 : Colors.black,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          const SizedBox(width: 7),
+          // النوع: خرز / ترتر / إيقاف
+          InkWell(
+            onTap: () {
+              final nextKind = (cfg.kind + 1) % 3;
+              final nextSize = nextKind == 1 ? cfg.sizeCode.clamp(0, 1) : cfg.sizeCode.clamp(0, 3);
+              _updateChannel(idx, cfg.copyWith(kind: nextKind, sizeCode: nextSize));
+            },
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              width: 58,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.black38,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Text(
+                cfg.kind == 2
+                    ? tr('خرز', 'Bead')
+                    : (cfg.kind == 1 ? tr('ترتر', 'Seq') : tr('معطّل', 'Off')),
+                style: TextStyle(
+                  color: cfg.kind == 2
+                      ? const Color(0xFFD4AF37)
+                      : (cfg.kind == 1 ? const Color(0xFF56CCF2) : Colors.white38),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 11.5,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          // المقاس والشكل
+          Expanded(
+            child: cfg.kind == 0
+                ? Text(
+                    tr('قناة خيط عادي', 'Disabled / Thread'),
+                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                  )
+                : InkWell(
+                    onTap: () {
+                      final int maxOpt = cfg.kind == 2 ? 4 : 2;
+                      _updateChannel(idx, cfg.copyWith(sizeCode: (cfg.sizeCode + 1) % maxOpt));
+                    },
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            cfg.kind == 2 ? _beadSizeLabel(cfg.sizeCode) : _seqSizeLabel(cfg.sizeCode),
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11.5),
+                          ),
+                          const Icon(Icons.swap_horiz, size: 14, color: Colors.white54),
+                        ],
+                      ),
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 6),
+          // الخامة/اللون في العرض 3D
+          if (cfg.kind != 0)
+            InkWell(
+              onTap: () => _updateChannel(
+                idx,
+                cfg.copyWith(finish: (cfg.finish + 1) % _finishDotColors.length),
+                touchedFinish: true,
+              ),
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 14,
+                      height: 14,
+                      decoration: BoxDecoration(
+                        color: _finishDotColors[cfg.finish % _finishDotColors.length],
+                        shape: cfg.kind == 1 ? BoxShape.circle : BoxShape.rectangle,
+                        borderRadius: cfg.kind == 1 ? null : BorderRadius.circular(3),
+                        border: Border.all(color: Colors.white60, width: 1),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _finishName(cfg.finish),
+                      style: const TextStyle(color: Colors.white70, fontSize: 10.5),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          // إظهار / إخفاء القناة في المعاينة
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+            padding: EdgeInsets.zero,
+            onPressed: cfg.kind == 0
+                ? null
+                : () => _updateChannel(idx, cfg.copyWith(visible: !cfg.visible)),
+            icon: Icon(
+              cfg.visible ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+              size: 17,
+              color: cfg.kind == 0 ? Colors.white12 : (cfg.visible ? Colors.greenAccent : Colors.white38),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
